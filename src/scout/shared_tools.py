@@ -179,28 +179,32 @@ SHARED: tuple[SharedTool, ...] = (
         "Read the newest iMessage and SMS messages across all conversations (newest first, sent "
         "and received): time, who, conversation, text. count 1-50 (default 10). Read-only.",
         _obj({"count": _INT}),
-        lambda a: messages_mac.recent(a.get("count")),
+        lambda a: messages_mac.recent(a.get("count"), view=privacy.current().messages_view),
     ),
     SharedTool(
         "messages_from",
         "Read the texts one person sent the user (newest first). contact is a name from Contacts, "
         "a phone number or an email address. count 1-50 (default 10); days back 1-365 (default 30).",
         _obj({"contact": _STR, "count": _INT, "days": _INT}, ["contact"]),
-        lambda a: messages_mac.from_contact(a.get("contact"), a.get("count"), a.get("days")),
+        lambda a: messages_mac.from_contact(
+            a.get("contact"), a.get("count"), a.get("days"), view=privacy.current().messages_view
+        ),
     ),
     SharedTool(
         "messages_unread",
         "List unread incoming iMessage and SMS messages (newest first). count 1-50 (default 20); "
         "days back 1-365 (default 30).",
         _obj({"count": _INT, "days": _INT}),
-        lambda a: messages_mac.unread(a.get("count"), a.get("days")),
+        lambda a: messages_mac.unread(a.get("count"), a.get("days"), view=privacy.current().messages_view),
     ),
     SharedTool(
         "messages_search",
         "Find iMessage and SMS messages whose text contains text (newest first, sent and "
         "received). count 1-50 (default 10); days back 1-365 (default 90).",
         _obj({"text": _STR, "count": _INT, "days": _INT}, ["text"]),
-        lambda a: messages_mac.search(a.get("text"), a.get("count"), a.get("days")),
+        lambda a: messages_mac.search(
+            a.get("text"), a.get("count"), a.get("days"), view=privacy.current().messages_view
+        ),
     ),
 )
 
