@@ -289,6 +289,23 @@ async def from_contact(
     return head + await _show(data, f"messages from {who} in the last {d} days", view)
 
 
+async def chat(
+    chat_name: Any,
+    count: Any = None,
+    days: Any = None,
+    helper: Helper | None = None,
+    view: View | None = None,
+) -> str:
+    """One conversation (both sides), newest first."""
+    _enabled()
+    c = _text(chat_name, "chat", 200)
+    d = _days(days, 30)
+    data = await request("chat", {"chat": c, "limit": _count(count, 20), "since_days": d}, helper)
+    label = str(data.get("chat") or c)
+    what = f"messages in the conversation with {label} in the last {d} days"
+    return await _show({**data, "conversation": label}, what, view)
+
+
 async def search(
     text: Any, count: Any = None, days: Any = None, helper: Helper | None = None, view: View | None = None
 ) -> str:

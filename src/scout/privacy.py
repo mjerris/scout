@@ -18,6 +18,7 @@ Local tiers (plain code and the local model) see everything: nothing leaves the 
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 from . import calendar_mac, mail_mac
 from .mac import ToolError
 from .memory import Memory
+from . import summary
 from .summary import Model, Summaries
 
 log = logging.getLogger(__name__)
@@ -32,10 +34,23 @@ log = logging.getLogger(__name__)
 MODES = ("strict", "balanced", "open")
 GIST_LIMIT = 10  # messages in one listing that get a summary; the rest show subjects only
 PREFETCH_BUDGET_S = 2.5  # how long the request context waits for summaries
-MEMORIES = {"strict": 0, "balanced": 5, "open": 10}  # relevant memories given to Claude
+MEMORIES = {
+    "strict": 2,
+    "balanced": 5,
+    "open": 10,
+}  # relevant memories given to Claude (strict: need-to-know)
+
+# Strict mode shows a short local topic label instead of each subject: enough to tell
+# messages apart ("the UPS one"), not the subject line itself.
+LABEL_SYSTEM = (
+    "Give a topic label for an email subject: one to three plain words such as 'delivery notice', "
+    "'bill', 'personal note', 'work meeting', 'newsletter', 'appointment', 'receipt'. No names, "
+    "numbers, places or other details from the subject. Reply with the label only."
+)
+_LABEL = re.compile(r"[^a-z ]+")
 
 STRICT_MAIL = (
-    "[Strict privacy mode: Claude sees senders and subjects only. Email text stays on this Mac; "
+    "[Strict privacy mode: Claude sees senders and topic labels only. Email text and subjects stay on this Mac; "
     "the user can ask Scout directly, e.g. 'what did the email from Sam say', for a summary "
     "read out by the local model.]"
 )
@@ -59,6 +74,7 @@ class Policy:
         self.mode = mode
         self.summaries = Summaries(model)
         self._bg: set[asyncio.Task[Any]] = set()  # summaries still running after a deadline
+        self._labels: dict[tuple[Any, ...], str] = {}
 
     @property
     def shares_private_text(self) -> bool:
@@ -90,7 +106,7 @@ class Policy:
         if self.mode == "open" or not data.get("messages"):
             return mail_mac.format_list(data, what)
         if self.mode == "strict":
-            return STRICT_MAIL + "\n" + mail_mac.format_list(data, what)
+            return await self._strict_list(data, what)
         if not self.summaries.available:
             return _NO_MODEL + "\n" + mail_mac.format_list(data, what)
         gists = await self._gists(data["messages"][:GIST_LIMIT], run, budget_s)
@@ -137,9 +153,10 @@ class Policy:
         if self.mode == "open":
             return await mail_mac.read(message_id, run)
         m = await mail_mac.message(message_id, run)
-        head = f"{mail_mac._UNTRUSTED}\n{mail_mac.header(m)}\n\n"
         if self.mode == "strict":
-            return head + STRICT_MAIL
+            shown = {**m, "subject": f"[{await self.label(m)}]"}
+            return f"{mail_mac._UNTRUSTED}\n{mail_mac.header(shown)}\n\n" + STRICT_MAIL
+        head = f"{mail_mac._UNTRUSTED}\n{mail_mac.header(m)}\n\n"
         if not self.summaries.available:
             return head + _NO_MODEL
         try:
@@ -182,8 +199,10 @@ class Policy:
         if not self.summaries.available:
             return _NO_MODEL_MESSAGES + "\n" + listing
         people: dict[str, list[dict[str, Any]]] = {}
+        if data.get("conversation"):  # one thread: summarize both sides together
+            people[f"the conversation with {data['conversation']}"] = [m for m in msgs if m.get("text")]
         for m in msgs:
-            if not m.get("from_me") and m.get("text"):
+            if not data.get("conversation") and not m.get("from_me") and m.get("text"):
                 people.setdefault(messages_mac._person(m), []).append(m)
         lines = []
         for who, theirs in list(people.items())[:5]:
@@ -193,7 +212,10 @@ class Policy:
                 "sender": who,
                 "subject": "text messages",
                 "date": theirs[0].get("date", ""),
-                "body": "\n".join(f"[{m.get('date', '')}] {m.get('text', '')}" for m in reversed(theirs)),
+                "body": "\n".join(
+                    f"[{m.get('date', '')}] {'me' if m.get('from_me') else messages_mac._person(m)}: {m.get('text', '')}"
+                    for m in reversed(theirs)
+                ),
             }
             try:
                 gist = await asyncio.wait_for(self.summaries.of(pseudo), budget_s)
@@ -206,6 +228,29 @@ class Policy:
         return (
             listing + "\nSummaries by Scout's local model (the texts stay on this Mac):\n" + "\n".join(lines)
         )
+
+    async def label(self, m: dict[str, Any]) -> str:
+        """A one-to-three-word local topic label for an email (strict mode)."""
+        if summary.suspicious(m):
+            return "possible scam"
+        model = self.summaries.model
+        if model is None or not getattr(model, "ready", False):
+            return "subject withheld"
+        key = ("label", m.get("id"), m.get("subject"))
+        if key not in self._labels:
+            try:
+                out = await asyncio.wait_for(
+                    model.complete(LABEL_SYSTEM, str(m.get("subject") or ""), 8), 3.0
+                )
+            except (RuntimeError, TimeoutError):
+                return "subject withheld"
+            words = _LABEL.sub(" ", out.lower()).split()[:3]
+            self._labels[key] = " ".join(words) or "subject withheld"
+        return self._labels[key]
+
+    async def _strict_list(self, data: dict[str, Any], what: str) -> str:
+        msgs = [{**m, "subject": f"[{await self.label(m)}]"} for m in data.get("messages", [])]
+        return STRICT_MAIL + "\n" + mail_mac.format_list({**data, "messages": msgs}, what)
 
     # --- calendar ------------------------------------------------------------------
 
@@ -238,8 +283,10 @@ class Policy:
         return memory.relevant(request, n) if memory is not None and n else []
 
     def recall(self, memory: Memory, about: str) -> str:
-        if self.mode == "strict":
-            raise ToolError("Strict privacy mode: Scout's memories aren't shared with Claude.")
+        if self.mode == "strict" and not about.strip():
+            raise ToolError(
+                "Strict privacy mode: only memories about something specific are shared; say what about."
+            )
         facts = memory.relevant(about, MEMORIES[self.mode]) if about.strip() else memory.newest(10)
         if not facts:
             return f"Nothing remembered about {about}." if about.strip() else "Nothing remembered yet."

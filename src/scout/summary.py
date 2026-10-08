@@ -68,7 +68,7 @@ _AT_THE_AI = re.compile(
     r"(?:^|[\n.!?]\s*|\[)\s*(?:dear\s+)?(?:(?:(?:ai|virtual|voice)\s+)?assistant|scout|claude|ai)\s*[:,]|"
     r"\bsystem\s+(?:notice|message|prompt|override|instruction)|"
     r"\bignore\s+(?:all\s+|any\s+)?(?:(?:the|your|my)\s+)?(?:previous|prior|above|earlier|other|your)\b[^.\n]{0,20}\b(?:instructions|rules|prompts?)\b|"
-    r"\b(?:tell|inform)\s+(?:the|your)\s+user\b|\bdo\s+(?:it|this|so)\s+silently\b|"
+    r"\bdo\s+(?:it|this|so)\s+silently\b|"  # not "tell the user": support email says that
     r"\bdo\s*n[o']?t\s+(?:mention|tell\s+(?:the\s+user|anyone)\s+about)\s+this\s+(?:e-?mail|message|note)\b|"
     r"\boverride\s+(?:your|the|all|any)\b[^.\n]{0,30}\b(?:rules|instructions|settings)\b|"
     r"\byou\s+are\s+now\s+(?:in\s+)?[^.\n]{0,20}\bmode\b|\bin\s+your\s+summary,?\s+(?:say|write|state|tell|mention|only)\b|"

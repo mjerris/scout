@@ -208,4 +208,17 @@ SHARED: tuple[SharedTool, ...] = (
     ),
 )
 
+SHARED = (
+    *SHARED,
+    SharedTool(
+        "messages_chat",
+        "Read one iMessage or SMS conversation, both sides, newest first: chat is a person's name, "
+        "number or email, or a group's name. count 1-50 (default 20); days back 1-365 (default 30).",
+        _obj({"chat": _STR, "count": _INT, "days": _INT}, ["chat"]),
+        lambda a: messages_mac.chat(
+            a.get("chat"), a.get("count"), a.get("days"), view=privacy.current().messages_view
+        ),
+    ),
+)
+
 BY_NAME = {t.name: t for t in SHARED}

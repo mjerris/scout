@@ -115,8 +115,9 @@ def test_the_room_agents_memory_tools(mem: Memory) -> None:
     assert "Pat is my manager" in call(tools["recall"], {"about": "Pat"})
     try:
         privacy.configure("strict")
+        assert "Pat is my manager" in call(tools["recall"], {"about": "Pat"})  # need-to-know
         with pytest.raises(ToolError, match="Strict"):
-            call(tools["recall"], {"about": "Pat"})
+            call(tools["recall"], {"about": ""})  # but never the whole list
         assert call(tools["forget"], {"about": "Pat"}) == "Forgot 1 remembered fact."
     finally:
         privacy.configure("balanced")
