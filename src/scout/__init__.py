@@ -64,14 +64,25 @@ async def _amain(cfg: config_mod.Config) -> None:
 
     events: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
 
+    mic = {"name": ""}
+
     def on_audio_event(kind: str, data: dict[str, Any]) -> None:
         log.info("voice layer %s: %s", kind, data)
         events.put_nowait((kind, data))
+        if kind == "device_changed" and data.get("input") and data["input"] != mic["name"]:
+            before, mic["name"] = mic["name"], str(data["input"])
+            if before:  # say it: otherwise a switch to a worse mic just looks like deafness
+                speaker.speak(_mic_change(before, mic["name"], cfg.audio.input_device))
 
-    await _wait_for_microphone(cfg.audio.input_device)
+    input_spec = (
+        "|".join([cfg.audio.input_device, *cfg.audio.input_fallback])
+        if cfg.audio.input_fallback
+        else cfg.audio.input_device
+    )
+    await _wait_for_microphone(input_spec)
     io = audio_io.create(
         cfg.audio.backend,
-        cfg.audio.input_device,
+        input_spec,
         cfg.audio.output_device,
         noise_suppression=cfg.audio.noise_suppression,
         output_delay_ms=cfg.audio.output_delay_ms,
@@ -161,16 +172,34 @@ async def _amain(cfg: config_mod.Config) -> None:
         raise SystemExit(1)
 
 
-def microphone_present(spec: str = "", devices: Any = None) -> bool:
-    """Is there an input device (the configured one, or any when unset)?"""
+def microphone_present(spec: str = "", devices: Any = None, default: int | None = None) -> bool:
+    """Does the input spec (with its fallbacks) resolve to a microphone right now?"""
+    from .audio_plain import resolve_device
+
     if devices is None:
         import sounddevice as sd
 
         sd._terminate()  # PortAudio only reads the device list when it starts
         sd._initialize()
         devices = sd.query_devices()
-    ins = [d for d in devices if d["max_input_channels"] > 0]
-    return any(spec.lower() in d["name"].lower() for d in ins) if spec and not spec.isdigit() else bool(ins)
+        d = sd.default.device[0]
+        default = d if isinstance(d, int) else None
+    if not any(dev["max_input_channels"] > 0 for dev in devices):
+        return False
+    try:
+        idx = resolve_device(spec, "input", devices, default)
+    except ValueError:
+        return False
+    return idx is None or devices[idx]["max_input_channels"] > 0
+
+
+def _mic_change(before: str, now: str, preferred: str) -> str:
+    def short(name: str) -> str:
+        return name.replace(" Microphone", "").strip()
+
+    if preferred and preferred.lower() in now.lower():
+        return f"The {short(now)} microphone is back."
+    return f"I lost the {short(before)} microphone, so I'm listening on the {short(now)} one."
 
 
 async def _wait_for_microphone(spec: str, poll_s: float = 5.0) -> None:

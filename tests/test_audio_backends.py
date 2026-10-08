@@ -635,3 +635,38 @@ def test_microphone_presence_check() -> None:
     assert microphone_present("", [*outs, mic])
     assert microphone_present("obsbot", [*outs, mic])
     assert not microphone_present("blue yeti", [*outs, mic])
+
+
+DEVS: list[dict[str, Any]] = [
+    {"name": "SAMSUNG", "max_input_channels": 0, "max_output_channels": 8},
+    {"name": "OBSBOT Tiny 3 Microphone", "max_input_channels": 2, "max_output_channels": 0},
+    {"name": "Mike's iPhone (2) Microphone", "max_input_channels": 1, "max_output_channels": 0},
+    {"name": "USB Audio Device", "max_input_channels": 1, "max_output_channels": 0},
+]
+NO_OBSBOT = [d for d in DEVS if "OBSBOT" not in d["name"]]
+
+
+def test_microphone_falls_back_and_comes_back() -> None:
+    from scout.audio_plain import resolve_device
+
+    assert resolve_device("OBSBOT|any", "input", DEVS) == 1
+    assert resolve_device("OBSBOT|any", "input", NO_OBSBOT) == 2  # the USB mic, never the iPhone
+    assert NO_OBSBOT[2]["name"] == "USB Audio Device"
+    only_phone = [DEVS[0], DEVS[2]]
+    with pytest.raises(ValueError):
+        resolve_device("OBSBOT|any", "input", only_phone)  # wait rather than listen through the phone
+    assert resolve_device("OBSBOT|iphone", "input", only_phone) == 1  # named explicitly: allowed
+    assert resolve_device("|any", "input", DEVS, default=2) == 1  # the default is the phone: skip it
+    assert resolve_device("SAMSUNG", "output", DEVS) == 0  # a single spec works as before
+
+
+def test_mic_change_is_announced_plainly() -> None:
+    from scout import _mic_change
+
+    assert _mic_change("OBSBOT Tiny 3 Microphone", "USB Audio Device", "OBSBOT") == (
+        "I lost the OBSBOT Tiny 3 microphone, so I'm listening on the USB Audio Device one."
+    )
+    assert (
+        _mic_change("USB Audio Device", "OBSBOT Tiny 3 Microphone", "OBSBOT")
+        == "The OBSBOT Tiny 3 microphone is back."
+    )
