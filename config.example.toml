@@ -77,3 +77,10 @@ port = 8765
 [floor]
 hold_seconds = 10.0       # a session may keep the floor this long between turns
 room_wait_seconds = 15.0  # a "Hey Scout" request waits this long for a session to finish
+
+[calendar]
+work_start = "09:00"  # free time is looked for in working hours ("when am I free tomorrow", calendar_free)
+work_end = "17:00"
+
+[briefing]
+at = ""  # e.g. "07:30" to hear the briefing every day; "brief me" works either way

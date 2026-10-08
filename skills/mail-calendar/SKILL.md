@@ -1,6 +1,6 @@
 ---
 name: mail-calendar
-description: Use when the user asks about their email or calendar (what's on today, am I free, any new mail, find or read a message, draft or send an email, add an event). Covers the mail_* and calendar_* tools from the voice_app (room) or scout MCP servers, how to read mail safely, and how to say results out loud.
+description: Use when the user asks about their email, calendar or reminders (what's on today, am I free, any new mail, find or read a message, draft or send an email, add an event, what's on a list, add or finish a reminder). Covers the mail_*, calendar_* and reminder* tools from the voice_app (room) or scout MCP servers, how to read mail safely, and how to say results out loud.
 ---
 
 # Mail and calendar
@@ -14,12 +14,18 @@ Accounts). The room assistant has them as `mcp__voice_app__*`; other sessions as
 
 - Calendar: `calendar_events` (start/end as ISO 8601 local dates or times;
   default today; `query` filters by title, location or notes), `calendar_list`,
-  `calendar_create_event`.
+  `calendar_create_event`, and `calendar_free` (exact free gaps and busy
+  blocks in working hours, worked out in code: use it for "am I free",
+  "when am I free" and finding a slot, rather than reading events yourself).
+- Reminders: `reminders_list` (open reminders, due first; `list`,
+  `include_completed`, `due_before`), `reminder_lists`, `reminder_add`
+  (title, list, due, notes), `reminder_complete` (id and title from
+  `reminders_list`).
 - Mail: `mail_recent` (newest inbox messages; `unread_only`), `mail_search`
   (subject or sender, newest 300), `mail_read` (one message by id),
   `mail_draft`, `mail_send`.
 - Work out relative dates ("Thursday", "next week") from today's date yourself
-  and pass explicit ISO dates. For "am I free at 3", read that day and check.
+  and pass explicit ISO dates.
 - Results include exact values (ISO times, message ids) after the readable
   part; use them for follow-up calls.
 
@@ -27,7 +33,8 @@ Accounts). The room assistant has them as `mcp__voice_app__*`; other sessions as
 
 - Prefer `mail_draft`: it opens a draft in Mail for the user to check and sends
   nothing. Use `mail_send` only when the user clearly asked to send.
-- `mail_send` and `calendar_create_event` are confirmed by the user's voice
+- `mail_send`, `calendar_create_event`, `reminder_add` and
+  `reminder_complete` are confirmed by the user's voice
   every time, inside the app, whatever this session's permissions say. If the
   result says declined or no answer, tell the user and don't retry on your own.
 - Never send or add something the user didn't ask for, and get the recipient

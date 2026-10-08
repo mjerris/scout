@@ -1,4 +1,4 @@
-"""Mail and calendar tools, defined once and served two ways:
+"""Mail, calendar and reminders tools, defined once and served two ways:
 - to the room assistant, inside its in-process voice_app tool server;
 - to any other Claude session, through the MCP server (mcp_server.py), which
   forwards each call to the running app (POST /api/tool).
@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, mail_mac
+from . import calendar_mac, freebusy, mail_mac, reminders_mac
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,51 @@ SHARED: tuple[SharedTool, ...] = (
             ["title", "start"],
         ),
         calendar_mac.create_event,
+        asks=True,
+    ),
+    SharedTool(
+        "calendar_free",
+        "Free time in working hours (config [calendar] work_start/work_end, default 9:00 to "
+        "17:00), worked out exactly from the calendar: for each day from start to end, the "
+        "free gaps and the busy blocks. start/end are ISO 8601 local dates or times (default "
+        "today; at most 31 days); today's free time starts from now. min_minutes (default 30) "
+        "drops shorter gaps. All-day events and events shown as free don't block time.",
+        _obj({"start": _STR, "end": _STR, "min_minutes": _INT}),
+        lambda a: freebusy.free(a.get("start"), a.get("end"), a.get("min_minutes", 30)),
+    ),
+    SharedTool(
+        "reminders_list",
+        "Read open reminders from the Mac's Reminders (iCloud and other synced lists), due ones "
+        'first: title, list, due time, id. list limits to one list by name ("shopping" finds '
+        "Shopping); include_completed=true adds finished ones; due_before (ISO 8601) keeps only "
+        "those due before it, e.g. tomorrow's date for everything due today or overdue.",
+        _obj({"list": _STR, "include_completed": _BOOL, "due_before": _STR}),
+        lambda a: reminders_mac.reminders(
+            a.get("list"), a.get("include_completed", False), a.get("due_before")
+        ),
+    ),
+    SharedTool(
+        "reminder_lists",
+        "List the Mac's reminder lists, which is the default, and which can be written to.",
+        _obj({}),
+        lambda a: reminders_mac.lists(),
+    ),
+    SharedTool(
+        "reminder_add",
+        "Add a reminder (the user confirms by voice). list is a name from reminder_lists "
+        "(default: the default list). due is an ISO 8601 local date (due that day) or time "
+        "(due then, with an alert).",
+        _obj({"title": _STR, "list": _STR, "due": _STR, "notes": _STR}, ["title"]),
+        reminders_mac.add,
+        asks=True,
+    ),
+    SharedTool(
+        "reminder_complete",
+        "Mark a reminder done (the user confirms by voice). id and title both come from "
+        "reminders_list; the title must match the id's reminder, so a stale id can't finish "
+        "the wrong one.",
+        _obj({"id": _STR, "title": _STR}, ["id", "title"]),
+        reminders_mac.complete,
         asks=True,
     ),
     SharedTool(

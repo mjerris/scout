@@ -249,15 +249,15 @@ input_device` and `output_device`. Other useful knobs in `config.toml`:
 Without headphones the mic hears the assistant too. Speech that starts while it
 is talking is ignored, except "Scout, stop".
 
-## Mail and calendar for every session
+## Mail, calendar and reminders for every session
 
-The mail and calendar tools are defined once (`shared_tools.py`) and offered
+The mail, calendar and reminders tools are defined once (`shared_tools.py`) and offered
 both to the room assistant and, through the MCP server, to any other Claude
 Code session, as `mcp__scout__calendar_events`, `mcp__scout__mail_recent`, and
 so on. The running app always does the work: other sessions' calls go to it
 (`POST /api/tool`), so macOS's calendar and Mail permissions belong to the app
-alone. Sending mail and adding events are confirmed by voice in the room on
-every call ("From myproject: Send email to sam@example.com, subject Lunch?"),
+alone. Sending mail, adding events, and adding or completing reminders are
+confirmed by voice in the room on every call ("From myproject: Send email to sam@example.com, subject Lunch?"),
 whatever the calling session's own permission settings say.
 
 How to use them (which tool, untrusted email, how to say results out loud) is
@@ -279,6 +279,47 @@ sees a token.
   event (`calendar_create_event`) is confirmed by voice every time ("Add
   Dentist, Friday October 9, 3:00 PM, to Home?"); "yes, always" doesn't apply.
   There is no edit or delete.
+- Free time is worked out in plain code, no model: `calendar_free` (start, end,
+  min_minutes) lists each day's free gaps and busy blocks inside working hours
+  (`[calendar] work_start`/`work_end`, default 9:00 to 17:00). Overlapping
+  events merge; all-day events and events shown as free don't block time.
+- Answered instantly without Claude (tier 0): "am I free at 3 / tomorrow at 3 /
+  Thursday at 3pm" (a time without am or pm from 1 to 6 means the afternoon),
+  "when am I free tomorrow", "what's my first free hour tomorrow", "how busy is
+  my day / tomorrow".
+
+## Reminders
+
+Reminders come from the Mac's Reminders store through the same helper, so
+iCloud and other synced lists work.
+
+- Reminders have their own macOS permission: the first reminders question
+  shows an "allow access to Reminders" prompt on the Mac's screen (System
+  Settings → Privacy & Security → Reminders). Rebuild the helper
+  (`scripts/build-vcal.sh`) first so it carries the reminders usage text.
+- Reading (`reminders_list`: open reminders, due ones first, by `list`, with
+  `include_completed` or `due_before`; `reminder_lists`) runs without asking.
+  Adding (`reminder_add`: title, list, due, notes) and completing
+  (`reminder_complete`: id and title, which must match, so a stale id can't
+  finish the wrong one) are confirmed by voice every time ("Add milk to
+  Shopping?", "Mark milk done?"); "yes, always" doesn't apply. No delete.
+- A list name matches ignoring case, spaces, punctuation and a trailing "list":
+  "shopping list" finds Shopping, "to-do" finds To Do.
+- Tier 0 only reads ("what's on my shopping list", "what are my reminders
+  today", "what's due tomorrow"). "Add milk to my shopping list" goes to Claude
+  on purpose: its `reminder_add` call is the one that asks you first.
+
+## Briefing
+
+"Brief me", "morning briefing" or "what's my day look like" gets one short
+spoken summary, built in plain code: today's calendar (how many events, the
+next one, the longest free stretch), reminders due today or overdue, and how
+many unread emails there are (from the inbox's last 30 days) and who they're
+mostly from. No subjects or message text are read. A source that isn't
+available is named ("I couldn't check mail.") and the rest still plays.
+
+Set `[briefing] at = "07:30"` to hear it every day at that time; it waits its
+turn for the floor like a timer does.
 
 ## Mail
 
