@@ -10,6 +10,7 @@ dependencies = [
     "aiohttp>=3.14.4",
     "claude-agent-sdk>=0.2.164",
     "kokoro-onnx>=0.6.1",
+    "livekit>=1.1.20",
     "mlx-whisper>=0.4.3",
     "numpy>=2.5.3",
     "sounddevice>=0.5.6",
