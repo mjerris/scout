@@ -189,6 +189,10 @@ async def utterances(mic: Microphone, seg: Segmenter, is_echo, out: asyncio.Queu
                 )
                 warned = True
         res = seg.feed(frame)
+        if seg.triggered and not echo:
+            # The assistant may start talking after the user does: if it plays
+            # at any point during the clip, the clip holds its voice too.
+            echo = is_echo()
         if res is True:
             started, echo = time.monotonic(), is_echo()
             onset_floor = floor_db if floor_db is not None else -60.0
