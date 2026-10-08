@@ -68,6 +68,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         log.info("voice layer %s: %s", kind, data)
         events.put_nowait((kind, data))
 
+    await _wait_for_microphone(cfg.audio.input_device)
     io = audio_io.create(
         cfg.audio.backend,
         cfg.audio.input_device,
@@ -158,6 +159,30 @@ async def _amain(cfg: config_mod.Config) -> None:
         log.exception("voice layer shutdown")
     if failed is not None:
         raise SystemExit(1)
+
+
+def microphone_present(spec: str = "", devices: Any = None) -> bool:
+    """Is there an input device (the configured one, or any when unset)?"""
+    if devices is None:
+        import sounddevice as sd
+
+        sd._terminate()  # PortAudio only reads the device list when it starts
+        sd._initialize()
+        devices = sd.query_devices()
+    ins = [d for d in devices if d["max_input_channels"] > 0]
+    return any(spec.lower() in d["name"].lower() for d in ins) if spec and not spec.isdigit() else bool(ins)
+
+
+async def _wait_for_microphone(spec: str, poll_s: float = 5.0) -> None:
+    """Without a mic, wait for one instead of crashing (launchd would restart the app
+    every 10 s forever: seen when the OBSBOT camera was unplugged or asleep)."""
+    log = logging.getLogger("scout")
+    if microphone_present(spec):
+        return
+    log.warning("no microphone%s; waiting for one to appear", f" matching {spec!r}" if spec else "")
+    while not microphone_present(spec):
+        await asyncio.sleep(poll_s)
+    log.info("microphone found")
 
 
 async def _watch(io: AudioIO, speaker: Speaker, events: asyncio.Queue[tuple[str, dict[str, Any]]]) -> None:

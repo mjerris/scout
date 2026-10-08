@@ -620,3 +620,18 @@ def test_canceller_delay_hint_is_capped_where_webrtc_accepts_it() -> None:
         assert out.shape == (480,)
     finally:
         aec.close()
+
+
+def test_microphone_presence_check() -> None:
+    """Scout waits for a mic instead of crash-looping when none is plugged in."""
+    from scout import microphone_present
+
+    outs = [
+        {"name": "SAMSUNG", "max_input_channels": 0},
+        {"name": "Mac mini Speakers", "max_input_channels": 0},
+    ]
+    mic = {"name": "OBSBOT Tiny 3 Microphone", "max_input_channels": 2}
+    assert not microphone_present("", outs)  # the camera unplugged: no input at all
+    assert microphone_present("", [*outs, mic])
+    assert microphone_present("obsbot", [*outs, mic])
+    assert not microphone_present("blue yeti", [*outs, mic])
