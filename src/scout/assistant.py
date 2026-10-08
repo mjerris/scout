@@ -7,16 +7,17 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import re
 import time
 import wave
 from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import gate, shared_tools, speech
+from . import calendar_mac, gate, local_intents, mail_mac, shared_tools, speech
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -29,6 +30,12 @@ from .tools import Timers, build_server
 from .tts import Speaker
 
 log = logging.getLogger(__name__)
+
+# Requests whose answer needs the calendar or the inbox: prefetched into the context.
+_CALENDARISH = re.compile(
+    r"\b(calendar|schedule|agenda|meetings?|appointments?|events?|busy|free at|free on|free this)\b"
+)
+_MAILISH = re.compile(r"\b(e-?mails?|inbox|mail|messages? from)\b")
 ROOM = "room"
 
 
@@ -79,6 +86,8 @@ class Assistant:
         self.floor = Floor(cfg.floor.hold_seconds)
         self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
+        self._local = local_intents.Context(self.timers)
+        self.recent_local: deque[tuple[float, str, str]] = deque(maxlen=10)
         server, names = build_server(self.timers)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
@@ -699,6 +708,53 @@ class Assistant:
                 self.speaker.chime("tick")
                 quiet_since = time.monotonic()
 
+    async def _answer_locally(self, text: str) -> bool:
+        """Tier 0: answer in plain code when the request clearly fits. True if handled."""
+        if not self.cfg.claude.local_first:
+            return False
+        try:
+            said = await local_intents.answer(text, self._local)
+        except ToolError as exc:  # e.g. calendar access not allowed yet: say why
+            said = f"Sorry, {exc}"
+        if said is None:
+            return False
+        log.info("answered locally: %s -> %s", text, said or "(done)")
+        self.emit("local", text=said or "(done)")
+        self.recent_local.append((time.time(), text, said or "(done)"))
+        if said:
+            self._set_state("speaking")
+            self.say(said)
+        await self.speaker.wait_idle()
+        return True
+
+    async def _with_context(self, text: str) -> str:
+        """The request with what Claude would otherwise spend a tool call on."""
+        if not self.cfg.claude.request_context:
+            return text
+        now = datetime.now().astimezone()
+        lines = [f"Now: {now.strftime('%A, %B %-d, %Y, %-I:%M %p %Z')}."]
+        if timers := self.timers.listing():
+            lines.append("Timers running: " + "; ".join(timers) + ".")
+        recent = [(q, a) for ts, q, a in self.recent_local if time.time() - ts < 600]
+        if recent:
+            lines.append("Just answered locally: " + " | ".join(f"{q!r} -> {a!r}" for q, a in recent[-3:]))
+        low = text.lower()
+        try:
+            if _CALENDARISH.search(low):
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                listing = await calendar_mac.events(
+                    start.isoformat(), (start + timedelta(days=2)).isoformat()
+                )
+                lines.append(
+                    "Calendar, today and tomorrow (fetched just now; use it rather than calling the tool):\n"
+                    + listing
+                )
+            if _MAILISH.search(low):
+                lines.append("Newest email (fetched just now):\n" + await mail_mac.recent(5))
+        except ToolError as exc:
+            log.info("context prefetch skipped: %s", exc)
+        return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
+
     async def _run_turn(self, text: str, speak: bool, client: str | None = None) -> None:
         self._out = {"mini": speak, "client": client}
         self._silence_turn = False
@@ -727,10 +783,15 @@ class Assistant:
             return
         self.emit("you", text=text)
         self._set_state("thinking")
-        ticks = asyncio.create_task(self._working_ticks()) if speak and self.cfg.tts.working_sound else None
-        self.chime("ack")
+        ticks: asyncio.Task[None] | None = None
         try:
-            async for kind, data in self.brain.ask(text):
+            if await self._answer_locally(text):
+                return
+            ticks = (
+                asyncio.create_task(self._working_ticks()) if speak and self.cfg.tts.working_sound else None
+            )
+            self.chime("ack")
+            async for kind, data in self.brain.ask(await self._with_context(text)):
                 if kind == "text":
                     self.emit("claude", text=data)
                     if not self._silence_turn:

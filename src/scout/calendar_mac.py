@@ -159,6 +159,17 @@ async def events(
     helper: Path | None = None,
 ) -> str:
     """Events from start (default: now's start of day) to end (default: start + 1 day)."""
+    return format_events(await event_data(start, end, query, calendar, helper))
+
+
+async def event_data(
+    start: Any = None,
+    end: Any = None,
+    query: Any = None,
+    calendar: Any = None,
+    helper: Path | None = None,
+) -> dict[str, Any]:
+    """The helper's structured answer for events(): {"events": [...], "total": n}."""
     s = (
         parse_time(start, "start")
         if start
@@ -175,7 +186,7 @@ async def events(
         args += ["--query", q]
     if c := _text(calendar, "calendar", 200):
         args += ["--calendar", c]
-    return format_events(await _vcal(*args, helper=helper))
+    return await _vcal(*args, helper=helper)
 
 
 async def calendars(helper: Path | None = None) -> str:
