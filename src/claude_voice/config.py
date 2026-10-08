@@ -21,6 +21,8 @@ class WakeConfig:
     max_position: int = 3  # name must be within the first N words
     # After a reply, listen this many seconds for a follow-up without the wake word.
     follow_up_seconds: float = 8.0
+    # Ending with "hang on" / "wait" / "give me a sec" keeps listening this long.
+    wait_seconds: float = 20.0
 
 
 @dataclass
@@ -32,6 +34,9 @@ class AudioConfig:
     min_speech_ms: int = 300
     max_utterance_s: float = 30.0
     echo_tail_ms: int = 400  # ignore speech starting this soon after TTS stops
+    # Keep the last N utterances (wav + json with transcript and stats) in
+    # state/utterances/ for tuning. 0 = off. Audio stays on this machine.
+    save_utterances: int = 0
 
 
 @dataclass
@@ -60,6 +65,7 @@ class TtsConfig:
     voice: str = "af_heart"
     speed: float = 1.1
     chimes: bool = True
+    working_sound: bool = True  # soft tick while tools run with nothing to say
 
 
 @dataclass
@@ -102,6 +108,12 @@ class WebConfig:
 
 
 @dataclass
+class FloorConfig:
+    hold_seconds: float = 10.0  # how long a session may keep the floor between turns
+    room_wait_seconds: float = 15.0  # a wake request waits this long for another session to finish
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -110,6 +122,7 @@ class Config:
     tts: TtsConfig = field(default_factory=TtsConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    floor: FloorConfig = field(default_factory=FloorConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to the project root."""

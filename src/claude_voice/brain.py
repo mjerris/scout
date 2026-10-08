@@ -116,7 +116,8 @@ class Brain:
         overrides: dict[str, Any] = {"permissions": {
             # The app itself is maintained by its owner session, not by voice.
             "allow": [*self.tool_names, "WebSearch", "WebFetch"],
-            "deny": [f"Edit({project}/**)", f"Write({project}/**)", f"MultiEdit({project}/**)"],
+            "deny": [f"Edit({project}/**)", f"Write({project}/**)", f"MultiEdit({project}/**)",
+                     "mcp__voice"],  # the desk-session voice tool; the room agent already owns the voice
             "ask": [] if strict else list(self.cfg.always_ask),
         }}
         if self.cfg.approval_policy == "settings_no_hooks":
@@ -124,6 +125,7 @@ class Brain:
         return ClaudeAgentOptions(
             cwd=os.path.expanduser(self.cfg.cwd),
             settings=json.dumps(overrides),
+            env={"CLAUDE_VOICE_ROOM": "1"},  # our own MCP voice tool refuses to run inside the room agent
             mcp_servers={"voice_app": self.tool_server},
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,

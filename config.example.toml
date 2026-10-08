@@ -6,6 +6,7 @@ names = ["claude", "claud", "clod", "clawed", "cloud", "klaud", "claudia"]
 max_position = 3
 # After a reply, keep listening this long for a follow-up without the wake word (0 = off).
 follow_up_seconds = 8.0
+wait_seconds = 20.0   # after "hang on" / "wait" / "give me a sec"
 
 [audio]
 input_device = ""     # name substring or index from `uv run claude-voice --list-devices`
@@ -15,6 +16,7 @@ silence_ms = 1200     # pause that ends an utterance
 min_speech_ms = 300
 max_utterance_s = 30.0
 echo_tail_ms = 400
+save_utterances = 0   # keep the last N clips in state/utterances/ for tuning
 
 [gate]
 # Local checks every transcript must pass before it reaches Claude (no tokens spent on rejects).
@@ -38,6 +40,7 @@ voices = "models/voices-v1.0.bin"
 voice = "af_heart"    # e.g. af_bella, am_michael, bf_emma, bm_george
 speed = 1.1
 chimes = true
+working_sound = true  # soft tick while tools run
 
 [claude]
 cwd = "~"                     # where the agent works
@@ -59,3 +62,7 @@ extra_system_prompt = ""
 enabled = true
 host = "0.0.0.0"   # "127.0.0.1" to keep the page local-only
 port = 8765
+
+[floor]
+hold_seconds = 10.0       # a session may keep the floor this long between turns
+room_wait_seconds = 15.0  # a "Hey Claude" request waits this long for a session to finish

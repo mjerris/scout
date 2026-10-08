@@ -58,6 +58,20 @@ def parse_yes_no(text: str) -> bool | None:
     return None
 
 
+_WAIT = re.compile(
+    r"[\s,.;:!-]*\b(?:hang on|hold on|wait(?: a (?:sec|second|minute|moment))?|"
+    r"give me a (?:sec|second|minute|moment)|one (?:sec|second|moment)|just a (?:sec|second|moment))"
+    r"[\s,.!?]*$", re.I)
+
+
+def split_wait(text: str) -> tuple[str, bool]:
+    """("rest", True) when the user ends with "hang on", "wait", "give me a sec"..."""
+    m = _WAIT.search(text)
+    if not m:
+        return text, False
+    return text[:m.start()].strip(" ,.;:-"), True
+
+
 def parse_answer(text: str) -> bool | str | None:
     """Like parse_yes_no, plus "always" ("yes always", "always allow that")."""
     answer = parse_yes_no(text)

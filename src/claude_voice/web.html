@@ -43,6 +43,10 @@
   #confirm { display: none; padding: 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); }
   #confirm.show { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   #confirm span { flex: 1; min-width: 200px; }
+  #ptt { touch-action: none; user-select: none; -webkit-user-select: none; }
+  #ptt.rec { background: var(--bad); color: #fff; border-color: var(--bad); }
+  .agent { background: var(--tool); border: 1px dashed var(--line); align-self: flex-start; }
+  #floor { font-size: 12px; color: var(--muted); }
   #confirm .yes { background: var(--ok); color: #fff; border-color: var(--ok); }
   #confirm .no { background: var(--bad); color: #fff; border-color: var(--bad); }
   form { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
@@ -60,6 +64,7 @@
 <div class="wrap">
   <header>
     <h1>Claude Voice</h1>
+    <span id="floor"></span>
     <span id="state" class="pill offline">offline</span>
     <button id="stop" type="button">Stop</button>
     <button id="mute" type="button">Mute mic</button>
@@ -73,7 +78,9 @@
   <details id="rules"><summary>Always allowed (<span id="rcount">0</span>)</summary><ul id="rlist"></ul></details>
   <form id="f">
     <input id="text" placeholder="Type a request…" autocomplete="off">
+    <button type="button" id="ptt" title="Hold to talk">🎙 Hold to talk</button>
     <label><input type="checkbox" id="speak" checked> speak on mini</label>
+    <label><input type="checkbox" id="here"> play here</label>
     <button type="submit">Send</button>
   </form>
 </div>
@@ -98,6 +105,8 @@ function setState(s) {
   $("mute").textContent = muted ? "Unmute mic" : "Mute mic";
   $("mute").classList.toggle("on", muted);
   if (!s.confirming) $("confirm").classList.remove("show");
+  const f = s.floor || {};
+  $("floor").textContent = f.holder && f.holder !== "room" ? "floor: " + f.holder : "";
 }
 
 function renderRules(rules) {
@@ -115,7 +124,7 @@ function renderRules(rules) {
 function render(ev) {
   switch (ev.type) {
     case "state": setState(ev); break;
-    case "heard": add("heard", "🎙 " + ev.text); break;
+    case "heard": add("heard", "🎙 " + ev.text + (ev.to ? "  → " + ev.to : "")); break;
     case "ignored": add("heard ignored", "🎙 " + ev.text + "  — ignored: " + ev.reason); break;
     case "you": add("msg you", ev.text); break;
     case "claude": add("msg claude", ev.text); break;
@@ -124,6 +133,9 @@ function render(ev) {
     case "confirm_done": $("confirm").classList.remove("show"); add("meta", ev.always ? "approved (always)" : ev.approved ? "approved" : "denied"); break;
     case "rules": if (ev.rules) renderRules(ev.rules); if (ev.text) add("meta", ev.text); break;
     case "timer": add("meta", "⏰ " + ev.text); break;
+    case "agent_said": add("msg agent", ev.agent + ": " + ev.text); break;
+    case "ptt_result": if (ev.ignored) add("heard ignored", "🎙 " + (ev.text || "…") + "  — ignored: " + ev.ignored); break;
+    case "audio_reply": playReply(ev.data); break;
     case "result": if (ev.cost != null) add("meta", `$${ev.cost.toFixed(4)} · ${ev.turns} turn${ev.turns === 1 ? "" : "s"}`); break;
     case "stopped": add("meta", "stopped"); break;
     case "reset": add("meta", "— new conversation —"); break;
@@ -142,6 +154,7 @@ function connect() {
       if (!(pending && ev.confirming)) $("confirm").classList.remove("show");
       setState(ev);
       renderRules(ev.rules || []);
+      if ($("here").checked) send({type: "play_here", value: true});
     } else render(ev);
   };
   ws.onclose = () => { setState({state: "offline", mic_muted: muted}); setTimeout(connect, 2000); };
@@ -161,6 +174,57 @@ $("reset").onclick = () => send({type: "reset"});
 $("approve").onclick = () => send({type: "confirm", approved: true});
 $("deny").onclick = () => send({type: "confirm", approved: false});
 $("always").onclick = () => send({type: "confirm", approved: true, always: true});
+// --- push-to-talk (needs https or localhost for the microphone) ---------------------
+let rec = null, chunks = [];
+const audioQ = [];
+let playing = false;
+function playReply(b64) {
+  audioQ.push(b64);
+  if (!playing) nextReply();
+}
+function nextReply() {
+  const b64 = audioQ.shift();
+  if (!b64) { playing = false; return; }
+  playing = true;
+  const a = new Audio("data:audio/wav;base64," + b64);
+  a.onended = nextReply; a.onerror = nextReply;
+  a.play().catch(nextReply);
+}
+async function startRec(e) {
+  e.preventDefault();
+  if (!navigator.mediaDevices || !window.isSecureContext) {
+    add("err", "The microphone needs an https page (use the Tailscale address) or localhost.");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
+    chunks = [];
+    rec = new MediaRecorder(stream);
+    rec.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunks, {type: rec.mimeType});
+      if (blob.size < 2000) return;
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      send({type: "audio", mime: rec.mimeType, data: btoa(bin), speak: $("speak").checked});
+    };
+    rec.start();
+    $("ptt").classList.add("rec");
+  } catch (err) { add("err", "Microphone unavailable: " + err.message); }
+}
+function stopRec(e) {
+  e.preventDefault();
+  $("ptt").classList.remove("rec");
+  if (rec && rec.state === "recording") rec.stop();
+}
+$("ptt").addEventListener("pointerdown", startRec);
+$("ptt").addEventListener("pointerup", stopRec);
+$("ptt").addEventListener("pointerleave", stopRec);
+$("here").onchange = () => {
+  send({type: "play_here", value: $("here").checked});
+  if ($("here").checked) new Audio().play().catch(() => {});  // unlock audio on iOS
+};
 connect();
 </script>
 </body>
