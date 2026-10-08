@@ -44,6 +44,7 @@ class Utterance:
     started: float  # time.monotonic() when speech was detected
     echo: bool  # speech began while (or just after) the assistant was talking
     stats: AudioStats
+    ended: float = 0.0  # time.monotonic() when the clip ended
 
 
 def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
@@ -198,4 +199,4 @@ async def utterances(mic: Microphone, seg: Segmenter, is_echo, out: asyncio.Queu
             onset_floor = floor_db if floor_db is not None else -60.0
         elif isinstance(res, bytes):
             stats = AudioStats(seg.last_voiced_ms, seg.last_level_db, onset_floor)
-            await out.put(Utterance(res, started, echo, stats))
+            await out.put(Utterance(res, started, echo, stats, time.monotonic()))

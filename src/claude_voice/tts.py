@@ -47,7 +47,6 @@ class Speaker:
         self._synth_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._play_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="play")
         self._tasks: list[asyncio.Task] = []
-        self._said: deque[tuple[float, str]] = deque(maxlen=50)
         # [start, end, text] per sentence actually played; end is inf while playing.
         self._played: deque[list] = deque(maxlen=100)
 
@@ -67,12 +66,16 @@ class Speaker:
         self._idle.clear()
         self._text.put_nowait((self._gen, item))
 
-    def recent_speech(self, since: float | None = None, seconds: float = 60.0) -> str:
-        """What was played from `since` on (or in the last `seconds`)."""
-        if since is None:
-            cutoff = time.monotonic() - seconds
-            return " ".join(t for ts, t in self._said if ts >= cutoff)
+    def recent_speech(self, since: float) -> str:
+        """What was played from `since` on, in its original wording (what Whisper
+        will write when it hears it), not the respelled TTS input."""
         return " ".join(text for start, end, text in self._played if end >= since - 0.5)
+
+    def overlap(self, start: float, end: float) -> float:
+        """Seconds of our own speech that played between start and end."""
+        now = time.monotonic()
+        return sum(max(0.0, min(e if e != float("inf") else now, end) - max(s, start))
+                   for s, e, _ in self._played)
 
     def last_speech_end(self, since: float) -> float | None:
         """When the speech overlapping a clip that began at `since` ended (now if still playing)."""
@@ -82,12 +85,11 @@ class Speaker:
         return min(max(ends), time.monotonic())
 
     def speak(self, text: str, voice: str | None = None) -> None:
-        if self.pronounce is not None:
-            text = self.pronounce.tts(text)
-        self._said.append((time.monotonic(), text))
         for sentence in _SENTENCE.split(text.strip()):
-            if sentence.strip():
-                self._enqueue((sentence.strip(), voice))
+            sentence = sentence.strip()
+            if sentence:
+                spoken = self.pronounce.tts(sentence) if self.pronounce is not None else sentence
+                self._enqueue((spoken, voice, sentence))
 
     def chime(self, kind: str) -> None:
         if not self.chimes:
@@ -137,7 +139,7 @@ class Speaker:
             if isinstance(item, np.ndarray):
                 samples, text = item, None
             else:
-                text, voice = item
+                text, voice, original = item
                 try:
                     samples, sr = await loop.run_in_executor(
                         self._synth_pool,
@@ -147,7 +149,7 @@ class Speaker:
                     log.exception("TTS failed for %r", item)
                     self._done_one()
                     continue
-            self._audio.put_nowait((gen, samples, text))
+            self._audio.put_nowait((gen, samples, None if isinstance(item, np.ndarray) else original))
 
     def _play_blocking(self, samples: np.ndarray) -> None:
         sd.play(samples, self.sr, device=self.device)

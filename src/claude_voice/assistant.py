@@ -64,15 +64,13 @@ class Assistant:
         self._confirm_gen = 0  # bumped by stop(): queued questions are dropped, not asked
         self._confirm_started = 0.0
         self._listen: _Listen | None = None
+        self._discuss_stop: asyncio.Event | None = None  # set by stop() during a discuss call
         # Where the current room turn's speech goes: the mini's speakers and/or
         # the web page (by client id) that asked.
         self._out: dict = {"mini": True, "client": None}
         self.history: deque[dict] = deque(maxlen=300)
         self._listeners: set[asyncio.Queue[dict]] = set()
         self._saved: deque = deque()
-        # No initial prompt: Whisper spells "Claude" fine without one, and on
-        # silence it tends to echo a prompt back as if it had been said.
-        self._wake_prompt: str | None = None
 
     # --- events: web page, transcript file ------------------------------------------
 
@@ -102,9 +100,20 @@ class Assistant:
 
     def _timer_done(self, label: str) -> None:
         self.emit("timer", text=f"{label} done")
-        self.speaker.chime("wake")
-        self.speaker.chime("wake")
-        self.speaker.speak("Your timer is done." if label == "timer" else f"Your {label} timer is done.")
+        asyncio.create_task(self._announce_timer(label))
+
+    async def _announce_timer(self, label: str) -> None:
+        # Don't talk over a session that has the floor; wait for it (or a room turn) to finish.
+        owner = self.floor.owner()
+        took = await self.floor.acquire(ROOM, wait=600) if owner not in (None, ROOM) else False
+        try:
+            self.speaker.chime("wake")
+            self.speaker.chime("wake")
+            self.speaker.speak("Your timer is done." if label == "timer" else f"Your {label} timer is done.")
+            await self.speaker.wait_idle()
+        finally:
+            if took:
+                self.floor.release(ROOM)
 
     def say(self, text: str) -> None:
         """Speak where the current turn's replies go."""
@@ -179,7 +188,7 @@ class Assistant:
                 old.with_suffix(suffix).unlink(missing_ok=True)
 
     async def _handle(self, utt: Utterance) -> None:
-        t = await self.asr.transcribe(utt.pcm, prompt=self._wake_prompt)
+        t = await self.asr.transcribe(utt.pcm)
         t.text = self.pronounce.stt(t.text)
         self._save_utterance(utt, t)
         text = t.text
@@ -193,102 +202,115 @@ class Assistant:
             return  # not speech at all; nothing to show
         cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
         confirming = self._confirm_fut is not None and not self._confirm_fut.done()
+        listening = self._listen is not None and not self._listen.fut.done()
+        started = utt.started
 
-        # While the assistant is talking, the mic hears it too: an explicit
-        # "<wake> stop" always counts; otherwise keep only what follows the
-        # assistant's own words, if anything.
-        if utt.echo:
+        # Echo only if our speech actually overlapped the clip; a reply that merely
+        # starts in the echo tail is the user's alone (and may reuse our words).
+        echo = utt.echo and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
+        if echo:
+            # The mic heard the assistant too: "<wake> stop" always counts;
+            # otherwise keep only the words that weren't ours.
             if cmd is not None and speech.is_stop(cmd):
                 self.emit("heard", text=text)
                 await self.stop()
                 return
             residual = speech.strip_own_speech(text, self.speaker.recent_speech(since=utt.started))
-            if not residual:
+            if not residual or gate.junk(residual):
                 return
             # Leftovers are often misheard bits of our own speech: during an approval
             # only a clear yes/no counts; otherwise apply the follow-up rules.
             if confirming:
                 if speech.parse_answer(residual) is None:
                     return
-            elif self._listen is not None and not self._listen.fut.done():
-                pass  # a session asked a question: a one-word answer is fine
-            elif self._reject("residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
+            elif not listening and self._reject(
+                    "residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
                 return
             log.info("heard after own speech: %s", residual)
-            # The leftover words came after our speech in the clip.
             text = residual
             started = self.speaker.last_speech_end(utt.started) or utt.started
             cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
-            if self._listen is None and self.busy and not confirming and not (cmd is not None and speech.is_stop(cmd)):
+            if not listening and self.busy and not confirming and not (cmd is not None and speech.is_stop(cmd)):
                 # Spoke over the end of the reply: run it once this turn finishes.
                 self.emit("heard", text=text)
                 self._queued = cmd if cmd is not None else text
                 return
-        else:
-            started = utt.started
+
+        def check(kind: str) -> str | None:
+            # Clip stats describe a mixed clip when it held our voice; skip them then.
+            return None if echo else gate.check(kind, text, t, a, self._ref_db, self.cfg.gate)
+
+        if not echo and cmd is not None and not confirming and not listening and check("wake") is None:
+            self._ref_db = a.level_db if self._ref_db is None else 0.7 * self._ref_db + 0.3 * a.level_db
+        await self._route(text, cmd, started, check, direct=False)
+
+    async def _route(self, text: str, cmd: str | None, started: float, check, direct: bool,
+                     speak: bool = True, client: str | None = None) -> str | None:
+        """Where a heard utterance goes. Shared by the mic and web push-to-talk.
+        `check(kind)` returns a gate rejection reason (None = passes); `direct`
+        means the user addressed us explicitly (push-to-talk), no wake word needed.
+        Returns a reason when the utterance was ignored."""
+        confirming = self._confirm_fut is not None and not self._confirm_fut.done()
+        via = {"via": "web"} if direct else {}
+
+        # "Stop" ends whatever is going on: speech, a turn, a pending question, a session's listen.
+        if speech.is_stop(cmd if cmd is not None else (text if direct or confirming else "")):
+            self.emit("heard", text=text, **via)
+            await self.stop()
+            return None
 
         # A Claude session is waiting for the user's reply: it gets the speech.
         if self._listen is not None and not self._listen.fut.done():
             if started < self._listen.since - 0.5:
-                return
-            if not utt.echo and self._reject(
-                    "reply", text, gate.check("direct", text, t, a, self._ref_db, self.cfg.gate)):
-                return
-            self.emit("heard", text=text, to=self._listen.agent)
-            self._listen_got(cmd if cmd is not None and speech.is_stop(cmd) else text)
-            return
+                return "said before the question"
+            if self._reject("reply", text, check("direct")):
+                return "gate"
+            self.emit("heard", text=text, to=self._listen.agent, **via)
+            self._listen_got(text)
+            return None
 
         # Another session has the floor (it's mid-sentence or between turns).
         owner = self.floor.owner()
-        if owner not in (None, ROOM) and not confirming:
-            if cmd is not None and speech.is_stop(cmd):
-                self.emit("heard", text=text)
-                self.speaker.stop()
-                return
-            if cmd is None:  # no wake word: not for us while a session has the floor
-                self._reject("request", text, f"{owner} has the floor")
-                return
-            # A "Hey Claude" request goes ahead; its turn queues for the floor.
-
-        if not utt.echo:
-            if confirming:
-                if self._reject("answer", text, gate.check("confirm", text, t, a, self._ref_db, self.cfg.gate)):
-                    return
-            elif cmd is not None:
-                if self._reject("request", text, gate.check("wake", text, t, a, self._ref_db, self.cfg.gate)):
-                    return
-                self._ref_db = a.level_db if self._ref_db is None else 0.7 * self._ref_db + 0.3 * a.level_db
-            elif not self.busy and started <= self.follow_up_until:
-                if self._reject("follow-up", text, gate.check("followup", text, t, a, self._ref_db, self.cfg.gate)):
-                    return
+        if owner not in (None, ROOM) and not confirming and cmd is None and not direct:
+            self._reject("request", text, f"{owner} has the floor")
+            return "floor"
+        # (A "Hey Claude" or push-to-talk request goes ahead; its turn queues for the floor.)
 
         if confirming:
+            if self._reject("answer", text, check("confirm")):
+                return "gate"
             if started < self._confirm_started - 0.5:
-                return
-            self.emit("heard", text=text)
+                return "said before the question"
+            self.emit("heard", text=text, **via)
             answer = speech.parse_answer(cmd if cmd is not None else text)
             if answer is None:
-                self.speaker.speak("Sorry, was that a yes or a no?")
+                self.say("Sorry, was that a yes or a no?")
                 self._confirm_started = time.monotonic()
             else:
                 self._confirm_fut.set_result(answer)
-            return
+            return None
+
+        if cmd is not None or direct:
+            if self._reject("request", text, check("wake")):
+                return "gate"
+        elif not self.busy and started <= self.follow_up_until:
+            if self._reject("follow-up", text, check("followup")):
+                return "gate"
 
         if self.busy:
-            if cmd is not None and speech.is_stop(cmd):
-                self.emit("heard", text=text)
-                await self.stop()
-            elif cmd is not None:
-                self.emit("heard", text=text)
-                self.speaker.speak("I'm still working on the last request. Say stop to cancel it.")
-            return
+            if cmd is not None or direct:
+                self.emit("heard", text=text, **via)
+                self.say("I'm still working on the last request. Say stop to cancel it.")
+                return "busy with another request"
+            return "busy"
 
         if cmd is None:
-            if started > self.follow_up_until:
-                return
-            cmd = text  # follow-up window: no wake word needed
-        self.emit("heard", text=text)
-        self._room_command(cmd)
+            if not direct and started > self.follow_up_until:
+                return "no wake word"
+            cmd = text  # follow-up window or push-to-talk: no wake word needed
+        self.emit("heard", text=text, **via)
+        self._room_command(cmd, speak, client)
+        return None
 
     def _room_command(self, cmd: str, speak: bool = True, client: str | None = None) -> None:
         cmd, waiting = speech.split_wait(cmd)
@@ -324,7 +346,7 @@ class Assistant:
     # --- push-to-talk from the web page -------------------------------------------------
 
     async def submit_audio(self, pcm: bytes, speak: bool = True, client: str | None = None) -> dict:
-        """A clip recorded on the web page: no wake word needed, same gate."""
+        """A clip recorded on the web page: no wake word needed, same gate and routing."""
         t = await self.asr.transcribe(pcm)
         t.text = self.pronounce.stt(t.text)
         a = analyze(pcm)
@@ -333,23 +355,10 @@ class Assistant:
         reason = gate.check("direct", t.text, t, a, None, self.cfg.gate)
         if self._reject("web", t.text, reason):
             return {"text": t.text, "ignored": reason}
-        self.emit("heard", text=t.text, via="web")
-        if self._listen is not None and not self._listen.fut.done():
-            self._listen_got(t.text)
-        elif self._confirm_fut is not None and not self._confirm_fut.done():
-            answer = speech.parse_answer(t.text)
-            if answer is not None:
-                self._confirm_fut.set_result(answer)
-        elif self.busy:
-            cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
-            if speech.is_stop(cmd if cmd is not None else t.text):
-                await self.stop()
-            else:
-                return {"text": t.text, "ignored": "busy with another request"}
-        else:
-            cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
-            self._room_command(cmd if cmd is not None else t.text, speak, client)
-        return {"text": t.text}
+        cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
+        ignored = await self._route(t.text, cmd, time.monotonic(), lambda kind: None, direct=True,
+                                    speak=speak, client=client)
+        return {"text": t.text, **({"ignored": ignored} if ignored else {})}
 
     # --- Claude sessions talking through the MCP server ------------------------------------
 
@@ -380,12 +389,15 @@ class Assistant:
         if not await self.floor.acquire(agent, wait_for_floor):
             return {"status": "floor_busy", **self.floor.status()}
         prev_state = self.state
+        stopped = self._discuss_stop = asyncio.Event()
         try:
             self._set_state("agent")
             if message:
                 self.emit("agent_said", agent=agent, text=message)
                 self.speaker.speak(speech.to_speech(message), voice=voice)
                 await self.speaker.wait_idle()
+            if stopped.is_set():
+                return {"status": "stopped", "text": ""}
             if not listen:
                 return {"status": "ok", "spoke": bool(message)}
             fut = asyncio.get_running_loop().create_future()
@@ -411,7 +423,8 @@ class Assistant:
             return {"status": "ok", "text": text}
         finally:
             self._listen = None
-            self.floor.release(agent, hold=hold)
+            self._discuss_stop = None
+            self.floor.release(agent, hold=hold and not stopped.is_set())
             self._set_state(prev_state if prev_state != "agent" else "idle")
 
     def voice_status(self) -> dict:
@@ -538,6 +551,8 @@ class Assistant:
         self.answer_confirm(False)
         if self._listen is not None and not self._listen.fut.done():
             self._listen.fut.set_result("stop")
+        if self._discuss_stop is not None:
+            self._discuss_stop.set()
         if self.busy:
             self._silence_turn = True
             await self.brain.interrupt()
