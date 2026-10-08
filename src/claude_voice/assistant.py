@@ -35,7 +35,9 @@ class Assistant:
         self._confirm_started = 0.0
         self.history: deque[dict] = deque(maxlen=300)
         self._listeners: set[asyncio.Queue[dict]] = set()
-        self._wake_prompt = "A conversation with an assistant named Claude."
+        # No initial prompt: Whisper spells "Claude" fine without one, and on
+        # silence it tends to echo a prompt back as if it had been said.
+        self._wake_prompt: str | None = None
 
     # --- events for the web UI -------------------------------------------------
 

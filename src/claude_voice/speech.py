@@ -8,7 +8,7 @@ import re
 _WORD = re.compile(r"[a-z']+")
 _LEADERS = {"hey", "hi", "hello", "ok", "okay", "yo", "a", "ay", "hay"}
 
-STOP_WORDS = {"stop", "cancel", "quiet", "shut up", "enough", "never mind", "nevermind", "be quiet", "hush"}
+STOP_WORDS = {"stop", "stomp", "stopp", "cancel", "quiet", "shut up", "enough", "never mind", "nevermind", "be quiet", "hush"}
 RESET_PHRASES = {"new conversation", "start over", "reset", "new session", "forget everything", "clear context"}
 _YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "approve", "approved", "allow", "affirmative",
         "go ahead", "do it", "proceed", "please do", "go for it", "correct", "fine"}
