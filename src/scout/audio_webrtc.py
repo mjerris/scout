@@ -23,7 +23,15 @@ import numpy as np
 
 from .aec import EchoCanceller, Resampler, resample_offline
 from .audio_io import EventHandler, FrameAssembler, PlayHandle
-from .audio_plain import RESTART_ATTEMPTS, STALL_SECONDS, DeviceWatcher, SoundAPI, SoundDevice, Stream
+from .audio_plain import (
+    RESTART_ATTEMPTS,
+    STALL_SECONDS,
+    DeviceWatcher,
+    SoundAPI,
+    SoundDevice,
+    Stream,
+    speaker_channels,
+)
 
 log = logging.getLogger(__name__)
 
@@ -164,7 +172,7 @@ class WebRTCAudioIO:
         stream = self._sd.duplex_stream(
             samplerate=RATE,
             blocksize=BLOCK,
-            channels=(1, 1),
+            channels=(1, speaker_channels(self._sd, out_dev)),
             dtype="int16",
             device=(in_dev, out_dev),
             latency=self._latency_setting,
@@ -227,7 +235,7 @@ class WebRTCAudioIO:
                 return
             out = self._out_block
             finished = self._ring.read_into(out)
-            outdata[:, 0] = out
+            outdata[:] = out[:, None]  # the same mono signal on every speaker channel
             cleaned = self._aec.process(indata[:, 0], out)
             pcm = np.clip(np.rint(self._decim.process(cleaned)), -32768, 32767).astype("<i2").tobytes()
             if loop is not None:
