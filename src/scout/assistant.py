@@ -71,6 +71,7 @@ class Assistant:
         # With an echo-cancelling voice layer the mic no longer hears our own voice,
         # so talk-over is real speech (barge-in) and text-based echo stripping is off.
         self.echo_cancelled = echo_cancelled
+        self.echo_stats: Callable[[], dict[str, Any]] = dict  # the voice layer's stats(); set by the app
         self._message_barged: float | None = None  # onset of a barge into a session's message
         self.asr = asr
         self.speaker = speaker
@@ -636,7 +637,23 @@ class Assistant:
             return
         if not self.speaker.busy or self.mic_muted:
             return
+        if not self.echo_settled():
+            log.info("barge-in held: the echo canceller is still adapting (%s)", self._echo_note())
+            return
         self._spawn(self._barge_in())
+
+    def echo_settled(self) -> bool:
+        """Has the echo canceller adapted enough that speech during playback is the user?"""
+        st = self.echo_stats()
+        if "erle_db" not in st:
+            return True  # this backend doesn't measure it
+        a = self.cfg.audio
+        erle, learned = st.get("erle_db"), st.get("echo_learned_s") or 0.0
+        return erle is not None and erle >= a.barge_in_min_erle_db and learned >= a.barge_in_min_learned_s
+
+    def _echo_note(self) -> str:
+        st = self.echo_stats()
+        return f"{st.get('erle_db')} dB removed after {st.get('echo_learned_s')} s of playback"
 
     async def _barge_in(self) -> None:
         onset = time.monotonic()

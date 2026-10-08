@@ -585,6 +585,29 @@ def test_barge_in_stops_a_room_reply_and_opens_a_follow_up() -> None:
     assert stopped >= 1 and follow_up
 
 
+@pytest.mark.parametrize(
+    ("stats", "barges"),
+    [
+        ({"erle_db": None, "echo_learned_s": 0.0}, False),  # nothing played yet
+        ({"erle_db": 4.0, "echo_learned_s": 1.2}, False),  # first seconds on a new speaker (the TV)
+        ({"erle_db": 20.0, "echo_learned_s": 1.0}, False),  # good, but not enough experience yet
+        ({"erle_db": 25.0, "echo_learned_s": 8.0}, True),  # adapted
+        ({}, True),  # a backend that doesn't measure it
+    ],
+)
+def test_barge_in_waits_for_the_echo_canceller_to_adapt(stats: dict[str, Any], barges: bool) -> None:
+    async def go() -> int:
+        r = make()
+        r.a.echo_cancelled = True
+        r.a.echo_stats = lambda: stats
+        r.spk.busy = True
+        r.a.on_speech_onset(while_speaking=True)
+        await asyncio.sleep(0.05)
+        return r.spk.stopped
+
+    assert (run(go()) >= 1) is barges
+
+
 def test_no_barge_in_without_an_echo_canceller() -> None:
     async def go() -> int:
         r = make()

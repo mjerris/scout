@@ -325,6 +325,7 @@ class WebRTCAudioIO:
             "latency_out_ms": round(1000 * self._latency[1], 1),
             "delay_ms": self._aec.delay_ms,
             "erle_db": None if erle is None else round(erle, 1),
+            "echo_learned_s": round(self._aec.learned_seconds, 1),
             "callback_us_avg": round(1e6 * self._cpu_total / n, 1),
             "callback_us_max": round(1e6 * self._cpu_max, 1),
             "queued_seconds": round(self._ring.samples / RATE, 3),
