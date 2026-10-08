@@ -100,7 +100,7 @@ def test_stop_during_approval_stops_everything() -> None:
         r = make()
         task = asyncio.create_task(r.a._confirm("Run command?", "run a command"))
         await asyncio.sleep(0.01)
-        await hear(r, "Claude, stop")
+        await hear(r, "Scout, stop")
         return await task, r.spk.stopped
 
     answer, stopped = run(go())
@@ -234,7 +234,7 @@ def test_busy_reply_goes_to_whoever_spoke() -> None:
         r.a._turn = turn
         r.a._out = {"mini": False, "client": "phone"}
         events = r.a.subscribe()
-        await hear(r, "Claude, what time is it")  # someone in the room, via the mic
+        await hear(r, "Scout, what time is it")  # someone in the room, via the mic
         turn.cancel()
         says = []
         while not events.empty():
@@ -344,7 +344,7 @@ def test_talking_over_reply_without_wake_word_is_not_queued() -> None:
         r.a._turn = turn
         await hear(r, "Here is the weather for today. can you pass the salt", echo=True, started=now - 2)
         first = r.a._queued
-        await hear(r, "Here is the weather for today. Claude, and tomorrow?", echo=True, started=now - 2)
+        await hear(r, "Here is the weather for today. Scout, and tomorrow?", echo=True, started=now - 2)
         turn.cancel()
         return first, r.a._queued
 

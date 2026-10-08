@@ -390,7 +390,7 @@ class Assistant:
         owner = self.floor.owner()
         if owner not in (None, ROOM) and not confirming and cmd is None and not direct:
             return ignore(f"{owner} has the floor")
-        # (A "Hey Claude" or web request goes ahead; its turn queues for the floor.)
+        # (A "Hey Scout" or web request goes ahead; its turn queues for the floor.)
 
         if confirming:
             aud = self._confirm_audience
@@ -469,7 +469,7 @@ class Assistant:
         if self._held_words:
             cmd = " ".join([*self._held_words, cmd]).strip()
             self._held_words = []
-        if not cmd.strip():  # a bare "Hey Claude": chime and wait for the request
+        if not cmd.strip():  # a bare "Hey Scout": chime and wait for the request
             self._listen_for_more(max(self.cfg.wake.follow_up_seconds, 6), speak)
             return
         if speech.is_reset(cmd):

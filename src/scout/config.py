@@ -19,13 +19,10 @@ DATA = Path(
 @dataclass
 class WakeConfig:
     # Words that wake the assistant when they appear in the first few words of
-    # an utterance. Whisper spells "Claude" many ways, so the near-misses are
-    # included.
-    names: list[str] = field(
-        # Not "cloud", "clawed", "clod" or "claudia": those are everyday words and
-        # names, and woke the assistant during ordinary talk.
-        default_factory=lambda: ["claude", "claud", "klaud"]
-    )
+    # an utterance. Whisper spelled "Scout" right in 25 of 25 tries across five
+    # voices, so no near-misses are needed (unlike "Claude", which it heard as
+    # "cloud", "clog" and "clod"). Add "claude" here to keep the old name too.
+    names: list[str] = field(default_factory=lambda: ["scout"])
     max_position: int = 3  # name must be within the first N words
     # After a reply, listen this many seconds for a follow-up without the wake word.
     follow_up_seconds: float = 8.0
@@ -86,10 +83,10 @@ class GateConfig:
 class AsrConfig:
     model: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "en"
-    # Context Whisper sees before each clip. Short clips give it none, and on this
-    # mic it heard "Hey Claude" as "a clog"/"hey cloud" in 2 of 7 tries; with this
-    # prompt, 7 of 7, other clips unchanged, and no invented wake words on noise.
-    prompt: str = "Hey Claude."
+    # Context Whisper sees before each clip; short clips give it none. Naming the
+    # wake word helps it spell it (for "Claude" it took misses from 2 in 7 to 0
+    # in 7, with other clips unchanged and no invented wake words on noise).
+    prompt: str = "Hey Scout."
 
 
 @dataclass

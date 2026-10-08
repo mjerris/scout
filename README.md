@@ -29,15 +29,15 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   `audio.max_pause_ms` (1.5 s). `audio.turn_detection = "simple"` goes back
   to a fixed silence (`audio.silence_ms`).
 
-- **Wake word:** say "Hey Claude, …" (or just "Claude, …") with the request in
-  the same breath, or say "Hey Claude", wait for the chime, then speak. For 8
+- **Wake word:** say "Hey Scout, …" (or just "Scout, …") with the request in
+  the same breath, or say "Hey Scout", wait for the chime, then speak. For 8
   seconds after a reply the room heard you can follow up without the wake word
   (replies that only went to your phone open no such window).
-- **Stop:** "Claude, stop" (also "Stop, Claude", "stop, stop", "that's enough")
+- **Stop:** "Scout, stop" (also "Stop, Claude", "stop, stop", "that's enough")
   interrupts speech and the running request, cancels a pending question, ends a
   session's listen or floor hold, and drops anything queued. "Claude, new
   conversation" starts a fresh session.
-- **Busy:** a "Hey Claude …" request while one is running is queued ("Okay, I'll
+- **Busy:** a "Hey Scout …" request while one is running is queued ("Okay, I'll
   do that next.") and runs when the current one ends.
 - **Local gate:** every transcript passes deterministic checks before it can
   reach Claude, so noise and hallucinations cost no tokens. The checks use
@@ -45,7 +45,7 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   of actual speech, a list of known noise phrases, and loudness. Follow-ups
   without the wake word are held to a stricter standard: at least two words,
   well above the room's noise floor, and not much quieter than your last
-  "Hey Claude". Rejections are logged as `ignored ... (reason)` and shown
+  "Hey Scout". Rejections are logged as `ignored ... (reason)` and shown
   struck through on the web page. Thresholds are under `[gate]` in the config.
 - **Permissions:** `claude.approval_policy` picks who decides what runs
   without asking:
@@ -129,7 +129,7 @@ claude mcp add --scope user voice -- uv run --project ~/src/scout python -m scou
 **The floor (conch):** one speaker at a time. The room assistant and each
 session take the floor for an exchange; `hold_floor` keeps it for a few
 seconds so a back-and-forth isn't interrupted, and others queue in order. A
-"Hey Claude" request waits up to 15 s for a session to finish. "Claude, stop"
+"Hey Scout" request waits up to 15 s for a session to finish. "Scout, stop"
 always works. The web page shows who has the floor.
 
 ## Phone and other devices (Tailscale)
@@ -247,7 +247,7 @@ input_device` and `output_device`. Other useful knobs in `config.toml`:
 | `wake.follow_up_seconds = 0` | always require the wake word |
 
 Without headphones the mic hears the assistant too. Speech that starts while it
-is talking is ignored, except "Claude, stop".
+is talking is ignored, except "Scout, stop".
 
 ## Mail and calendar for every session
 
