@@ -265,7 +265,9 @@ class Assistant:
             return  # not speech at all; nothing to show
         if self._reject("clip", text, gate.coverage(text, a, self.cfg.gate)):
             return
-        cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
+        cmd = speech.strip_wake(
+            text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+        )
         confirming = self._confirm_fut is not None and not self._confirm_fut.done()
         listening = self._listen is not None and not self._listen.fut.done()
         started = utt.started
@@ -304,7 +306,9 @@ class Assistant:
             log.info("heard after own speech: %s", residual)
             text = residual
             started = self.speaker.last_speech_end(utt.started) or utt.started
-            cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
+            cmd = speech.strip_wake(
+                text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+            )
             if (
                 not listening
                 and self.busy
@@ -439,7 +443,9 @@ class Assistant:
         return None
 
     def _is_stop(self, text: str) -> bool:
-        return speech.is_stop_utterance(text, self.cfg.wake.names, self.cfg.wake.max_position)
+        return speech.is_stop_utterance(
+            text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+        )
 
     def _named(self, text: str) -> bool:
         """Does the utterance contain the wake name at all ("Stop, Claude")?"""
@@ -503,7 +509,9 @@ class Assistant:
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None:
         """A request typed on the web page: same routing as speech (stop, reset,
         approvals, a listening session), no gate. Returns why it was ignored, if it was."""
-        cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
+        cmd = speech.strip_wake(
+            text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+        )
         return await self._route(
             text, cmd, time.monotonic(), lambda kind: None, direct=True, speak=speak, client=client
         )
@@ -518,7 +526,9 @@ class Assistant:
         reason = gate.check("direct", t.text, t, a, None, self.cfg.gate)
         if self._reject("web", t.text, reason):
             return {"text": t.text, "ignored": reason}
-        cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
+        cmd = speech.strip_wake(
+            t.text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+        )
         ignored = await self._route(
             t.text, cmd, time.monotonic(), lambda kind: None, direct=True, speak=speak, client=client
         )

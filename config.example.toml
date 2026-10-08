@@ -3,6 +3,7 @@
 [wake]
 # Wake if one of these appears in the first `max_position` words ("Hey Scout, ...").
 names = ["scout"]   # add "claude" to keep answering to the old name too
+greeted_names = ["scott"]   # wake only after a greeting: "Hey Scott" yes, "Scott said" no
 max_position = 3
 # After a reply, keep listening this long for a follow-up without the wake word (0 = off).
 follow_up_seconds = 8.0

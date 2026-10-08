@@ -23,6 +23,10 @@ class WakeConfig:
     # voices, so no near-misses are needed (unlike "Claude", which it heard as
     # "cloud", "clog" and "clod"). Add "claude" here to keep the old name too.
     names: list[str] = field(default_factory=lambda: ["scout"])
+    # Near-misses that are also everyday names wake it only right after a greeting:
+    # on the OBSBOT mic Whisper heard "Hey Scout" as "Hey Scott", but "Scott said
+    # the build failed" is about someone else.
+    greeted_names: list[str] = field(default_factory=lambda: ["scott"])
     max_position: int = 3  # name must be within the first N words
     # After a reply, listen this many seconds for a follow-up without the wake word.
     follow_up_seconds: float = 8.0
