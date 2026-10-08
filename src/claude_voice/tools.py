@@ -14,7 +14,8 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from . import calendar_mac, mac, mail_mac
+from . import mac
+from .shared_tools import SHARED
 from .config import ROOT
 
 log = logging.getLogger(__name__)
@@ -170,106 +171,14 @@ def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
             wrap(lambda a: _async(_cancelled(timers.cancel(a.get("which", "")))))
         ),
         tool(
-            "calendar_events",
-            "Read events from the Mac's calendars (Google, iCloud and others synced to this Mac). "
-            "start/end are ISO 8601 local times or dates, e.g. 2026-10-08 or 2026-10-08T15:00; "
-            "default is today. Optional query filters by title, location or notes; optional "
-            "calendar limits to one calendar by name.",
-            {
-                "type": "object",
-                "properties": {
-                    "start": {"type": "string"},
-                    "end": {"type": "string"},
-                    "query": {"type": "string"},
-                    "calendar": {"type": "string"},
-                },
-            },
-        )(
-            wrap(
-                lambda a: calendar_mac.events(a.get("start"), a.get("end"), a.get("query"), a.get("calendar"))
-            )
-        ),
-        tool("calendar_list", "List the Mac's calendars and which can be written to.", {})(
-            wrap(lambda a: calendar_mac.calendars())
-        ),
-        tool(
-            "calendar_create_event",
-            "Add an event to a calendar (the user confirms by voice). start/end are ISO 8601 "
-            "local times; end defaults to one hour after start. all_day=true for an all-day "
-            "event (start is a date). calendar is a name from calendar_list; default is the "
-            "Mac's default calendar.",
-            {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "start": {"type": "string"},
-                    "end": {"type": "string"},
-                    "all_day": {"type": "boolean"},
-                    "calendar": {"type": "string"},
-                    "location": {"type": "string"},
-                    "notes": {"type": "string"},
-                },
-                "required": ["title", "start"],
-            },
-        )(wrap(lambda a: calendar_mac.create_event(a))),
-        tool(
-            "mail_recent",
-            "List the newest messages in Mail's inbox (all accounts): id, date, sender, subject. "
-            "count 1-50 (default 10); unread_only=true for unread only.",
-            {
-                "type": "object",
-                "properties": {"count": {"type": "integer"}, "unread_only": {"type": "boolean"}},
-            },
-        )(wrap(lambda a: mail_mac.recent(a.get("count"), a.get("unread_only", False)))),
-        tool(
-            "mail_search",
-            "Find recent inbox messages whose subject or sender contains query (searches the newest 300).",
-            {
-                "type": "object",
-                "properties": {"query": {"type": "string"}, "count": {"type": "integer"}},
-                "required": ["query"],
-            },
-        )(wrap(lambda a: mail_mac.search(a.get("query"), a.get("count")))),
-        tool("mail_read", "Read one inbox message by its id (from mail_recent or mail_search).", {"id": int})(
-            wrap(lambda a: mail_mac.read(a.get("id")))
-        ),
-        tool(
-            "mail_draft",
-            "Create an email draft in Mail and open it for the user to review. Sends nothing. "
-            "to and cc are lists of email addresses.",
-            {
-                "type": "object",
-                "properties": {
-                    "to": {"type": "array", "items": {"type": "string"}},
-                    "cc": {"type": "array", "items": {"type": "string"}},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                },
-                "required": ["to"],
-            },
-        )(wrap(lambda a: mail_mac.draft(a))),
-        tool(
-            "mail_send",
-            "Send an email from Mail (the user confirms by voice). to and cc are lists of email "
-            "addresses. Prefer mail_draft unless the user clearly asked to send.",
-            {
-                "type": "object",
-                "properties": {
-                    "to": {"type": "array", "items": {"type": "string"}},
-                    "cc": {"type": "array", "items": {"type": "string"}},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                },
-                "required": ["to"],
-            },
-        )(wrap(lambda a: mail_mac.send(a))),
-        tool(
             "request_app_change",
             "Send a requested change to this voice app (how it listens, talks, asks for "
             "approval, its config) to the Claude session that maintains it.",
             {"summary": str, "details": str},
         )(wrap(lambda a: _request_change(a))),
     ]
+    # Mail and calendar: the same definitions the MCP server offers other sessions.
+    tools += [tool(t.name, t.description, t.schema)(wrap(t.run)) for t in SHARED]
     return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
 
 

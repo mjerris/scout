@@ -125,7 +125,8 @@ def format_list(data: dict[str, Any], what: str) -> str:
     for m in msgs:
         flag = "" if m.get("read") else "unread, "
         lines.append(
-            f"id {m['id']}: {flag}{_short_date(m.get('date', ''))}, from {m.get('sender', '')}: {m.get('subject') or '(no subject)'}"
+            f"id {m['id']}: {flag}{_short_date(m.get('date', ''))}, from {m.get('sender', '')}: "
+            f"{m.get('subject') or '(no subject)'} (received {m.get('date', '')})"
         )
     return "\n".join(lines)
 
@@ -148,7 +149,10 @@ async def search(query: Any, count: Any = 10, run: Runner = _jxa) -> str:
 async def read(message_id: Any, run: Runner = _jxa) -> str:
     mid = mac.check_int(message_id, 1, 2**31 - 1, "id")
     m = await _call(run, _READ, str(mid), str(_MAX_BODY))
-    head = f"From {m.get('sender', '')}, {_short_date(m.get('date', ''))}, to {', '.join(m.get('to', []))}"
+    head = (
+        f"From {m.get('sender', '')}, {_short_date(m.get('date', ''))} (received {m.get('date', '')}), "
+        f"to {', '.join(m.get('to', []))}"
+    )
     if m.get("cc"):
         head += f", cc {', '.join(m['cc'])}"
     body = m.get("body", "") + ("\n[message continues; truncated]" if m.get("truncated") else "")

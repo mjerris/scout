@@ -16,12 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import gate, speech
+from . import gate, shared_tools, speech
 from .asr import Transcriber
 from .audio import Utterance, analyze
-from .brain import Brain
+from .brain import Brain, describe_tool
 from .config import ROOT, Config
 from .floor import Floor
+from .mac import ToolError
 from .pronounce import Pronouncer
 from .rules import Rules
 from .tools import Timers, build_server
@@ -752,8 +753,11 @@ class Assistant:
         elif not speech.is_stop(text):
             self._room_command(text, out["mini"], out["client"])
 
-    async def _confirm(self, spoken: str, description: str) -> bool | str | None:
-        """True/False for a spoken or clicked answer, None if nobody answered."""
+    async def _confirm(
+        self, spoken: str, description: str, out: dict[str, Any] | None = None
+    ) -> bool | str | None:
+        """True/False for a spoken or clicked answer, None if nobody answered.
+        `out`: where to ask (default: where the current turn's replies go)."""
         gen = self._confirm_gen
         if self._confirm_waiting >= 5:  # a runaway fan-out of tool calls: don't queue forever
             return False
@@ -762,11 +766,13 @@ class Assistant:
             async with self._confirm_lock:
                 if gen != self._confirm_gen:
                     return False  # the user said stop while this one was waiting its turn
-                return await self._confirm_one(spoken, description)
+                return await self._confirm_one(spoken, description, out)
         finally:
             self._confirm_waiting -= 1
 
-    async def _confirm_one(self, spoken: str, description: str) -> bool | str | None:
+    async def _confirm_one(
+        self, spoken: str, description: str, out: dict[str, Any] | None = None
+    ) -> bool | str | None:
         if self._silence_turn:  # the turn was stopped; don't ask about its tools
             return False
         loop = asyncio.get_running_loop()
@@ -774,13 +780,17 @@ class Assistant:
         self._confirm_id += 1
         cid = self._confirm_id
         self._confirm_started = float("inf")  # no speech counts until the question has been asked
-        self._confirm_audience = dict(self._out)
+        out = dict(out or self._out)
+        self._confirm_audience = out
         self._confirm_fut = fut
         ok: bool | str | None = False
         try:
             self.emit("confirm", id=cid, text=description)
             self._set_state("confirming")
-            self.say(spoken)
+            if out["mini"]:
+                self.speaker.speak(spoken)
+            if out["client"]:
+                self.emit("say", text=spoken, to=out["client"])
             await self.speaker.wait_idle()
             if not fut.done():
                 self._confirm_started = time.monotonic()
@@ -788,7 +798,10 @@ class Assistant:
                 ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
             except TimeoutError:
                 ok = None
-                self.say("No answer, so I skipped that.")
+                if out["mini"]:
+                    self.speaker.speak("No answer, so I skipped that.")
+                if out["client"]:
+                    self.emit("say", text="No answer, so I skipped that.", to=out["client"])
         finally:
             # Also on cancellation (the SDK withdrew the request): never leave a stale question.
             self._confirm_fut = None
@@ -796,6 +809,39 @@ class Assistant:
             self.emit("confirm_done", id=cid, approved=bool(ok), always=ok == "always")
             self._set_state("thinking" if self.busy else "idle")
         return ok
+
+    async def run_shared_tool(self, agent: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Run a mail or calendar tool for another Claude session (via the MCP server).
+        Tools that send or add something are confirmed by voice in the room first,
+        whatever that session's own permission settings say; "always" is just once."""
+        t = shared_tools.BY_NAME.get(name)
+        if t is None:
+            return {"status": "error", "error": f"unknown tool {name!r}"}
+        if t.asks:
+            spoken, detail = describe_tool(name, args)
+            who = agent.split("#", 1)[0] or "a session"
+            log.info("permission request from %s: %s", agent, detail.splitlines()[0])
+            answer = await self._confirm(
+                f"From {who}: {spoken}",
+                f"{detail}\n(requested by session {agent})",
+                {"mini": True, "client": None},
+            )
+            if answer is None:
+                return {
+                    "status": "no_answer",
+                    "error": "The user did not answer the spoken confirmation, so this was not done.",
+                }
+            if not answer:
+                return {"status": "declined", "error": "The user declined this by voice."}
+            if answer == "always":
+                self.speaker.speak("Okay, just this once. That kind of action always asks.")
+        try:
+            return {"status": "ok", "text": await t.run(args)}
+        except ToolError as exc:
+            return {"status": "error", "error": str(exc)}
+        except Exception as exc:  # report it to the caller; don't take the app down
+            log.exception("shared tool %s failed", name)
+            return {"status": "error", "error": f"failed: {exc}"}
 
     def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> None:
         """Answer the pending question. With `confirm_id`, only if it's still that

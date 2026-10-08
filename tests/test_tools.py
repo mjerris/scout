@@ -272,3 +272,22 @@ def test_config_values_are_type_checked(tmp_path: Path, toml: str, error: str | 
     else:
         with pytest.raises(ValueError, match=error):
             load(f)
+
+
+def test_shared_tools_are_offered_alike_to_the_room_and_other_sessions() -> None:
+    """One definition list: the room's voice_app server, the MCP server and the
+    voice-approval lists can't drift apart."""
+    from claude_voice import brain, mcp_server
+    from claude_voice.shared_tools import SHARED
+
+    _, names = build_server(Timers(lambda label: None))
+    asks = {f"mcp__voice_app__{t.name}" for t in SHARED if t.asks}
+    assert {f"mcp__voice_app__{t.name}" for t in SHARED} <= set(names)
+    assert set(brain.ALWAYS_ASK_TOOLS) == asks
+    offered = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    for t in SHARED:
+        assert t.name in offered, t.name
+        theirs = offered[t.name].input_schema or {}
+        assert set(theirs.get("properties", {})) == set(t.schema["properties"]), t.name
+        assert set(theirs.get("required") or []) == set(t.schema.get("required", [])), t.name
+        assert offered[t.name].description == t.description

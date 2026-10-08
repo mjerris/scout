@@ -212,6 +212,21 @@ input_device` and `output_device`. Other useful knobs in `config.toml`:
 Without headphones the mic hears the assistant too. Speech that starts while it
 is talking is ignored, except "Claude, stop".
 
+## Mail and calendar for every session
+
+The mail and calendar tools are defined once (`shared_tools.py`) and offered
+both to the room assistant and, through the MCP server, to any other Claude
+Code session, as `mcp__voice__calendar_events`, `mcp__voice__mail_recent`, and
+so on. The running app always does the work: other sessions' calls go to it
+(`POST /api/tool`), so macOS's calendar and Mail permissions belong to the app
+alone. Sending mail and adding events are confirmed by voice in the room on
+every call ("From myproject: Send email to sam@example.com, subject Lunch?"),
+whatever the calling session's own permission settings say.
+
+How to use them (which tool, untrusted email, how to say results out loud) is
+the `mail-calendar` skill in `skills/`; `scripts/install-skills.sh` links it
+into `~/.claude/skills` for the room and every other session.
+
 ## Calendar
 
 The assistant reads the Mac's own calendar store, so any account synced to
