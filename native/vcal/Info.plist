@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.claude-voice.vcal</string>
+	<key>CFBundleName</key>
+	<string>claude-voice calendar</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>claude-voice reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>claude-voice reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
+</dict>
+</plist>

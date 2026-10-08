@@ -14,7 +14,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from . import mac
+from . import calendar_mac, mac
 from .config import ROOT
 
 log = logging.getLogger(__name__)
@@ -169,6 +169,49 @@ def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
         tool("cancel_timer", "Cancel timers by label or number, or 'all'.", {"which": str})(
             wrap(lambda a: _async(_cancelled(timers.cancel(a.get("which", "")))))
         ),
+        tool(
+            "calendar_events",
+            "Read events from the Mac's calendars (Google, iCloud and others synced to this Mac). "
+            "start/end are ISO 8601 local times or dates, e.g. 2026-10-08 or 2026-10-08T15:00; "
+            "default is today. Optional query filters by title, location or notes; optional "
+            "calendar limits to one calendar by name.",
+            {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "query": {"type": "string"},
+                    "calendar": {"type": "string"},
+                },
+            },
+        )(
+            wrap(
+                lambda a: calendar_mac.events(a.get("start"), a.get("end"), a.get("query"), a.get("calendar"))
+            )
+        ),
+        tool("calendar_list", "List the Mac's calendars and which can be written to.", {})(
+            wrap(lambda a: calendar_mac.calendars())
+        ),
+        tool(
+            "calendar_create_event",
+            "Add an event to a calendar (the user confirms by voice). start/end are ISO 8601 "
+            "local times; end defaults to one hour after start. all_day=true for an all-day "
+            "event (start is a date). calendar is a name from calendar_list; default is the "
+            "Mac's default calendar.",
+            {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "calendar": {"type": "string"},
+                    "location": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["title", "start"],
+            },
+        )(wrap(lambda a: calendar_mac.create_event(a))),
         tool(
             "request_app_change",
             "Send a requested change to this voice app (how it listens, talks, asks for "
