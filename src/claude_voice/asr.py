@@ -4,27 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor
 
 import mlx_whisper
 import numpy as np
 
+from . import gate
+from .gate import Transcript
+
 log = logging.getLogger(__name__)
-
-# Phrases Whisper tends to hallucinate on noise or silence.
-_HALLUCINATIONS = {
-    "thank you", "thanks for watching", "thank you for watching", "you", "bye",
-    "subtitles by the amaraorg community", "please subscribe", "so", "uh", "um",
-}
-
-
-def _repeats(text: str, times: int = 3) -> bool:
-    """True if one sentence makes up the transcript, repeated `times`+ times."""
-    sentences = [s for s in (re.sub(r"[^a-z ]", "", x.lower()).strip()
-                             for x in re.split(r"[.!?]+", text)) if s]
-    return any(sentences.count(s) >= times for s in set(sentences))
-
 
 class Transcriber:
     def __init__(self, model: str, language: str):
@@ -33,11 +21,7 @@ class Transcriber:
         # MLX work stays on one thread.
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
 
-    @staticmethod
-    def _norm(s: str) -> str:
-        return re.sub(r"[^a-z ]", "", s.lower()).strip()
-
-    def _run(self, audio: np.ndarray, prompt: str | None) -> str:
+    def _run(self, audio: np.ndarray, prompt: str | None) -> Transcript:
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self.model,
@@ -47,22 +31,20 @@ class Transcriber:
             temperature=0.0,
             verbose=None,
         )
-        parts = [
-            s["text"]
-            for s in result.get("segments", [])
-            if not (s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0)
-            and s.get("compression_ratio", 0) <= 2.4  # runaway repetition loops
-        ]
-        text = " ".join(p.strip() for p in parts).strip()
-        if _repeats(text):
-            return ""
-        norm = self._norm(text)
-        # On noise Whisper may also echo its own prompt back.
-        if norm in _HALLUCINATIONS or (prompt and norm == self._norm(prompt)):
-            return ""
-        return text
+        # Segments that are runaway repetition loops are dropped outright.
+        segs = [s for s in result.get("segments", []) if s.get("compression_ratio", 0) <= 2.4]
+        text = gate.clean(" ".join(s["text"].strip() for s in segs))
+        if not segs or not text:
+            return Transcript("")
+        weights = [max(len(s.get("tokens", [])), 1) for s in segs]
+        return Transcript(
+            text=text,
+            avg_logprob=sum(s.get("avg_logprob", 0) * w for s, w in zip(segs, weights)) / sum(weights),
+            no_speech_prob=max(s.get("no_speech_prob", 0) for s in segs),
+            compression_ratio=max(s.get("compression_ratio", 0) for s in segs),
+        )
 
-    async def transcribe(self, pcm: bytes, prompt: str | None = None) -> str:
+    async def transcribe(self, pcm: bytes, prompt: str | None = None) -> Transcript:
         audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
         return await asyncio.get_running_loop().run_in_executor(self._pool, self._run, audio, prompt)
 

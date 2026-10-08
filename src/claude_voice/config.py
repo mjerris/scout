@@ -35,6 +35,19 @@ class AudioConfig:
 
 
 @dataclass
+class GateConfig:
+    """Local checks every transcript passes before it can reach Claude."""
+    min_logprob: float = -1.0  # Whisper confidence floor with the wake word
+    min_logprob_followup: float = -0.9  # stricter floor without it
+    max_no_speech_prob: float = 0.6
+    max_compression_ratio: float = 2.4
+    max_words_per_second: float = 6.0  # of VAD-voiced speech
+    followup_min_words: int = 2
+    followup_min_snr_db: float = 10.0  # above the room's noise floor
+    followup_max_drop_db: float = 12.0  # quieter than your last wake request by more = someone else
+
+
+@dataclass
 class AsrConfig:
     model: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "en"
@@ -92,6 +105,7 @@ class WebConfig:
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    gate: GateConfig = field(default_factory=GateConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)

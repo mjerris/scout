@@ -12,6 +12,8 @@ import numpy as np
 import sounddevice as sd
 import webrtcvad
 
+from .gate import AudioStats
+
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
@@ -31,11 +33,17 @@ def resolve_device(spec: str, kind: str) -> int | None:
     raise ValueError(f"no {kind} device matching {spec!r}; run with --list-devices")
 
 
+def frame_db(frame: bytes) -> float:
+    s = np.frombuffer(frame, np.int16).astype(np.float32)
+    return 10 * np.log10(float(np.mean(s * s)) / 32768.0**2 + 1e-12)
+
+
 @dataclass
 class Utterance:
     pcm: bytes  # 16 kHz mono int16
     started: float  # time.monotonic() when speech was detected
     echo: bool  # speech began while (or just after) the assistant was talking
+    stats: AudioStats
 
 
 class Microphone:
@@ -91,7 +99,13 @@ class Segmenter:
         self.buf: list[bytes] = []
         self.triggered = False
         self.voiced = 0
+        self.voiced_energy = 0.0  # summed mean-square power of voiced frames
         self.trailing = 0
+
+    @staticmethod
+    def _power(frame: bytes) -> float:
+        s = np.frombuffer(frame, np.int16).astype(np.float32) / 32768.0
+        return float(np.mean(s * s))
 
     def feed(self, frame: bytes) -> bytes | None | bool:
         """Returns True at speech onset, the utterance bytes at its end, else None."""
@@ -102,6 +116,7 @@ class Segmenter:
                 self.triggered = True
                 self.buf = [f for f, _ in self.ring]
                 self.voiced = sum(s for _, s in self.ring)
+                self.voiced_energy = sum(self._power(f) for f, s in self.ring if s)
                 self.trailing = 0
                 self.ring.clear()
                 return True
@@ -109,11 +124,14 @@ class Segmenter:
         self.buf.append(frame)
         if speech:
             self.voiced += 1
+            self.voiced_energy += self._power(frame)
             self.trailing = 0
         else:
             self.trailing += 1
         if self.trailing >= self.silence_frames or len(self.buf) >= self.max_frames:
             pcm, voiced = b"".join(self.buf), self.voiced
+            self.last_voiced_ms = voiced * FRAME_MS
+            self.last_level_db = 10 * np.log10(self.voiced_energy / max(voiced, 1) + 1e-12)
             self.reset()
             return pcm if voiced >= self.min_speech_frames else None
         return None
@@ -124,8 +142,18 @@ async def utterances(mic: Microphone, seg: Segmenter, is_echo, out: asyncio.Queu
     started, echo = 0.0, False
     silent_since = time.monotonic()
     warned = False
+    floor_db: float | None = None  # slow-moving ambient level between utterances
+    onset_floor = -60.0
     while True:
         frame = await mic.frames.get()
+        if not seg.triggered:
+            db = frame_db(frame)
+            # Track the floor quickly downward, slowly upward, so speech
+            # onsets barely move it.
+            if floor_db is None:
+                floor_db = db
+            else:
+                floor_db += (db - floor_db) * (0.2 if db < floor_db else 0.01)
         if not warned:
             if np.frombuffer(frame, np.int16).any():
                 silent_since = time.monotonic()
@@ -138,5 +166,7 @@ async def utterances(mic: Microphone, seg: Segmenter, is_echo, out: asyncio.Queu
         res = seg.feed(frame)
         if res is True:
             started, echo = time.monotonic(), is_echo()
+            onset_floor = floor_db if floor_db is not None else -60.0
         elif isinstance(res, bytes):
-            await out.put(Utterance(res, started, echo))
+            stats = AudioStats(seg.last_voiced_ms, seg.last_level_db, onset_floor)
+            await out.put(Utterance(res, started, echo, stats))

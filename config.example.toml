@@ -16,6 +16,18 @@ min_speech_ms = 300
 max_utterance_s = 30.0
 echo_tail_ms = 400
 
+[gate]
+# Local checks every transcript must pass before it reaches Claude (no tokens spent on rejects).
+# Rejections are logged as "ignored ... (reason)" and shown struck through on the web page.
+min_logprob = -1.0            # Whisper confidence floor with the wake word
+min_logprob_followup = -0.9   # stricter without it
+max_no_speech_prob = 0.6
+max_compression_ratio = 2.4
+max_words_per_second = 6.0
+followup_min_words = 2
+followup_min_snr_db = 10.0    # follow-ups must be this far above the room's noise
+followup_max_drop_db = 12.0   # ...and not this much quieter than your last "Hey Claude"
+
 [asr]
 model = "mlx-community/whisper-large-v3-turbo"  # smaller/faster: mlx-community/whisper-small-mlx
 language = "en"
