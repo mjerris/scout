@@ -2,8 +2,8 @@
 
 import pytest
 
-from claude_voice.config import GateConfig
-from claude_voice.gate import AudioStats, Transcript, check, clean, junk, repeats
+from scout.config import GateConfig
+from scout.gate import AudioStats, Transcript, check, clean, junk, repeats
 
 CFG = GateConfig()
 CLEAR = Transcript("", avg_logprob=-0.2, no_speech_prob=0.01, compression_ratio=1.2)

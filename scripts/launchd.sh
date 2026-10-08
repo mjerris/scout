@@ -1,12 +1,12 @@
 #!/bin/sh
-# Install/uninstall a user LaunchAgent that starts claude-voice at login and restarts it if it dies.
+# Install/uninstall a user LaunchAgent that starts scout at login and restarts it if it dies.
 #   scripts/launchd.sh install | uninstall | restart | status
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 # The path goes into XML: escape it so a folder like "R&D" can't break the plist.
 ROOT_XML=$(printf '%s' "$ROOT" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-LABEL=com.local.claude-voice
+LABEL=com.local.scout
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 

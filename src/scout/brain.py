@@ -46,7 +46,7 @@ the intended meaning) and hears your replies through text-to-speech.
 - When you produce code or documents, write them to files and briefly say where,
   rather than reading them aloud.
 - This voice front-end (wake word, speech recognition, text-to-speech, spoken
-  approval prompts, web page, config.toml) is the claude-voice app at {root}.
+  approval prompts, web page, config.toml) is the scout app at {root}.
   Another Claude session owns that project. Never edit it, its config or its
   processes yourself. When the user asks to change how you listen, talk, ask
   for approval or behave, call the request_app_change tool with a clear
@@ -299,7 +299,7 @@ class Brain:
                 "allow": [*(t for t in self.tool_names if t not in ASKING_TOOLS), "WebSearch"],
                 # "//" = absolute path in Claude Code permission rules ("/x" is relative to the
                 # settings file). The app is maintained by its owner session, not by voice;
-                # secrets are never readable; mcp__voice is the desk-session voice tool.
+                # secrets are never readable; mcp__scout is the desk-session voice tool.
                 "deny": [
                     *(f"{tool}(/{project}/**)" for tool in _FILE_TOOLS),
                     *(f"{tool}(/{_canon(p, ROOT)}/**)" for tool in _FILE_TOOLS for p in [project]),
@@ -307,7 +307,7 @@ class Brain:
                         f"Read(/{Path(p).expanduser()}{'/**' if not Path(p).suffix else ''})"
                         for p in SECRET_PATHS
                     ),
-                    "mcp__voice",
+                    "mcp__scout",
                 ],
                 # Ask beats allow, so these always reach the voice prompt even when
                 # ~/.claude settings allow them (verified against the CLI).
@@ -319,7 +319,7 @@ class Brain:
         return ClaudeAgentOptions(
             cwd=str(Path(self.cfg.cwd).expanduser()),
             settings=json.dumps(overrides),
-            env={"CLAUDE_VOICE_ROOM": "1"},  # our own MCP voice tool refuses to run inside the room agent
+            env={"SCOUT_ROOM": "1"},  # our own MCP voice tool refuses to run inside the room agent
             mcp_servers={"voice_app": self.tool_server},
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
@@ -377,7 +377,7 @@ class Brain:
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
         """Calls the voice agent may never make, whatever the user answers."""
         own_app = "This voice app is maintained by its owner session; use request_app_change instead of changing it."
-        if name.startswith("mcp__voice__"):
+        if name.startswith("mcp__scout__"):
             return "The voice tool is for other sessions; you already own the voice."
         path = str(args.get("file_path") or args.get("notebook_path") or args.get("path") or "")
         if name in _FILE_TOOLS and path and _under(path, [str(ROOT)], self._cwd):

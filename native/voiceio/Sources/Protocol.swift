@@ -1,4 +1,4 @@
-// Wire protocol between claude_voice.audio_apple and this helper.
+// Wire protocol between scout.audio_apple and this helper.
 //
 // Every message, both directions, is one binary frame:
 //     [1 byte type][u32 little-endian payload length][payload]

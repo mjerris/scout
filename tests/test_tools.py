@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from claude_voice import mac
-from claude_voice.rules import Rules, rule_for
-from claude_voice.speech import parse_answer
-from claude_voice.tools import Timers, _human, build_server
+from scout import mac
+from scout.rules import Rules, rule_for
+from scout.speech import parse_answer
+from scout.tools import Timers, _human, build_server
 
 
 @pytest.mark.parametrize("url", ["https://www.netflix.com", "http://example.com/a?b=c"])
@@ -150,24 +150,24 @@ def test_human_durations() -> None:
 
 
 def test_forbidden_calls(tmp_path: Path) -> None:
-    from claude_voice.brain import Brain
-    from claude_voice.config import ROOT, ClaudeConfig
+    from scout.brain import Brain
+    from scout.config import ROOT, ClaudeConfig
 
     async def never_asked(spoken: str, detail: str) -> bool | None:
         raise AssertionError("forbidden calls must not ask")
 
     server, names = build_server(Timers(lambda label: None))
     b = Brain(ClaudeConfig(), never_asked, server, names, Rules(tmp_path / "r.json"), lambda kind, text: None)
-    assert b._forbidden("Edit", {"file_path": str(ROOT / "src/claude_voice/brain.py")})
+    assert b._forbidden("Edit", {"file_path": str(ROOT / "src/scout/brain.py")})
     assert b._forbidden("Write", {"file_path": str(ROOT / "config.toml")})
-    assert b._forbidden("mcp__voice__discuss", {})
+    assert b._forbidden("mcp__scout__discuss", {})
     assert b._forbidden("Edit", {"file_path": str(tmp_path / "notes.txt")}) is None
     assert b._forbidden("Bash", {"command": "ls"}) is None
 
 
 def test_bad_permission_mode_fails_at_startup(tmp_path: Path) -> None:
-    from claude_voice.brain import Brain
-    from claude_voice.config import ClaudeConfig
+    from scout.brain import Brain
+    from scout.config import ClaudeConfig
 
     async def never(spoken: str, detail: str) -> bool | None:
         return None
@@ -185,8 +185,8 @@ def test_bad_permission_mode_fails_at_startup(tmp_path: Path) -> None:
 
 
 def _brain(tmp_path: Path, **cfg: Any) -> Any:
-    from claude_voice.brain import Brain
-    from claude_voice.config import ClaudeConfig
+    from scout.brain import Brain
+    from scout.config import ClaudeConfig
 
     async def never(spoken: str, detail: str) -> bool | None:
         return None
@@ -196,14 +196,14 @@ def _brain(tmp_path: Path, **cfg: Any) -> Any:
 
 
 def test_app_files_are_forbidden_in_any_spelling(tmp_path: Path) -> None:
-    from claude_voice.config import ROOT
+    from scout.config import ROOT
 
     b = _brain(tmp_path, cwd=str(Path.home()))
     rel = os.path.relpath(ROOT / "config.toml", Path.home())
     for path in [str(ROOT / "config.toml"), str(ROOT).upper() + "/CONFIG.TOML", rel]:
         assert b._forbidden("Edit", {"file_path": path}), path
     assert b._forbidden("Bash", {"command": f"perl -pi -e 's/a/b/' {ROOT}/config.toml"})
-    home_rel = "~/" + os.path.relpath(ROOT, Path.home()).upper()  # "~/SRC/CLAUDE-VOICE"
+    home_rel = "~/" + os.path.relpath(ROOT, Path.home()).upper()  # "~/SRC/SCOUT"
     assert b._forbidden("Bash", {"command": f"node -e 1 {home_rel}/state/voice_allow.json"})
     assert b._forbidden("Edit", {"file_path": str(tmp_path / "notes.txt")}) is None
 
@@ -262,7 +262,7 @@ def test_always_ask_commands_ignore_saved_rules(tmp_path: Path) -> None:
     ],
 )
 def test_config_values_are_type_checked(tmp_path: Path, toml: str, error: str | None) -> None:
-    from claude_voice.config import load
+    from scout.config import load
 
     f = tmp_path / "c.toml"
     f.write_text(toml)
@@ -277,8 +277,8 @@ def test_config_values_are_type_checked(tmp_path: Path, toml: str, error: str | 
 def test_shared_tools_are_offered_alike_to_the_room_and_other_sessions() -> None:
     """One definition list: the room's voice_app server, the MCP server and the
     voice-approval lists can't drift apart."""
-    from claude_voice import brain, mcp_server
-    from claude_voice.shared_tools import SHARED
+    from scout import brain, mcp_server
+    from scout.shared_tools import SHARED
 
     _, names = build_server(Timers(lambda label: None))
     asks = {f"mcp__voice_app__{t.name}" for t in SHARED if t.asks}

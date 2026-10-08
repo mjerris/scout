@@ -1,6 +1,6 @@
 """End-of-turn models (Silero VAD, smart-turn) and the EndOfTurnSegmenter.
 
-Model tests look for the files in $CLAUDE_VOICE_MODELS, then the repo's models/
+Model tests look for the files in $SCOUT_MODELS, then the repo's models/
 (scripts/fetch-models.sh), and skip when they are absent. Speech comes from the
 Kokoro TTS model, so those tests also need kokoro-v1.0.onnx + voices-v1.0.bin.
 """
@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from claude_voice.audio_io import resample, to_int16_bytes
-from claude_voice.turn_models import (
+from scout.audio_io import resample, to_int16_bytes
+from scout.turn_models import (
     FRAME_MS,
     TURN_SAMPLES,
     EndOfTurnSegmenter,
@@ -30,7 +30,7 @@ FRAME = 480
 
 
 def _model(name: str) -> Path | None:
-    dirs = [Path(d) for d in [os.environ.get("CLAUDE_VOICE_MODELS", "")] if d] + [ROOT / "models"]
+    dirs = [Path(d) for d in [os.environ.get("SCOUT_MODELS", "")] if d] + [ROOT / "models"]
     for d in dirs:
         if (d / name).is_file():
             return d / name

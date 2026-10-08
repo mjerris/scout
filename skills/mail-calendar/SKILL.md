@@ -1,14 +1,14 @@
 ---
 name: mail-calendar
-description: Use when the user asks about their email or calendar (what's on today, am I free, any new mail, find or read a message, draft or send an email, add an event). Covers the mail_* and calendar_* tools from the voice_app or voice MCP servers, how to read mail safely, and how to say results out loud.
+description: Use when the user asks about their email or calendar (what's on today, am I free, any new mail, find or read a message, draft or send an email, add an event). Covers the mail_* and calendar_* tools from the voice_app (room) or scout MCP servers, how to read mail safely, and how to say results out loud.
 ---
 
 # Mail and calendar
 
-The tools come from the claude-voice app on this Mac, which reads Mail.app and
+The tools come from the scout app on this Mac, which reads Mail.app and
 the Mac's calendars (Google, iCloud and others synced through Internet
 Accounts). The room assistant has them as `mcp__voice_app__*`; other sessions as
-`mcp__voice__*`. Same tools, same behaviour.
+`mcp__scout__*`. Same tools, same behaviour.
 
 ## Which tool
 

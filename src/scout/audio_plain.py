@@ -163,7 +163,7 @@ class DeviceWatcher:
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        code = "from claude_voice.audio_plain import _probe_main; _probe_main()"
+        code = "from scout.audio_plain import _probe_main; _probe_main()"
         self._proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",

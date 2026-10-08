@@ -1,5 +1,5 @@
 """Measure how much of the assistant's own voice each voice-layer backend lets
-through to the microphone (python -m claude_voice.measure).
+through to the microphone (python -m scout.measure).
 
 For each backend it plays the same replies at normal volume and records the
 cleaned mic signal while they play. With no one talking in the room, anything
@@ -8,7 +8,7 @@ the mic delivers is leftover echo, so we report:
 - reduction_db: how much quieter that is than the plain (no canceller) backend,
 - heard: the share of the played words Whisper still recovers from the mic
   recording (0% = the assistant's voice is gone).
-Run it with the room quiet and the claude-voice app stopped (it holds the devices).
+Run it with the room quiet and the scout app stopped (it holds the devices).
 """
 
 from __future__ import annotations

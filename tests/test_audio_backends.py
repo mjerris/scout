@@ -16,10 +16,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from claude_voice.aec import EchoCanceller, Resampler, resample_offline
-from claude_voice.audio_io import FRAME_BYTES, PlayHandle
-from claude_voice.audio_plain import PlainAudioIO
-from claude_voice.audio_webrtc import BLOCK, WebRTCAudioIO
+from scout.aec import EchoCanceller, Resampler, resample_offline
+from scout.audio_io import FRAME_BYTES, PlayHandle
+from scout.audio_plain import PlainAudioIO
+from scout.audio_webrtc import BLOCK, WebRTCAudioIO
 
 SR = 48000
 

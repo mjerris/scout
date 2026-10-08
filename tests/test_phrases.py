@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from claude_voice import gate, speech
-from claude_voice.pronounce import Pronouncer
+from scout import gate, speech
+from scout.pronounce import Pronouncer
 
 CASES: list[dict[str, Any]] = json.loads((Path(__file__).parent / "data" / "phrases.json").read_text())
 P = Pronouncer(None)

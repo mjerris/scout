@@ -34,7 +34,7 @@ ROOM = "room"
 
 def _transcript_log() -> logging.Logger:
     """logs/transcript.jsonl, one event per line, rotated at midnight (kept 30 days)."""
-    tx = logging.getLogger("claude_voice.transcript")
+    tx = logging.getLogger("scout.transcript")
     if not tx.handlers:
         (ROOT / "logs").mkdir(exist_ok=True)
         h = logging.handlers.TimedRotatingFileHandler(
