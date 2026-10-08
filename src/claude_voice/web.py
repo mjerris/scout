@@ -60,7 +60,8 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(req)
         q = assistant.subscribe()
-        await ws.send_json({"type": "hello", "history": list(assistant.history), **assistant.snapshot()})
+        await ws.send_json({"type": "hello", "history": list(assistant.history),
+                            "rules": assistant.rules.listing(), **assistant.snapshot()})
 
         async def pump():
             while True:
@@ -80,7 +81,9 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                     if not assistant.start_turn(m["text"].strip(), speak=bool(m.get("speak", True))):
                         await ws.send_json({"type": "error", "text": "Busy with another request; stop it first."})
                 elif kind == "confirm":
-                    assistant.answer_confirm(bool(m.get("approved")))
+                    assistant.answer_confirm("always" if m.get("always") else bool(m.get("approved")))
+                elif kind == "remove_rule":
+                    assistant.remove_rule(int(m.get("index", -1)))
                 elif kind == "stop":
                     await assistant.stop()
                 elif kind == "mute":

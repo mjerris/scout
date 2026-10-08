@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -23,11 +22,10 @@ from claude_agent_sdk import (
     TextBlock,
     ToolPermissionContext,
     ToolUseBlock,
-    create_sdk_mcp_server,
-    tool,
 )
 
 from .config import ROOT, ClaudeConfig
+from .rules import Rules, rule_for
 
 log = logging.getLogger(__name__)
 
@@ -49,12 +47,16 @@ the intended meaning) and hears your replies through text-to-speech.
   processes yourself. When the user asks to change how you listen, talk, ask
   for approval or behave, call the request_app_change tool with a clear
   description, then tell them briefly that you passed it to the owner.
+- For opening sites and apps, searching Netflix/YouTube/Google, Chrome tabs,
+  full screen, play/pause, volume and timers, use your voice_app tools. They
+  run without asking; raw osascript or open commands need the user's approval.
 - Actions that need permission are confirmed by the user's spoken yes or no. If
   they said no, ask what they want instead of retrying; if they didn't answer,
   say so briefly and offer to try again.
 """
 
-Confirm = Callable[[str, str], Awaitable[bool | None]]  # (spoken, detail); None = no answer
+# (spoken, detail) -> True/False, "always", or None for no answer
+Confirm = Callable[[str, str], Awaitable[bool | str | None]]
 _DENIED = "The user declined this action by voice."
 _NO_ANSWER = "The user did not answer the spoken confirmation in time, so this was not run."
 
@@ -92,31 +94,15 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
     return f"Use {name}?", f"use the {name} tool"
 
 
-REQUESTS_FILE = ROOT / "state" / "change-requests.jsonl"
-
-
-@tool(
-    "request_app_change",
-    "Send a requested change to this voice app (how it listens, talks, asks for "
-    "approval, its config) to the Claude session that maintains it.",
-    {"summary": str, "details": str},
-)
-async def _request_app_change(args: dict[str, Any]) -> dict[str, Any]:
-    entry = {"ts": time.time(), "summary": args.get("summary", ""), "details": args.get("details", "")}
-    REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(REQUESTS_FILE, "a") as fh:
-        fh.write(json.dumps(entry) + "\n")
-    log.info("change request: %s", entry["summary"])
-    return {"content": [{"type": "text", "text": "Sent to the owner session."}]}
-
-
-_APP_SERVER = create_sdk_mcp_server("voice_app", tools=[_request_app_change])
-
-
 class Brain:
-    def __init__(self, cfg: ClaudeConfig, confirm: Confirm):
+    def __init__(self, cfg: ClaudeConfig, confirm: Confirm, tool_server, tool_names: list[str],
+                 rules: Rules, notify: Callable[[str, str], None]):
         self.cfg = cfg
         self.confirm = confirm
+        self.tool_server = tool_server
+        self.tool_names = tool_names  # pre-approved voice_app tools
+        self.rules = rules
+        self.notify = notify  # (event, text): tells the user about saved rules
         self.client: ClaudeSDKClient | None = None
         self.session_id: str | None = None
         self._lock = asyncio.Lock()
@@ -129,7 +115,7 @@ class Brain:
         project = str(ROOT)
         overrides: dict[str, Any] = {"permissions": {
             # The app itself is maintained by its owner session, not by voice.
-            "allow": ["mcp__voice_app__request_app_change"],
+            "allow": [*self.tool_names, "WebSearch", "WebFetch"],
             "deny": [f"Edit({project}/**)", f"Write({project}/**)", f"MultiEdit({project}/**)"],
             "ask": [] if strict else list(self.cfg.always_ask),
         }}
@@ -138,7 +124,7 @@ class Brain:
         return ClaudeAgentOptions(
             cwd=os.path.expanduser(self.cfg.cwd),
             settings=json.dumps(overrides),
-            mcp_servers={"voice_app": _APP_SERVER},
+            mcp_servers={"voice_app": self.tool_server},
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
             permission_mode=self.cfg.permission_mode or None,  # "" = settings' defaultMode
@@ -154,7 +140,7 @@ class Brain:
 
     async def _pre_tool_use(self, hook_input, tool_use_id, context):
         name, args = hook_input["tool_name"], hook_input["tool_input"]
-        if name in self.cfg.auto_allow_tools or (
+        if name in self.cfg.auto_allow_tools or name in self.tool_names or (
             name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
         ):
             return {}  # fall through to normal permission handling
@@ -167,8 +153,18 @@ class Brain:
         }}
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
+        if self.rules.matches(name, args):
+            log.info("allowed by saved rule: %s %s", name, args)
+            return True
         log.info("permission request: %s %s", name, args)
-        return await self.confirm(*describe_tool(name, args))
+        answer = await self.confirm(*describe_tool(name, args))
+        if answer == "always":
+            if self.rules.add(name, args) is not None:
+                self.notify("rules", "Okay, I won't ask about that again.")
+            else:
+                self.notify("rules", "Okay, just this once. File edits always ask.")
+            return True
+        return answer
 
     async def _can_use_tool(self, name: str, args: dict[str, Any], ctx: ToolPermissionContext):
         answer = await self._ask(name, args)

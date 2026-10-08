@@ -36,6 +36,19 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   no; the web page shows the details. No answer within 30 s counts as a skip.
   Under the settings policies, `claude.always_ask` rules (git push, PR
   merge/create by default) are always asked.
+- **Built-in tools (never ask):** open a URL; search Netflix, YouTube, Google,
+  Amazon, Wikipedia or Maps; open an app; see which app is in front and which
+  are open; list, switch and open Chrome tabs; full screen on/off;
+  play/pause/next/previous (Spotify or Music, or the video in the front
+  browser); volume get/set/up/down/mute; timers that announce themselves; web
+  search and page fetches. Each tool's AppleScript is fixed in `mac.py`, and
+  your words are passed in only as checked arguments, so these can't be used
+  to run arbitrary scripts. Timers live in memory and are lost on restart.
+- **"Yes, always":** answer a prompt with "yes, always" (or tap **Always** on
+  the web page) and it stops asking for that exact shell command, any page on
+  that site (for page fetches), or that tool (for other MCP tools). File edits
+  and writes always ask. Saved rules are in `state/voice_allow.json` and can
+  be removed from the web page.
 - **Changing the app by voice:** the voice agent can't edit this project. When
   you ask it to change how it listens, talks or asks, it calls its
   `request_app_change` tool, which appends to `state/change-requests.jsonl`
