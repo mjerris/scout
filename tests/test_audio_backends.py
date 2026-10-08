@@ -329,6 +329,28 @@ def test_webrtc_opens_one_duplex_stream_at_48k() -> None:
     asyncio.run(go())
 
 
+def test_webrtc_counts_a_tvs_extra_output_delay() -> None:
+    """A TV plays what it's handed ~750 ms later: the canceller's hint and the moment
+    playback counts as finished both include it."""
+
+    async def go() -> None:
+        sound = FakeSound()
+        io = WebRTCAudioIO("3", "", sound=sound, watch_devices=False, output_delay_ms=200)
+        await io.start(asyncio.get_running_loop(), lambda kind, info: None)
+        assert io.stats()["delay_ms"] == 210  # 10 ms of stream latency + 200
+        stream = sound.streams[0]
+        h = io.play(tone(440.0, 24000, 0.02, amp=0.25), 24000)
+        for _ in range(3):
+            stream.tick()
+        await settle(0.05)
+        assert not h.done.done() and io.playing  # still coming out of the TV
+        await settle(0.2)
+        assert h.done.result() is True
+        await io.close()
+
+    asyncio.run(go())
+
+
 def test_webrtc_plays_mono_on_both_channels_of_a_stereo_output() -> None:
     """An HDMI TV or stereo speakers: opened as one channel, only the left one plays."""
 

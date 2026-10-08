@@ -117,7 +117,12 @@ class FrameAssembler:
 
 
 def create(
-    backend: str, input_device: str = "", output_device: str = "", *, noise_suppression: bool = False
+    backend: str,
+    input_device: str = "",
+    output_device: str = "",
+    *,
+    noise_suppression: bool = False,
+    output_delay_ms: float = 0.0,
 ) -> AudioIO:
     """Pick a backend. "auto" means webrtc when livekit is installed, else plain.
 
@@ -140,7 +145,9 @@ def create(
     if backend == "webrtc":
         from .audio_webrtc import WebRTCAudioIO
 
-        return WebRTCAudioIO(input_device, output_device, noise_suppression=noise_suppression)
+        return WebRTCAudioIO(
+            input_device, output_device, noise_suppression=noise_suppression, output_delay_ms=output_delay_ms
+        )
     if backend == "plain":
         from .audio_plain import PlainAudioIO
 

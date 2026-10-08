@@ -54,6 +54,10 @@ class AudioConfig:
     # own voice leaking through (a TV's speakers add delay and processing) looked
     # like the user talking over it and cut its messages short. Backends that
     # don't report it (apple) skip the check.
+    # Extra delay the speaker adds that the computer can't see, in ms: a TV's sound
+    # processing (a Samsung over HDMI measured ~750 ms). Helps the echo canceller
+    # start out right and tells Scout when its voice has really finished playing.
+    output_delay_ms: float = 0.0
     barge_in_min_learned_s: float = 3.0
     barge_in_min_erle_db: float = 12.0
     # WebRTC noise suppression on the mic. Off by default: it learns steady room

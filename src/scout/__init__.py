@@ -72,6 +72,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         cfg.audio.input_device,
         cfg.audio.output_device,
         noise_suppression=cfg.audio.noise_suppression,
+        output_delay_ms=cfg.audio.output_delay_ms,
     )
     await io.start(loop, on_audio_event)
     log.info("voice layer: %s", io.name)
