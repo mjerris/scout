@@ -12,15 +12,16 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from typing import Any
 
 
 class Floor:
-    def __init__(self, hold_ttl: float = 10.0):
+    def __init__(self, hold_ttl: float = 10.0) -> None:
         self.hold_ttl = hold_ttl
         self.holder: str | None = None
         self.active = False  # mid-exchange, as opposed to holding between exchanges
         self.held_until = 0.0
-        self._waiters: deque[tuple[str, asyncio.Future]] = deque()
+        self._waiters: deque[tuple[str, asyncio.Future[Any]]] = deque()
 
     def owner(self) -> str | None:
         """Who has the floor right now, if anyone (lapsed holds don't count)."""
@@ -68,7 +69,7 @@ class Floor:
         finally:
             self._waiters = deque(w for w in self._waiters if w[1] is not fut)
 
-    def _replace_waiter(self, agent: str, fut: asyncio.Future) -> None:
+    def _replace_waiter(self, agent: str, fut: asyncio.Future[Any]) -> None:
         for i, (a, _) in enumerate(self._waiters):
             if a == agent:
                 self._waiters[i] = (agent, fut)
@@ -87,7 +88,7 @@ class Floor:
             if not fut.done():
                 fut.set_result(None)
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         owner = self.owner()
         return {
             "holder": owner,

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from mcp.server.mcpserver import MCPServer
@@ -39,13 +39,15 @@ def _agent() -> str:
     return f"{name}#{os.getpid() % 10000}"
 
 
-def _base() -> tuple[str, dict]:
+def _base() -> tuple[str, dict[str, Any]]:
     cfg = load()
     token = (ROOT / "state" / "web_token").read_text().strip()
     return f"http://127.0.0.1:{cfg.web.port}", {"Authorization": f"Bearer {token}"}
 
 
-async def _call(method: str, path: str, body: dict | None = None, timeout: float = 30) -> dict:
+async def _call(
+    method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 30
+) -> dict[str, Any]:
     if os.environ.get("CLAUDE_VOICE_ROOM"):
         return {
             "status": "error",
@@ -67,7 +69,8 @@ async def _call(method: str, path: str, body: dict | None = None, timeout: float
                 }
             if r.status != 200:
                 return {"status": "error", "error": f"HTTP {r.status}: {(await r.text())[:200]}"}
-            return await r.json()
+            data: dict[str, Any] = await r.json()
+            return data
     except aiohttp.ClientConnectorError:
         return {
             "status": "error",

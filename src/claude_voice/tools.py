@@ -8,10 +8,11 @@ import itertools
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from claude_agent_sdk.types import McpSdkServerConfig
 
 from . import mac
 from .config import ROOT
@@ -35,10 +36,10 @@ class Timers:
 
     MAX_MINUTES = 24 * 60
 
-    def __init__(self, announce: Callable[[str], None]):
+    def __init__(self, announce: Callable[[str], None]) -> None:
         self.announce = announce
         self._ids = itertools.count(1)
-        self.active: dict[int, tuple[str, float, asyncio.Task]] = {}
+        self.active: dict[int, tuple[str, float, asyncio.Task[Any]]] = {}
 
     def set(self, seconds: float, label: str) -> int:
         if not 1 <= seconds <= self.MAX_MINUTES * 60:
@@ -86,8 +87,10 @@ def _human(seconds: float) -> str:
     return " ".join(parts) or "0 seconds"
 
 
-def build_server(timers: Timers):
-    def wrap(fn):
+def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
+    def wrap(
+        fn: Callable[[dict[str, Any]], Awaitable[str]],
+    ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             try:
                 return _ok(await fn(args))

@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 NEVER_ALWAYS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 
 
-def rule_for(tool: str, args: dict[str, Any]) -> dict | None:
+def rule_for(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
     """The narrowest saved rule that covers this call, or None if it can't be saved."""
     if tool in NEVER_ALWAYS:
         return None
@@ -28,7 +28,7 @@ def rule_for(tool: str, args: dict[str, Any]) -> dict | None:
     return None
 
 
-def describe(rule: dict) -> str:
+def describe(rule: dict[str, Any]) -> str:
     if rule["tool"] == "Bash":
         return f"run: {rule['command']}"
     if rule["tool"] == "WebFetch":
@@ -38,9 +38,9 @@ def describe(rule: dict) -> str:
 
 
 class Rules:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
         self.path = path
-        self.items: list[dict] = []
+        self.items: list[dict[str, Any]] = []
         if path.exists():
             try:
                 self.items = json.loads(path.read_text())
@@ -59,7 +59,7 @@ class Rules:
             return False
         return any({k: v for k, v in r.items() if k != "added"} == want for r in self.items)
 
-    def add(self, tool: str, args: dict[str, Any]) -> dict | None:
+    def add(self, tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
         rule = rule_for(tool, args)
         if rule is None:
             return None
@@ -73,5 +73,5 @@ class Rules:
             del self.items[index]
             self._save()
 
-    def listing(self) -> list[dict]:
+    def listing(self) -> list[dict[str, Any]]:
         return [{"index": i, "text": describe(r), "added": r.get("added")} for i, r in enumerate(self.items)]

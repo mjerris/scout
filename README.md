@@ -137,7 +137,10 @@ Everything said and heard is also written to
 `audio.save_utterances = 50` to keep the last 50 clips (wav + transcript +
 stats) in `state/utterances/` for tuning; off by default.
 
-Tests: `uv run pytest`.
+Checks: `bash scripts/run-ci.sh` runs LINT (ruff), FMT (ruff format; applied
+locally, checked in CI), TYPES (mypy strict) and TEST (pytest), the same
+script GitHub Actions runs. `scripts/install-hooks.sh` adds a pre-commit hook
+for lint, format and types.
 
 ## Tuning
 

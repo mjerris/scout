@@ -12,6 +12,7 @@ import socket
 import uuid
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from aiohttp import WSMsgType, web
 
@@ -63,6 +64,7 @@ async def resolve_hosts(names: list[str]) -> list[str]:
     """Turn the configured names into concrete addresses, skipping any that aren't up."""
     out: list[str] = []
     for name in names:
+        ip: str | None
         if name == "localhost":
             ip = "127.0.0.1"
         elif name == "lan":
@@ -130,7 +132,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         await ws.prepare(req)
         q = assistant.subscribe()
         client_id = uuid.uuid4().hex
-        bg: set[asyncio.Task] = set()  # keep fire-and-forget tasks referenced
+        bg: set[asyncio.Task[Any]] = set()  # keep fire-and-forget tasks referenced
         await ws.send_json(
             {
                 "type": "hello",
@@ -147,7 +149,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
             except Exception:
                 log.exception("could not send reply audio")
 
-        async def pump():
+        async def pump() -> None:
             while True:
                 ev = await q.get()
                 if ev["type"] != "say":

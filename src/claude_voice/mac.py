@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Any
 from urllib.parse import quote_plus, urlparse
 
 BROWSERS = ("Google Chrome", "Safari", "Arc", "Firefox", "Microsoft Edge", "Brave Browser")
@@ -57,7 +58,7 @@ def check_app_name(name: str) -> str:
     return name
 
 
-def check_int(value, lo: int, hi: int, what: str) -> int:
+def check_int(value: Any, lo: int, hi: int, what: str) -> int:
     try:
         n = int(value)
     except (TypeError, ValueError):

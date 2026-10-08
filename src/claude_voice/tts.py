@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import time
 from collections import deque
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import sounddevice as sd
 from kokoro_onnx import Kokoro
+
+if TYPE_CHECKING:
+    from .pronounce import Pronouncer
+
+# A queued item: (text to synthesize, voice, original wording) or a ready-made tone.
+_Item = tuple[str, str | None, str] | np.ndarray
 
 log = logging.getLogger(__name__)
 
 _SENTENCE = re.compile(r"(?<=[.!?;:])\s+(?=\S)")
 
 
-def _tone(freqs: list[float], sr: int, dur: float = 0.09, gain: float = 0.25) -> np.ndarray:
+def _tone(freqs: Sequence[float], sr: int, dur: float = 0.09, gain: float = 0.25) -> np.ndarray:
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
     env = np.sin(np.pi * t / dur) ** 2
     return np.concatenate([gain * env * np.sin(2 * np.pi * f * t) for f in freqs]).astype(np.float32)
@@ -37,16 +46,16 @@ class Speaker:
         device: int | None,
         echo_tail_ms: int,
         chimes: bool,
-        pronounce=None,
-    ):
+        pronounce: Pronouncer | None = None,
+    ) -> None:
         self.kokoro = Kokoro(model, voices)
         self.pronounce = pronounce
         self.voice, self.speed, self.device = voice, speed, device
         self.echo_tail = echo_tail_ms / 1000
         self.chimes = chimes
         self.sr = 24000
-        self._text: asyncio.Queue[tuple[int, tuple[str, str | None] | np.ndarray]] = asyncio.Queue()
-        self._audio: asyncio.Queue[tuple[int, np.ndarray]] = asyncio.Queue()
+        self._text: asyncio.Queue[tuple[int, _Item]] = asyncio.Queue()
+        self._audio: asyncio.Queue[tuple[int, np.ndarray, str | None]] = asyncio.Queue()
         self._gen = 0  # bumped by stop() to discard queued work
         self._pending = 0  # items queued or in flight
         self._playing = False
@@ -55,9 +64,9 @@ class Speaker:
         self._idle.set()
         self._synth_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._play_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="play")
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: list[asyncio.Task[Any]] = []
         # [start, end, text] per sentence actually played; end is inf while playing.
-        self._played: deque[list] = deque(maxlen=100)
+        self._played: deque[list[Any]] = deque(maxlen=100)
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._synth_loop()), asyncio.create_task(self._play_loop())]
@@ -70,7 +79,7 @@ class Speaker:
         """True while speaking or within the echo tail after speaking."""
         return self._playing or self.busy or time.monotonic() - self._last_end < self.echo_tail
 
-    def _enqueue(self, item) -> None:
+    def _enqueue(self, item: _Item) -> None:
         self._pending += 1
         self._idle.clear()
         self._text.put_nowait((self._gen, item))
@@ -83,8 +92,11 @@ class Speaker:
     def overlap(self, start: float, end: float) -> float:
         """Seconds of our own speech that played between start and end."""
         now = time.monotonic()
-        return sum(
-            max(0.0, min(e if e != float("inf") else now, end) - max(s, start)) for s, e, _ in self._played
+        return float(
+            sum(
+                max(0.0, min(e if e != float("inf") else now, end) - max(s, start))
+                for s, e, _ in self._played
+            )
         )
 
     def last_speech_end(self, since: float) -> float | None:
@@ -92,7 +104,7 @@ class Speaker:
         ends = [end for start, end, text in self._played if end >= since - 0.5]
         if not ends:
             return None
-        return min(max(ends), time.monotonic())
+        return float(min(max(ends), time.monotonic()))
 
     def speak(self, text: str, voice: str | None = None) -> None:
         for sentence in _SENTENCE.split(text.strip()):
@@ -154,10 +166,7 @@ class Speaker:
                 text, voice, original = item
                 try:
                     samples, sr = await loop.run_in_executor(
-                        self._synth_pool,
-                        lambda t=text, v=voice: self.kokoro.create(
-                            t, voice=v or self.voice, speed=self.speed
-                        ),
+                        self._synth_pool, functools.partial(self._create, text, voice)
                     )
                     self.sr = sr
                 except Exception:
@@ -165,6 +174,10 @@ class Speaker:
                     self._done_one()
                     continue
             self._audio.put_nowait((gen, samples, None if isinstance(item, np.ndarray) else original))
+
+    def _create(self, text: str, voice: str | None) -> tuple[np.ndarray, int]:
+        samples, sr = self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
+        return samples, sr
 
     def _play_blocking(self, samples: np.ndarray) -> None:
         sd.play(samples, self.sr, device=self.device)
