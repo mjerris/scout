@@ -83,10 +83,12 @@ class GateConfig:
 class AsrConfig:
     model: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "en"
-    # Context Whisper sees before each clip; short clips give it none. Naming the
-    # wake word helps it spell it (for "Claude" it took misses from 2 in 7 to 0
-    # in 7, with other clips unchanged and no invented wake words on noise).
-    prompt: str = "Hey Scout."
+    # Optional context Whisper sees before each clip. Off by default: Whisper spells
+    # "Scout" right on its own, and a prompt that IS the start of what's said gets
+    # treated as already said and dropped ("Hey Scout." turned "Hey Scout, what
+    # time is it?" into "What time is it?", so the request was ignored). If a wake
+    # word gets misheard, name it without the greeting, e.g. "Scout".
+    prompt: str = ""
 
 
 @dataclass
