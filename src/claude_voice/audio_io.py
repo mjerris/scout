@@ -116,7 +116,9 @@ class FrameAssembler:
         return out
 
 
-def create(backend: str, input_device: str = "", output_device: str = "") -> AudioIO:
+def create(
+    backend: str, input_device: str = "", output_device: str = "", *, noise_suppression: bool = False
+) -> AudioIO:
     """Pick a backend. "auto" means webrtc when livekit is installed, else plain.
 
     WebRTC is the default on macOS too: measured on the Mac mini (OBSBOT mic,
@@ -138,7 +140,7 @@ def create(backend: str, input_device: str = "", output_device: str = "") -> Aud
     if backend == "webrtc":
         from .audio_webrtc import WebRTCAudioIO
 
-        return WebRTCAudioIO(input_device, output_device)
+        return WebRTCAudioIO(input_device, output_device, noise_suppression=noise_suppression)
     if backend == "plain":
         from .audio_plain import PlainAudioIO
 

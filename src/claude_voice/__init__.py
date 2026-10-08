@@ -67,7 +67,12 @@ async def _amain(cfg: config_mod.Config) -> None:
         log.info("voice layer %s: %s", kind, data)
         events.put_nowait((kind, data))
 
-    io = audio_io.create(cfg.audio.backend, cfg.audio.input_device, cfg.audio.output_device)
+    io = audio_io.create(
+        cfg.audio.backend,
+        cfg.audio.input_device,
+        cfg.audio.output_device,
+        noise_suppression=cfg.audio.noise_suppression,
+    )
     await io.start(loop, on_audio_event)
     log.info("voice layer: %s", io.name)
     speaker = Speaker(

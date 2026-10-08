@@ -11,6 +11,7 @@ wait_seconds = 20.0   # after "hang on" / "wait" / "give me a sec"
 [audio]
 backend = "auto"          # auto (= webrtc), webrtc, apple (scripts/build-voiceio.sh), plain
 barge_in = true           # talking over the assistant stops it (needs webrtc or apple)
+noise_suppression = false # webrtc: on can remove steady-noise bands from speech too
 turn_detection = "smart"  # smart (Silero + smart-turn) or simple (silence_ms of quiet)
 min_pause_ms = 250        # smart: ask the turn model after this much quiet
 max_pause_ms = 1500       # smart: end the turn after this much quiet regardless
