@@ -21,7 +21,7 @@ import logging
 import os
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -229,6 +229,15 @@ def format_messages(data: dict[str, Any], what: str, now: dt.datetime | None = N
 # --- tools ------------------------------------------------------------------------------------
 
 
+# How a lookup's answer is shown: privacy.Policy.messages_view decides what of the
+# text reaches Claude; without one, the plain listing.
+View = Callable[[dict[str, Any], str], Awaitable[str]]
+
+
+async def _show(data: dict[str, Any], what: str, view: View | None) -> str:
+    return await view(data, what) if view is not None else format_messages(data, what)
+
+
 def _enabled() -> None:
     if not load().messages.enabled:
         raise ToolError("Reading Messages is turned off (messages.enabled = false in config.toml).")
@@ -253,21 +262,23 @@ def _text(value: Any, what: str, limit: int) -> str:
     return s
 
 
-async def recent(count: Any = None, helper: Helper | None = None) -> str:
+async def recent(count: Any = None, helper: Helper | None = None, view: View | None = None) -> str:
     _enabled()
     data = await request("recent", {"limit": _count(count, 10)}, helper)
-    return format_messages(data, "messages")
+    return await _show(data, "messages", view)
 
 
-async def unread(count: Any = None, days: Any = None, helper: Helper | None = None) -> str:
+async def unread(
+    count: Any = None, days: Any = None, helper: Helper | None = None, view: View | None = None
+) -> str:
     _enabled()
     d = _days(days, 30)
     data = await request("unread", {"limit": _count(count, 20), "since_days": d}, helper)
-    return format_messages(data, f"unread messages in the last {d} days")
+    return await _show(data, f"unread messages in the last {d} days", view)
 
 
 async def from_contact(
-    contact: Any, count: Any = None, days: Any = None, helper: Helper | None = None
+    contact: Any, count: Any = None, days: Any = None, helper: Helper | None = None, view: View | None = None
 ) -> str:
     _enabled()
     who = _text(contact, "contact", 100)
@@ -275,12 +286,14 @@ async def from_contact(
     data = await request("from", {"contact": who, "limit": _count(count, 10), "since_days": d}, helper)
     matched = [str(n) for n in data.get("matched") or []]
     head = f"(matched: {', '.join(matched)})\n" if len(matched) > 1 else ""
-    return head + format_messages(data, f"messages from {who} in the last {d} days")
+    return head + await _show(data, f"messages from {who} in the last {d} days", view)
 
 
-async def search(text: Any, count: Any = None, days: Any = None, helper: Helper | None = None) -> str:
+async def search(
+    text: Any, count: Any = None, days: Any = None, helper: Helper | None = None, view: View | None = None
+) -> str:
     _enabled()
     q = _text(text, "text", 100)
     d = _days(days, 90)
     data = await request("search", {"text": q, "limit": _count(count, 10), "since_days": d}, helper)
-    return format_messages(data, f"messages containing {q!r} in the last {d} days")
+    return await _show(data, f"messages containing {q!r} in the last {d} days", view)

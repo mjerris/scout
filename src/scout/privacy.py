@@ -45,6 +45,13 @@ _NO_MODEL = (
 )
 
 
+STRICT_MESSAGES = (
+    "[Strict privacy mode: the text of messages isn't shared with Claude. Tell the user what you "
+    "can see (who and when); they can ask Scout to read or summarize their texts aloud.]"
+)
+_NO_MODEL_MESSAGES = "[No summaries: Scout's local model isn't loaded, so the texts are withheld.]"
+
+
 class Policy:
     def __init__(self, mode: str = "balanced", model: Model | None = None) -> None:
         if mode not in MODES:
@@ -153,6 +160,52 @@ class Policy:
                 "needs the email's text; they can ask Scout to summarize it aloud, or change privacy.mode."
             )
         return await mail_mac.read(message_id, run)
+
+    # --- messages (iMessage, SMS) -------------------------------------------------
+
+    async def messages_view(self, data: dict[str, Any], what: str, budget_s: float = 3.0) -> str:
+        """Claude's view of a messages lookup: who and when always; the texts only in
+        open mode; in balanced mode one local, attributed summary per person (texts
+        that look like scams get the fixed warning, as email does)."""
+        from . import messages_mac
+
+        msgs = data.get("messages") or []
+        if self.mode == "open" or not msgs:
+            return messages_mac.format_messages(data, what)
+        bare = {
+            **data,
+            "messages": [{**m, "text": "", "attachment": False, "truncated": False} for m in msgs],
+        }
+        listing = messages_mac.format_messages(bare, what).replace("(no text)", "(text withheld)")
+        if self.mode == "strict":
+            return STRICT_MESSAGES + "\n" + listing
+        if not self.summaries.available:
+            return _NO_MODEL_MESSAGES + "\n" + listing
+        people: dict[str, list[dict[str, Any]]] = {}
+        for m in msgs:
+            if not m.get("from_me") and m.get("text"):
+                people.setdefault(messages_mac._person(m), []).append(m)
+        lines = []
+        for who, theirs in list(people.items())[:5]:
+            ids = ",".join(str(m.get("id")) for m in theirs)
+            pseudo = {
+                "id": f"sms:{ids}",
+                "sender": who,
+                "subject": "text messages",
+                "date": theirs[0].get("date", ""),
+                "body": "\n".join(f"[{m.get('date', '')}] {m.get('text', '')}" for m in reversed(theirs)),
+            }
+            try:
+                gist = await asyncio.wait_for(self.summaries.of(pseudo), budget_s)
+            except (RuntimeError, TimeoutError) as exc:
+                log.info("no summary of texts from %s: %s", who, exc)
+                gist = f"{len(theirs)} message(s); no summary in time"
+            lines.append(f"  {who} ({len(theirs)} message{'s' * (len(theirs) != 1)}): {gist}")
+        if not lines:
+            return listing
+        return (
+            listing + "\nSummaries by Scout's local model (the texts stay on this Mac):\n" + "\n".join(lines)
+        )
 
     # --- calendar ------------------------------------------------------------------
 

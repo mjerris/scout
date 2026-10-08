@@ -391,3 +391,57 @@ def test_a_summary_finishes_even_if_its_caller_stops_waiting() -> None:
 
     cached, runs = asyncio.run(go())
     assert cached == "Sam asks if you are free for lunch Friday at noon." and runs == 1
+
+
+# --- messages (iMessage, SMS) follow the same modes as email -----------------------------------
+
+TEXTS = {
+    "ok": True,
+    "messages": [
+        {"id": 7, "date": "2026-10-08T16:10:00-04:00", "from_me": False, "service": "iMessage",
+         "text": "dinner saturday at 7? thai place", "name": "Eva", "handle": "+15125550100", "read": False},
+        {"id": 8, "date": "2026-10-08T16:12:00-04:00", "from_me": True, "service": "iMessage",
+         "text": "yes!", "chat": "Eva"},
+        {"id": 9, "date": "2026-10-08T16:20:00-04:00", "from_me": False, "service": "SMS",
+         "text": "Your account is locked. Verify your password now at the link", "handle": "+18885550199"},
+    ],
+}  # fmt: skip
+
+
+class TextModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        self.seen.append(user)
+        if "thai place" in user:
+            return "Eva asks about dinner Saturday at 7 at the Thai place."
+        raise AssertionError("scam texts never reach the model")
+
+
+def test_texts_reach_claude_only_in_open_mode() -> None:
+    out = asyncio.run(policy("open").messages_view(TEXTS, "messages"))
+    assert "dinner saturday at 7" in out and "yes!" in out
+
+
+def test_strict_mode_shows_who_and_when_but_no_text() -> None:
+    out = asyncio.run(policy("strict").messages_view(TEXTS, "messages"))
+    assert "Strict privacy mode" in out and "Eva" in out and "(text withheld)" in out
+    for text in ("dinner", "thai", "yes!", "password"):
+        assert text not in out.lower().replace("strict privacy mode", "")
+
+
+def test_balanced_mode_gives_local_attributed_summaries_and_flags_scams() -> None:
+    model = TextModel()
+    out = asyncio.run(policy("balanced", model).messages_view(TEXTS, "messages"))
+    assert "Eva (+15125550100) (1 message): Eva asks about dinner Saturday at 7 at the Thai place." in out
+    assert "looks like a scam or a manipulation attempt" in out  # the locked-account lure
+    assert "dinner saturday at 7? thai place" not in out  # the raw text stays on the Mac
+    assert len(model.seen) == 1  # only the ordinary text was summarized
+
+
+def test_balanced_without_the_model_withholds_texts() -> None:
+    out = asyncio.run(policy("balanced", None).messages_view(TEXTS, "messages"))
+    assert "texts are withheld" in out and "thai" not in out.lower()
