@@ -29,6 +29,7 @@
   button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
            background: var(--panel); color: var(--ink); cursor: pointer; }
   button:hover { border-color: var(--muted); }
+  button:disabled { opacity: 0.5; cursor: default; }
   button.on { background: var(--bad); color: #fff; border-color: var(--bad); }
   #log { flex: 1; overflow-y: auto; padding: 16px 0; display: flex; flex-direction: column; gap: 8px; }
   .msg { padding: 9px 12px; border-radius: 10px; max-width: 88%; white-space: pre-wrap; word-wrap: break-word; }
@@ -43,6 +44,8 @@
   #confirm { display: none; padding: 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); }
   #confirm.show { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   #confirm span { flex: 1; min-width: 200px; }
+  #unlock { display: none; margin: 4px 0; align-self: center; }
+  #unlock.show { display: inline-block; }
   #ptt { touch-action: none; user-select: none; -webkit-user-select: none; }
   #ptt.rec { background: var(--bad); color: #fff; border-color: var(--bad); }
   .agent { background: var(--tool); border: 1px dashed var(--line); align-self: flex-start; }
@@ -71,6 +74,7 @@
     <button id="reset" type="button">New conversation</button>
   </header>
   <div id="log"></div>
+  <button id="unlock" type="button">🔊 Tap to play replies</button>
   <div id="confirm"><span id="ctext"></span>
     <button class="yes" type="button" id="approve">Approve</button>
     <button type="button" id="always">Always</button>
@@ -88,7 +92,23 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const log = $("log");
-let ws, muted = false;
+let ws = null, retry = null, muted = false, confirmId = null, lastIgnored = null, replaying = false;
+
+// The page's own id, kept across reconnects and reloads, so reply audio for a request
+// still reaches this device after iOS drops the socket.
+function randomId() {
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+const CLIENT = (() => {
+  try {
+    let id = localStorage.getItem("cv_client");
+    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) { id = randomId(); localStorage.setItem("cv_client", id); }
+    return id;
+  } catch (e) { return randomId(); }
+})();
+// The cookie carries the token from here on; keep it out of the address bar and history.
+if (/[?&]token=/.test(location.search)) { try { history.replaceState(null, "", location.pathname); } catch (e) {} }
 
 function add(cls, text) {
   const el = document.createElement("div");
@@ -102,12 +122,28 @@ function setState(s) {
   const pill = $("state");
   pill.textContent = s.state + (s.mic_muted ? " · mic muted" : "");
   pill.className = "pill " + s.state;
-  muted = s.mic_muted;
+  muted = !!s.mic_muted;
   $("mute").textContent = muted ? "Unmute mic" : "Mute mic";
   $("mute").classList.toggle("on", muted);
-  if (!s.confirming) $("confirm").classList.remove("show");
+  if (s.state !== "offline" && !s.confirming) hideConfirm();
   const f = s.floor || {};
-  $("floor").textContent = f.holder && f.holder !== "room" ? "floor: " + f.holder : "";
+  const queue = (f.queue || []).filter((a) => a !== "room");
+  const holder = f.holder && f.holder !== "room" ? "floor: " + f.holder : "";
+  $("floor").textContent = [holder, queue.length ? "waiting: " + queue.join(", ") : ""].filter(Boolean).join(" · ");
+}
+
+// --- approvals: every answer names the question it answers -------------------------
+function showConfirm(id, text) {
+  confirmId = id;
+  $("ctext").textContent = "Claude wants to " + text + ".";
+  for (const b of ["approve", "always", "deny"]) $(b).disabled = false;
+  $("confirm").classList.add("show");
+}
+function hideConfirm() { confirmId = null; $("confirm").classList.remove("show"); }
+function answer(approved, always) {
+  if (confirmId == null) return;
+  for (const b of ["approve", "always", "deny"]) $(b).disabled = true;  // one answer per question
+  send({type: "confirm", id: confirmId, approved, always}, true);
 }
 
 function renderRules(rules) {
@@ -117,128 +153,239 @@ function renderRules(rules) {
     const li = document.createElement("li");
     const s = document.createElement("span"); s.textContent = r.text;
     const b = document.createElement("button"); b.textContent = "Remove"; b.type = "button";
-    b.onclick = () => send({type: "remove_rule", index: r.index});
+    b.onclick = () => { b.disabled = true; if (!send({type: "remove_rule", id: r.id})) b.disabled = false; };
     li.append(s, b); ul.appendChild(li);
   }
+}
+
+function showResult(ev) {
+  const bits = [];
+  if (typeof ev.cost === "number") bits.push(`$${ev.cost.toFixed(4)}`);
+  if (typeof ev.turns === "number") bits.push(`${ev.turns} turn${ev.turns === 1 ? "" : "s"}`);
+  if (ev.error) add("err", "The request ended with an error" + (bits.length ? " (" + bits.join(" · ") + ")" : "") + ".");
+  else if (bits.length) add("meta", bits.join(" · "));
 }
 
 function render(ev) {
   switch (ev.type) {
     case "state": setState(ev); break;
     case "heard": add("heard", "🎙 " + ev.text + (ev.to ? "  → " + ev.to : "")); break;
-    case "ignored": add("heard ignored", "🎙 " + ev.text + "  — ignored: " + ev.reason); break;
+    case "ignored": lastIgnored = ev.text; add("heard ignored", "🎙 " + ev.text + "  — ignored: " + ev.reason); break;
     case "you": add("msg you", ev.text); break;
     case "claude": add("msg claude", ev.text); break;
     case "tool": add("tool", ev.name + " " + JSON.stringify(ev.input)); break;
-    case "confirm": $("ctext").textContent = "Claude wants to " + ev.text + "."; $("confirm").classList.add("show"); break;
-    case "confirm_done": $("confirm").classList.remove("show"); add("meta", ev.always ? "approved (always)" : ev.approved ? "approved" : "denied"); break;
+    case "confirm": if (!replaying) showConfirm(ev.id, ev.text); break;
+    case "confirm_done":
+      if (ev.id == null || ev.id === confirmId) hideConfirm();
+      add("meta", ev.always ? "approved (always)" : ev.approved ? "approved" : "denied");
+      break;
     case "rules": if (ev.rules) renderRules(ev.rules); if (ev.text) add("meta", ev.text); break;
     case "timer": add("meta", "⏰ " + ev.text); break;
     case "agent_said": add("msg agent", ev.agent + ": " + ev.text); break;
-    case "ptt_result": if (ev.ignored) add("heard ignored", "🎙 " + (ev.text || "…") + "  — ignored: " + ev.ignored); break;
+    case "ptt_result":  // a clip the gate rejected is already shown by the "ignored" row
+      if (ev.ignored && ev.text !== lastIgnored) add("heard ignored", "🎙 " + (ev.text || "…") + "  — ignored: " + ev.ignored);
+      break;
     case "audio_reply": playReply(ev.data); break;
-    case "result": if (ev.cost != null) add("meta", `$${ev.cost.toFixed(4)} · ${ev.turns} turn${ev.turns === 1 ? "" : "s"}`); break;
-    case "stopped": add("meta", "stopped"); break;
-    case "reset": add("meta", "— new conversation —"); break;
+    case "result": showResult(ev); break;
+    case "stopped": if (!replaying) stopPlayback(); add("meta", "stopped"); break;
+    case "reset": if (!replaying) stopPlayback(); add("meta", "— new conversation —"); break;
     case "error": add("err", ev.text); break;
   }
 }
 
-function connect() {
-  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-  ws.onmessage = (m) => {
-    const ev = JSON.parse(m.data);
-    if (ev.type === "hello") {
-      log.innerHTML = "";
-      let pending = false;
-      for (const h of ev.history) { render(h); if (h.type === "confirm") pending = true; if (h.type === "confirm_done") pending = false; }
-      if (!(pending && ev.confirming)) $("confirm").classList.remove("show");
-      setState(ev);
-      renderRules(ev.rules || []);
-    } else render(ev);
-  };
-  ws.onclose = () => { setState({state: "offline", mic_muted: muted}); setTimeout(connect, 2000); };
+function onHello(ev) {
+  log.innerHTML = "";
+  const history = Array.isArray(ev.history) ? ev.history : [];
+  replaying = true;
+  try { for (const h of history) render(h); } finally { replaying = false; }
+  lastIgnored = null;
+  hideConfirm();
+  if (ev.confirming && ev.confirm_id != null) {
+    const c = history.filter((h) => h.type === "confirm" && h.id === ev.confirm_id).pop();
+    if (c) showConfirm(c.id, c.text);
+  }
+  setState(ev);
+  renderRules(ev.rules || []);
+  flushOutbox();
 }
-const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+function connect() {
+  retry = null;
+  const sock = ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host
+    + "/ws?client=" + encodeURIComponent(CLIENT));
+  sock.onmessage = (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch (e) { return; }
+    if (!ev || typeof ev !== "object") return;
+    try { if (ev.type === "hello") onHello(ev); else render(ev); } catch (e) { console.error(e); }
+  };
+  sock.onclose = () => {
+    if (sock !== ws) return;
+    setState({state: "offline", mic_muted: muted});
+    retry = setTimeout(connect, 2000);
+  };
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && retry) { clearTimeout(retry); connect(); }  // back from the background
+  if (document.hidden && recording) finishRec(false);
+});
+
+// Requests and approvals made while reconnecting are sent once the page is back.
+const outbox = [];
+function send(o, queue = false) {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; }
+  if (queue && outbox.length < 10) {
+    outbox.push({o, at: Date.now()});
+    add("meta", "Not connected; it will be sent when the page reconnects.");
+    return true;
+  }
+  add("err", "Not connected; try again in a moment.");
+  return false;
+}
+function flushOutbox() {
+  while (outbox.length && ws && ws.readyState === 1) {
+    const {o, at} = outbox.shift();
+    if (Date.now() - at > 120000) { add("err", "Dropped something sent while offline (over 2 minutes old)."); continue; }
+    ws.send(JSON.stringify(o));
+  }
+}
 
 $("f").onsubmit = (e) => {
   e.preventDefault();
   const t = $("text").value.trim();
   if (!t) return;
-  unlockAudio();
-  send({type: "say", text: t, output: $("output").value});
-  $("text").value = "";
+  if (send({type: "say", text: t, output: $("output").value}, true)) $("text").value = "";
 };
-$("stop").onclick = () => send({type: "stop"});
+$("stop").onclick = () => { stopPlayback(); send({type: "stop"}); };
 $("mute").onclick = () => send({type: "mute", value: !muted});
-$("reset").onclick = () => send({type: "reset"});
-$("approve").onclick = () => send({type: "confirm", approved: true});
-$("deny").onclick = () => send({type: "confirm", approved: false});
-$("always").onclick = () => send({type: "confirm", approved: true, always: true});
-// --- push-to-talk (needs https or localhost for the microphone) ---------------------
-let rec = null, chunks = [], pressed = false;
+$("reset").onclick = () => { stopPlayback(); send({type: "reset", output: $("output").value}); };
+$("approve").onclick = () => answer(true, false);
+$("deny").onclick = () => answer(false, false);
+$("always").onclick = () => answer(true, true);
+
+// --- reply audio on this device ------------------------------------------------------
+// iOS only plays audio after a user gesture, so a tap "unlocks" one reusable audio
+// element. If playback is refused later (a call, Siri), the clip stays queued and the
+// next tap anywhere on the page resumes it.
+const player = new Audio();
 const audioQ = [];
-let playing = false;
+let playing = false, blocked = false, unlocked = false, seq = 0;
+const SILENCE = (() => {  // 0.1 s of 8 kHz 8-bit silence
+  const n = 800, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n, true); str(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); str(36, "data"); v.setUint32(40, n, true);
+  b.fill(128, 44);
+  let bin = ""; for (const x of b) bin += String.fromCharCode(x);
+  return "data:audio/wav;base64," + btoa(bin);
+})();
 function playReply(b64) {
+  if (typeof b64 !== "string") return;
   audioQ.push(b64);
-  if (!playing) nextReply();
+  if (audioQ.length > 40) audioQ.shift();
+  if (!playing && !blocked) nextReply();
 }
 function nextReply() {
+  if (blocked) return;
   const b64 = audioQ.shift();
   if (!b64) { playing = false; return; }
   playing = true;
-  player.onended = nextReply; player.onerror = nextReply;
+  const mine = ++seq;
+  let done = false;
+  const finish = () => { if (done || mine !== seq) return; done = true; nextReply(); };
+  player.onended = finish;
+  player.onerror = () => { if (done || mine !== seq) return; add("err", "Couldn't play a reply clip."); finish(); };
   player.src = "data:audio/wav;base64," + b64;
-  player.play().catch(() => { add("err", "Tap the page once to allow audio, then try again."); nextReply(); });
+  player.play().catch((err) => {
+    if (done || mine !== seq) return;
+    if (err && err.name === "NotAllowedError") {  // not allowed right now: keep it for the next tap
+      done = true; audioQ.unshift(b64); playing = false; blocked = true; unlocked = false;
+      $("unlock").classList.add("show");
+    }  // any other failure also fires onerror, which moves on exactly once
+  });
 }
+function stopPlayback() {
+  audioQ.length = 0; seq++; playing = false; blocked = false;
+  $("unlock").classList.remove("show");
+  try { player.pause(); } catch (e) {}
+}
+function unlockAudio() {
+  if (unlocked || playing) return;
+  seq++;
+  player.onended = player.onerror = null;
+  player.src = SILENCE;
+  player.play().then(() => { unlocked = true; }).catch(() => {});  // not yet: the next gesture retries
+}
+function onGesture() {
+  if (blocked) { blocked = false; $("unlock").classList.remove("show"); nextReply(); }
+  else unlockAudio();
+}
+for (const kind of ["pointerdown", "click", "touchend", "keydown"]) document.addEventListener(kind, onGesture, true);
+
+// --- push-to-talk (needs https or localhost for the microphone) ---------------------
+const MAX_REC_MS = 60000;
+let pressed = false, starting = false, recording = null;
+const stopTracks = (stream) => stream.getTracks().forEach((t) => t.stop());
 async function startRec(e) {
   e.preventDefault();
-  unlockAudio();
-  if (pressed || (rec && rec.state === "recording")) return;
-  pressed = true;
+  if (pressed || starting || recording) return;  // one recorder at a time
   if (!navigator.mediaDevices || !window.isSecureContext) {
     add("err", "The microphone needs an https page (use the Tailscale address) or localhost.");
     return;
   }
+  pressed = true; starting = true;
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
-    if (!pressed) { stream.getTracks().forEach((t) => t.stop()); return; }  // released while we waited
-    chunks = [];
-    rec = new MediaRecorder(stream);
-    rec.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
-    rec.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      const blob = new Blob(chunks, {type: rec.mimeType});
-      if (blob.size < 2000) return;
-      const buf = new Uint8Array(await blob.arrayBuffer());
-      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      send({type: "audio", mime: rec.mimeType, data: btoa(bin), output: $("output").value});
-    };
-    rec.start();
-    $("ptt").classList.add("rec");
-  } catch (err) { pressed = false; add("err", "Microphone unavailable: " + err.message); }
+    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
+  } catch (err) {
+    pressed = false; starting = false;
+    add("err", "Microphone unavailable: " + err.message);
+    return;
+  }
+  starting = false;
+  if (!pressed) { stopTracks(stream); return; }  // released while we waited
+  let rec;
+  try { rec = new MediaRecorder(stream); } catch (err) {
+    stopTracks(stream); pressed = false;
+    add("err", "Can't record here: " + err.message);
+    return;
+  }
+  const r = {rec, chunks: [], cancelled: false, timer: null};  // each recording keeps its own data
+  recording = r;
+  rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) r.chunks.push(ev.data); };
+  rec.onstop = async () => {
+    clearTimeout(r.timer);
+    stopTracks(stream);
+    const mime = rec.mimeType || (r.chunks[0] && r.chunks[0].type) || "";
+    const blob = new Blob(r.chunks, mime ? {type: mime} : {});
+    if (r.cancelled || blob.size < 2000) return;
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    send({type: "audio", mime, data: btoa(bin), output: $("output").value}, true);
+  };
+  rec.start();
+  r.timer = setTimeout(() => { add("meta", "Recording stopped at 60 seconds."); finishRec(false); }, MAX_REC_MS);
+  $("ptt").classList.add("rec");
 }
-function stopRec(e) {
-  e.preventDefault();
+function finishRec(cancel) {
   pressed = false;
   $("ptt").classList.remove("rec");
-  if (rec && rec.state === "recording") rec.stop();
+  const r = recording;
+  recording = null;
+  if (!r) return;
+  r.cancelled = cancel;
+  if (r.rec.state !== "inactive") r.rec.stop();
+  if (cancel) add("meta", "Recording cancelled.");
 }
+const stopRec = (e) => { e.preventDefault(); finishRec(false); };
 $("ptt").addEventListener("pointerdown", startRec);
 $("ptt").addEventListener("pointerup", stopRec);
 $("ptt").addEventListener("pointerleave", stopRec);
-// Remember the choice per device; iOS only plays audio after a user gesture,
-// so the first tap or hold "unlocks" a reusable audio element.
+$("ptt").addEventListener("pointercancel", (e) => { e.preventDefault(); finishRec(true); });  // iOS took the touch
+// Remember where replies play, per device.
 try { $("output").value = localStorage.getItem("cv_output") || "device"; } catch (e) {}
 $("output").onchange = () => { try { localStorage.setItem("cv_output", $("output").value); } catch (e) {} };
-const player = new Audio();
-let unlocked = false;
-function unlockAudio() {
-  if (unlocked) return;
-  unlocked = true;
-  player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
-  player.play().catch(() => {});
-}
 connect();
 </script>
 </body>
