@@ -79,8 +79,9 @@
   <form id="f">
     <input id="text" placeholder="Type a request…" autocomplete="off">
     <button type="button" id="ptt" title="Hold to talk">🎙 Hold to talk</button>
-    <label><input type="checkbox" id="speak" checked> speak on mini</label>
-    <label><input type="checkbox" id="here"> play here</label>
+    <label>Replies on <select id="output">
+      <option value="device">this device</option><option value="mini">the mini</option><option value="both">both</option>
+    </select></label>
     <button type="submit">Send</button>
   </form>
 </div>
@@ -154,7 +155,6 @@ function connect() {
       if (!(pending && ev.confirming)) $("confirm").classList.remove("show");
       setState(ev);
       renderRules(ev.rules || []);
-      if ($("here").checked) send({type: "play_here", value: true});
     } else render(ev);
   };
   ws.onclose = () => { setState({state: "offline", mic_muted: muted}); setTimeout(connect, 2000); };
@@ -165,7 +165,8 @@ $("f").onsubmit = (e) => {
   e.preventDefault();
   const t = $("text").value.trim();
   if (!t) return;
-  send({type: "say", text: t, speak: $("speak").checked});
+  unlockAudio();
+  send({type: "say", text: t, output: $("output").value});
   $("text").value = "";
 };
 $("stop").onclick = () => send({type: "stop"});
@@ -186,12 +187,13 @@ function nextReply() {
   const b64 = audioQ.shift();
   if (!b64) { playing = false; return; }
   playing = true;
-  const a = new Audio("data:audio/wav;base64," + b64);
-  a.onended = nextReply; a.onerror = nextReply;
-  a.play().catch(nextReply);
+  player.onended = nextReply; player.onerror = nextReply;
+  player.src = "data:audio/wav;base64," + b64;
+  player.play().catch(() => { add("err", "Tap the page once to allow audio, then try again."); nextReply(); });
 }
 async function startRec(e) {
   e.preventDefault();
+  unlockAudio();
   if (!navigator.mediaDevices || !window.isSecureContext) {
     add("err", "The microphone needs an https page (use the Tailscale address) or localhost.");
     return;
@@ -207,7 +209,7 @@ async function startRec(e) {
       if (blob.size < 2000) return;
       const buf = new Uint8Array(await blob.arrayBuffer());
       let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      send({type: "audio", mime: rec.mimeType, data: btoa(bin), speak: $("speak").checked});
+      send({type: "audio", mime: rec.mimeType, data: btoa(bin), output: $("output").value});
     };
     rec.start();
     $("ptt").classList.add("rec");
@@ -221,10 +223,18 @@ function stopRec(e) {
 $("ptt").addEventListener("pointerdown", startRec);
 $("ptt").addEventListener("pointerup", stopRec);
 $("ptt").addEventListener("pointerleave", stopRec);
-$("here").onchange = () => {
-  send({type: "play_here", value: $("here").checked});
-  if ($("here").checked) new Audio().play().catch(() => {});  // unlock audio on iOS
-};
+// Remember the choice per device; iOS only plays audio after a user gesture,
+// so the first tap or hold "unlocks" a reusable audio element.
+try { $("output").value = localStorage.getItem("cv_output") || "device"; } catch (e) {}
+$("output").onchange = () => { try { localStorage.setItem("cv_output", $("output").value); } catch (e) {} };
+const player = new Audio();
+let unlocked = false;
+function unlockAudio() {
+  if (unlocked) return;
+  unlocked = true;
+  player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+  player.play().catch(() => {});
+}
 connect();
 </script>
 </body>
