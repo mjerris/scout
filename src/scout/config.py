@@ -174,6 +174,13 @@ class ClaudeConfig:
         ]
     )
     extra_system_prompt: str = ""
+    # Answer everyday requests in plain code first (time, date, timers, volume,
+    # play/pause, today's calendar): instant and no tokens. Anything else goes to Claude.
+    local_first: bool = True
+    # Prefix each request with context (date and time, running timers, recent local
+    # answers) and, for calendar or mail questions, the data itself, so Claude can
+    # answer in one pass instead of calling a tool first (each round trip is ~1.5-2.5 s).
+    request_context: bool = True
 
 
 @dataclass
