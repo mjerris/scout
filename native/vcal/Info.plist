@@ -10,5 +10,9 @@
 	<string>scout reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>scout reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>scout reads your reminders to answer questions like "what's on my shopping list", and adds or completes one only after you approve it by voice.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>scout reads your reminders to answer questions like "what's on my shopping list", and adds or completes one only after you approve it by voice.</string>
 </dict>
 </plist>

@@ -210,6 +210,20 @@ class FloorConfig:
 
 
 @dataclass
+class CalendarConfig:
+    # Working hours: free time is looked for between these ("HH:MM", 24-hour).
+    work_start: str = "09:00"
+    work_end: str = "17:00"
+
+
+@dataclass
+class BriefingConfig:
+    # Speak the briefing (today's calendar, due reminders, unread mail count) every
+    # day at this local time, e.g. "07:30". Empty = off; "brief me" works either way.
+    at: str = ""
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -219,6 +233,8 @@ class Config:
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     web: WebConfig = field(default_factory=WebConfig)
     floor: FloorConfig = field(default_factory=FloorConfig)
+    calendar: CalendarConfig = field(default_factory=CalendarConfig)
+    briefing: BriefingConfig = field(default_factory=BriefingConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to Scout's data folder."""
