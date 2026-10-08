@@ -112,8 +112,14 @@ class WebRTCAudioIO:
         auto_gain_control: bool = False,
         noise_suppression: bool = True,
         latency: str | float = "low",
+        output_delay_ms: float = 0.0,
     ) -> None:
         self.input_device, self.output_device = input_device, output_device
+        # Delay the output device adds after the computer hands it audio, which
+        # PortAudio can't see (a TV's sound processing: ~750 ms measured on a Samsung
+        # over HDMI). It's added to the canceller's delay hint and to when playback
+        # counts as finished.
+        self._extra_out = max(0.0, output_delay_ms) / 1000
         self.frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
         self._sd: SoundAPI = sound if sound is not None else SoundDevice()
         self._watch = watch_devices
@@ -181,7 +187,7 @@ class WebRTCAudioIO:
         self._latency = _total_latency(stream.latency)
         # The reference block is processed when it is written; its echo comes
         # back after the output and input latencies of the stream.
-        self._aec.set_delay_ms(1000 * sum(self._latency))
+        self._aec.set_delay_ms(1000 * (sum(self._latency) + self._extra_out))
         self._last_frame = time.monotonic()
         stream.start()
         self._stream = stream
@@ -265,7 +271,7 @@ class WebRTCAudioIO:
         if finished and loop is not None:
             # The last sample was just handed to the device; it is heard one
             # output latency later.
-            delay = self._latency[1]
+            delay = self._latency[1] + self._extra_out
             self._audible_until = time.monotonic() + delay
             for hid in finished:
                 handle = self._handles.pop(hid, None)
