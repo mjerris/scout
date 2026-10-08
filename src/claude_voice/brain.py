@@ -130,6 +130,7 @@ class Brain:
         self.client: ClaudeSDKClient | None = None
         self.session_id: str | None = None
         self._lock = asyncio.Lock()
+        self._options()  # validates permission_mode, setting_sources and approval_policy now
 
     def _options(self) -> ClaudeAgentOptions:
         append = VOICE_PROMPT.format(root=ROOT) + (

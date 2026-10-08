@@ -213,7 +213,9 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
             web.get("/api/status", api_status),
         ]
     )
-    runner = web.AppRunner(app, access_log=None)
+    # handler_cancellation: when a desk session gives up on a discuss call (Esc,
+    # exit, timeout), cancel it so it stops listening and frees the floor.
+    runner = web.AppRunner(app, access_log=None, handler_cancellation=True)
     await runner.setup()
     hosts = await resolve_hosts(cfg.hosts)
     for host in hosts:

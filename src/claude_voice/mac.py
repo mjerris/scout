@@ -284,9 +284,12 @@ async def get_volume() -> tuple[int, bool]:
 
 
 async def volume(level: int | None = None, change: int | None = None, mute: bool | None = None) -> str:
+    said = []
     if mute is not None:
         await osascript(_SET_MUTED, "true" if mute else "false")
-        return "Muted." if mute else "Unmuted."
+        said.append("Muted." if mute else "Unmuted.")
+        if mute or (level is None and change is None):
+            return " ".join(said)
     if level is not None:
         target = check_int(level, 0, 100, "level")
     elif change is not None:
@@ -296,4 +299,4 @@ async def volume(level: int | None = None, change: int | None = None, mute: bool
         current, muted = await get_volume()
         return f"Volume is {current}" + (" (muted)." if muted else ".")
     await osascript(_SET_VOLUME, str(target))
-    return f"Volume set to {target}."
+    return " ".join([*said, f"Volume set to {target}."])

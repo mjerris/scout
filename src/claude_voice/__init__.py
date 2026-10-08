@@ -55,7 +55,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         cfg.tts.chimes,
     )
     speaker.start()
-    asr = Transcriber(cfg.asr.model, cfg.asr.language)
+    asr = Transcriber(cfg.asr.model, cfg.asr.language, cfg.gate.max_compression_ratio)
     await asr.warmup()
 
     assistant = Assistant(cfg, asr, speaker)

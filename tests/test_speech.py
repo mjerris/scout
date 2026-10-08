@@ -109,3 +109,19 @@ def test_is_reset_whole_utterance(text: str, reset: bool) -> None:
 def test_strip_own_speech_keeps_words_before_our_speech() -> None:
     heard = "Claude what's the weather your timer is done"
     assert strip_own_speech(heard, "Your timer is done.") == "claude what's the weather"
+
+
+@pytest.mark.parametrize(
+    ("text", "answer"),
+    [
+        ("sure, no problem", True),
+        ("yes, always, don't ask me again", "always"),
+        ("yes, don't ask again", True),
+        ("no, don't", False),
+        ("no problem, but don't do it", False),
+    ],
+)
+def test_agreeing_phrases_with_no_words(text: str, answer: bool | str) -> None:
+    from claude_voice.speech import parse_answer
+
+    assert parse_answer(text) == answer
