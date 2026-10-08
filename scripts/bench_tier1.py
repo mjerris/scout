@@ -53,10 +53,16 @@ CASES: list[tuple[str, str, str | None]] = [
     # mail
     ("any new email", "tool", "mail_recent"),
     ("do I have unread mail", "tool", "mail_recent"),
-    ("read me my latest emails", "tool", "mail_recent"),
+    ("read me my latest emails", "tool", "mail_recent|mail_summarize"),
     ("anything from Sam", "tool", "mail_search"),
     ("did Rover email me", "tool", "mail_search"),
     ("is there an email about the invoice", "tool", "mail_search"),
+    # mail, summarized on the Mac
+    ("what did the Rover email say", "tool", "mail_summarize"),
+    ("summarize my unread mail", "tool", "mail_summarize"),
+    ("what did Pat's email about the planning doc say", "tool", "mail_summarize"),
+    ("give me a summary of my new emails", "tool", "mail_summarize"),
+    ("what was the email from the utility company about", "tool", "mail_summarize|mail_search"),
     # claude: knowledge / reasoning
     ("what's the capital of Australia", "claude", None),
     ("how far is the moon", "claude", None),
@@ -111,7 +117,7 @@ def main(models: list[str]) -> None:
             got, dt, raw = decide(model, tok, request)
             times.append(dt)
             r = "tool" if got else "claude"
-            if r == route and (tool is None or (got or {}).get("tool") == tool):
+            if r == route and (tool is None or (got or {}).get("tool") in tool.split("|")):
                 right += 1
             elif route == "claude" and r != "claude":
                 kept_bad.append((request, got))  # the dangerous mistake
