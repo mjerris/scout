@@ -15,6 +15,14 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   seconds after a reply you can follow up without the wake word.
 - **Stop:** "Claude, stop" interrupts speech and the running request. "Claude,
   new conversation" starts a fresh session.
+- **Local gate:** every transcript passes deterministic checks before it can
+  reach Claude, so noise and hallucinations cost no tokens. The checks use
+  Whisper's confidence and no-speech estimate, repetition, words per second
+  of actual speech, a list of known noise phrases, and loudness. Follow-ups
+  without the wake word are held to a stricter standard: at least two words,
+  well above the room's noise floor, and not much quieter than your last
+  "Hey Claude". Rejections are logged as `ignored ... (reason)` and shown
+  struck through on the web page. Thresholds are under `[gate]` in the config.
 - **Permissions:** `claude.approval_policy` picks who decides what runs
   without asking:
   - `strict` (default): read-only tools and a short list of harmless commands
@@ -65,7 +73,11 @@ scripts/launchd.sh status | restart | uninstall
   your terminal. If the log says *microphone has delivered pure silence*, enable
   it under System Settings → Privacy & Security → Microphone.
 
-Logs: `logs/claude-voice.log` (plus `logs/launchd.*.log` under launchd).
+Logs: `logs/claude-voice.log` (plus `logs/launchd.*.log` under launchd). Each
+heard line includes the stats the gate used, e.g. `[conf -0.31, no-speech 0.01,
+2.4 words/s, 24 dB over noise]`.
+
+Tests: `uv run pytest`.
 
 ## Tuning
 

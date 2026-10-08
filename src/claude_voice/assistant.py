@@ -8,7 +8,7 @@ import time
 from collections import deque
 from typing import Any
 
-from . import speech
+from . import gate, speech
 from .asr import Transcriber
 from .audio import Utterance
 from .brain import Brain
@@ -31,6 +31,7 @@ class Assistant:
         self._turn: asyncio.Task | None = None
         self._silence_turn = False  # set by stop(): drain the turn without speaking
         self._queued: str | None = None  # follow-up spoken over the end of a reply
+        self._ref_db: float | None = None  # your voice level on accepted wake requests
         self._confirm_fut: asyncio.Future[bool] | None = None
         self._confirm_started = 0.0
         self.history: deque[dict] = deque(maxlen=300)
@@ -80,12 +81,27 @@ class Assistant:
             except Exception:
                 log.exception("error handling utterance")
 
+    def _reject(self, kind: str, text: str, reason: str | None) -> bool:
+        """Log and surface a gate rejection. Returns True if rejected."""
+        if reason is None:
+            return False
+        log.info("ignored %s (%s): %s", kind, reason, text)
+        self.emit("ignored", text=text, reason=reason)
+        return True
+
     async def _handle(self, utt: Utterance) -> None:
-        text = await self.asr.transcribe(utt.pcm, prompt=self._wake_prompt)
+        t = await self.asr.transcribe(utt.pcm, prompt=self._wake_prompt)
+        text = t.text
         if not text:
             return
+        a = utt.stats
+        log.info("heard%s: %s  [conf %.2f, no-speech %.2f, %.1f words/s, %.0f dB over noise]",
+                 " (echo)" if utt.echo else "", text, t.avg_logprob, t.no_speech_prob,
+                 len(gate.norm(text).split()) / max(a.voiced_ms / 1000, 0.3), a.level_db - a.floor_db)
+        if gate.junk(text):
+            return  # not speech at all; nothing to show
         cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
-        log.info("heard%s: %s", " (echo)" if utt.echo else "", text)
+        confirming = self._confirm_fut is not None and not self._confirm_fut.done()
 
         # While the assistant is talking, the mic hears it too: an explicit
         # "<wake> stop" always counts; otherwise keep only what follows the
@@ -96,25 +112,35 @@ class Assistant:
                 await self.stop()
                 return
             residual = speech.strip_own_speech(text, self.speaker.recent_speech())
-            # Leftovers are often misheard bits of our own speech: during an approval
-            # only a clear yes/no counts; otherwise require a few words.
             if not residual:
                 return
-            if self._confirm_fut is not None:
+            # Leftovers are often misheard bits of our own speech: during an approval
+            # only a clear yes/no counts; otherwise apply the follow-up rules.
+            if confirming:
                 if speech.parse_yes_no(residual) is None:
                     return
-            elif len(residual.split()) < 3:
+            elif self._reject("residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
                 return
             log.info("heard after own speech: %s", residual)
             text, started = residual, time.monotonic()
             cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
-            if self.busy and self._confirm_fut is None and not (cmd is not None and speech.is_stop(cmd)):
+            if self.busy and not confirming and not (cmd is not None and speech.is_stop(cmd)):
                 # Spoke over the end of the reply: run it once this turn finishes.
                 self.emit("heard", text=text)
                 self._queued = cmd if cmd is not None else text
                 return
         else:
             started = utt.started
+            if confirming:
+                if self._reject("answer", text, gate.check("confirm", text, t, a, self._ref_db, self.cfg.gate)):
+                    return
+            elif cmd is not None:
+                if self._reject("request", text, gate.check("wake", text, t, a, self._ref_db, self.cfg.gate)):
+                    return
+                self._ref_db = a.level_db if self._ref_db is None else 0.7 * self._ref_db + 0.3 * a.level_db
+            elif not self.busy and started <= self.follow_up_until:
+                if self._reject("follow-up", text, gate.check("followup", text, t, a, self._ref_db, self.cfg.gate)):
+                    return
 
         if self._confirm_fut is not None and not self._confirm_fut.done():
             if started < self._confirm_started:

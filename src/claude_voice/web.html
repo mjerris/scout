@@ -38,6 +38,7 @@
   .tool { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--tool); color: var(--muted);
           align-self: flex-start; padding: 6px 10px; border-radius: 8px; max-width: 88%; overflow-x: auto; }
   .heard { font-size: 12px; color: var(--muted); align-self: flex-end; font-style: italic; }
+  .heard.ignored { opacity: 0.55; text-decoration: line-through; text-decoration-thickness: 1px; }
   .err { color: var(--bad); align-self: center; font-size: 13px; }
   #confirm { display: none; padding: 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); }
   #confirm.show { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -96,6 +97,7 @@ function render(ev) {
   switch (ev.type) {
     case "state": setState(ev); break;
     case "heard": add("heard", "🎙 " + ev.text); break;
+    case "ignored": add("heard ignored", "🎙 " + ev.text + "  — ignored: " + ev.reason); break;
     case "you": add("msg you", ev.text); break;
     case "claude": add("msg claude", ev.text); break;
     case "tool": add("tool", ev.name + " " + JSON.stringify(ev.input)); break;
