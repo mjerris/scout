@@ -108,6 +108,11 @@ class ClaudeConfig:
     model: str = ""  # empty = Claude Code's default
     permission_mode: str = "default"
     setting_sources: list[str] = field(default_factory=lambda: ["user"])
+    # Claude Code plugins for the room assistant (the Agent SDK doesn't load them by
+    # itself): "enabled" = Scout's own skills plus every plugin enabled in
+    # ~/.claude/settings.json; "scout" = Scout's skills only; "none". Their tools
+    # still ask by voice unless pre-approved.
+    plugins: str = "enabled"
     confirm_timeout_s: float = 30.0
     # "strict": only auto_allow_* below run without a spoken yes, even if your
     # ~/.claude settings allow more.

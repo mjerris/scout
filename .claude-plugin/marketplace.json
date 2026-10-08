@@ -1,0 +1,8 @@
+{
+  "name": "scout",
+  "owner": {"name": "Michael Jerris"},
+  "description": "Scout, as a one-plugin marketplace.",
+  "plugins": [
+    {"name": "scout", "source": ".", "description": "Always-on voice, Mac tools, mail and calendar for Claude, with spoken approvals."}
+  ]
+}

@@ -8,7 +8,7 @@ description: Use when the user asks about their email or calendar (what's on tod
 The tools come from the scout app on this Mac, which reads Mail.app and
 the Mac's calendars (Google, iCloud and others synced through Internet
 Accounts). The room assistant has them as `mcp__voice_app__*`; other sessions as
-`mcp__scout__*`. Same tools, same behaviour.
+`mcp__plugin_scout_scout__*` (installed as the Scout plugin). Same tools, same behaviour.
 
 ## Which tool
 

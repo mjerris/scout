@@ -1,0 +1,9 @@
+{
+  "name": "scout",
+  "displayName": "Scout",
+  "description": "An always-on helper on your Mac for Claude: local voice (wake word, echo cancellation, barge-in), Mac tools, mail and calendar, with spoken approvals. Installs and runs its background app on first use.",
+  "author": {"name": "Michael Jerris"},
+  "repository": "https://github.com/mjerris/scout",
+  "license": "UNLICENSED",
+  "keywords": ["voice", "macos", "mail", "calendar", "assistant"]
+}
