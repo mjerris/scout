@@ -30,7 +30,7 @@ class Floor:
     def _free_for(self, agent: str) -> bool:
         owner = self.owner()
         if owner == agent:
-            return True
+            return not self.active  # re-take your own hold, but not a second exchange at once
         if owner is not None:
             return False
         # Free: honour the queue order.

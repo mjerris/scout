@@ -118,7 +118,8 @@ class Brain:
         overrides: dict[str, Any] = {"permissions": {
             # The app itself is maintained by its owner session, not by voice.
             "allow": [*self.tool_names, "WebSearch", "WebFetch"],
-            "deny": [f"Edit({project}/**)", f"Write({project}/**)", f"MultiEdit({project}/**)",
+            # "//" = absolute path in Claude Code permission rules ("/x" is relative to the settings file).
+            "deny": [f"Edit(/{project}/**)", f"Write(/{project}/**)", f"MultiEdit(/{project}/**)",
                      "mcp__voice"],  # the desk-session voice tool; the room agent already owns the voice
             "ask": [] if strict else list(self.cfg.always_ask),
         }}
@@ -137,8 +138,7 @@ class Brain:
             can_use_tool=self._can_use_tool,
             # Strict policy: the hook gates every tool call, ahead of any allow
             # rules inherited from ~/.claude settings.
-            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use],
-                                              timeout=self.cfg.confirm_timeout_s + 90)]}
+            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=900)]}
             if strict else None,
         )
 
@@ -151,7 +151,9 @@ class Brain:
         if name in self.cfg.auto_allow_tools or name in self.tool_names or (
             name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
         ):
-            return {}  # fall through to normal permission handling
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "permissionDecision": "allow",
+                                           "permissionDecisionReason": "on the voice auto-allow list"}}
         answer = await self._ask(name, args)
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

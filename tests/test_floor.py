@@ -95,3 +95,11 @@ def test_pronounce_user_rules(tmp_path):
     assert p.tts("Tali is a dog") == "Tar-lee is a dog"
     assert p.stt("3M stock") == "three M stock"
     assert len(parse("TTS (unclosed x")) == 0
+
+
+def test_same_agent_cannot_hold_two_exchanges():
+    f = Floor()
+    assert f.try_acquire("desk#1")
+    assert not f.try_acquire("desk#1")  # a parallel second call waits
+    f.release("desk#1", hold=True, ttl=5)
+    assert f.try_acquire("desk#1")  # but it can re-take its own hold
