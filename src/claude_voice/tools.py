@@ -194,8 +194,22 @@ def _cancelled(names: list[str]) -> str:
     return f"Cancelled: {', '.join(names)}." if names else "No matching timer."
 
 
+_REQUEST_TIMES: list[float] = []
+
+
 async def _request_change(a: dict[str, Any]) -> str:
-    entry = {"ts": time.time(), "summary": a.get("summary", ""), "details": a.get("details", "")}
+    now = time.time()
+    _REQUEST_TIMES[:] = [t for t in _REQUEST_TIMES if now - t < 3600]
+    if len(_REQUEST_TIMES) >= 20:
+        raise mac.ToolError("too many change requests this hour")
+    _REQUEST_TIMES.append(now)
+    entry = {
+        "ts": now,
+        # Agent-written text for the owner session to read: bounded, marked as such.
+        "from": "voice agent (not the user's own words)",
+        "summary": str(a.get("summary", ""))[:200],
+        "details": str(a.get("details", ""))[:2000],
+    }
     REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with REQUESTS_FILE.open("a") as fh:
         fh.write(json.dumps(entry) + "\n")

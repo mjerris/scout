@@ -33,12 +33,10 @@ class Transcriber:
             temperature=0.0,
             verbose=None,
         )
-        # Segments that are runaway repetition loops are dropped outright.
-        segs = [
-            s
-            for s in result.get("segments", [])
-            if s.get("compression_ratio", 0) <= self.max_compression_ratio
-        ]
+        # Keep every segment and report the worst compression ratio: the gate then
+        # rejects a transcript with a runaway loop in it as a whole, instead of
+        # silently stitching together what's left (which could drop a retraction).
+        segs = list(result.get("segments", []))
         text = gate.clean(" ".join(s["text"].strip() for s in segs))
         if not segs or not text:
             return Transcript("")

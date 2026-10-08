@@ -21,7 +21,7 @@ SEARCH_SITES = {
     "wikipedia": "https://en.wikipedia.org/w/index.php?search={q}",
     "maps": "https://www.google.com/maps/search/{q}",
 }
-_APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&'+\-]{0,59}$")
+_APP_NAME = re.compile(r"^[^\W_][\w .&'+()\-]{0,79}$")  # letters in any script, "Photoshop (Beta)"
 
 
 class ToolError(ValueError):
@@ -246,12 +246,16 @@ _MEDIA = {
         "previous": 'tell application "Music" to previous track',
     },
 }
+# Checks the front app and presses Space in one step, so focus can't change in between.
 _BROWSER_SPACE = """
-tell application "System Events"
-  set p to first application process whose frontmost is true
-  key code 49
-  return name of p
-end tell
+on run argv
+  tell application "System Events"
+    set p to first application process whose frontmost is true
+    if (name of p) is not in argv then return ""
+    key code 49
+    return name of p
+  end tell
+end run
 """
 
 
@@ -263,11 +267,10 @@ async def media(action: str) -> str:
             await osascript(scripts[action])
             return f"{app}: {action.replace('_', '/')}."
     if action == "play_pause":
-        front = await frontmost_app()
-        if front in BROWSERS:
-            await osascript(_BROWSER_SPACE)  # space bar toggles most web players
+        front = await osascript(_BROWSER_SPACE, *BROWSERS)  # space bar toggles most web players
+        if front:
             return f"Toggled playback in {front}."
-        raise ToolError(f"nothing to play or pause; {front} is in front and no music app is running")
+        raise ToolError("nothing to play or pause: no music app is running and no browser is in front")
     raise ToolError("next and previous work with Spotify or Music only")
 
 

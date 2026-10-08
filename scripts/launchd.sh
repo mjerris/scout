@@ -4,6 +4,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
+# The path goes into XML: escape it so a folder like "R&D" can't break the plist.
+ROOT_XML=$(printf '%s' "$ROOT" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
 LABEL=com.local.claude-voice
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
@@ -17,14 +19,15 @@ install)
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$ROOT/scripts/run.sh</string></array>
-  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>ProgramArguments</key><array><string>$ROOT_XML/scripts/run.sh</string></array>
+  <key>WorkingDirectory</key><string>$ROOT_XML</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>15</integer>
   <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>$ROOT/logs/launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/logs/launchd.err.log</string>
+  <key>StandardOutPath</key><string>$ROOT_XML/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$ROOT_XML/logs/launchd.err.log</string>
 </dict>
 </plist>
 PLIST

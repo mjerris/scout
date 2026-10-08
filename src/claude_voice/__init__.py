@@ -6,10 +6,16 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
+import os
 import signal
 import sys
+from typing import TYPE_CHECKING
 
 from . import config as config_mod
+
+if TYPE_CHECKING:
+    from .audio import Microphone
+    from .tts import Speaker
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -18,10 +24,14 @@ def _setup_logging(verbose: bool) -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
-    for h in (
-        logging.StreamHandler(sys.stdout),
-        logging.handlers.RotatingFileHandler(logs / "claude-voice.log", maxBytes=5_000_000, backupCount=3),
-    ):
+    handlers: list[logging.Handler] = [
+        logging.handlers.RotatingFileHandler(logs / "claude-voice.log", maxBytes=5_000_000, backupCount=3)
+    ]
+    # Under launchd stdout is logs/launchd.out.log, which nothing rotates; the
+    # rotating file above already has every line. Echo to the terminal only.
+    if sys.stdout.isatty():
+        handlers.append(logging.StreamHandler(sys.stdout))
+    for h in handlers:
         h.setFormatter(fmt)
         # phonemizer resets its own logger level on every call; drop its benign
         # word-count warnings here instead.
@@ -69,25 +79,63 @@ async def _amain(cfg: config_mod.Config) -> None:
     )
 
     stop = asyncio.Event()
+
+    def on_signal() -> None:
+        if stop.is_set():  # a second Ctrl-C / SIGTERM: don't wait for a clean shutdown
+            log.warning("forced exit")
+            os._exit(1)
+        stop.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+        loop.add_signal_handler(sig, on_signal)
 
     tasks = [
-        asyncio.create_task(utterances(mic, seg, speaker.is_echo, assistant.utterances)),
-        asyncio.create_task(assistant.run()),
+        asyncio.create_task(utterances(mic, seg, speaker.is_echo, assistant.utterances), name="mic"),
+        asyncio.create_task(assistant.run(), name="assistant"),
+        asyncio.create_task(_watch(mic, speaker), name="watchdog"),
     ]
     log.info('ready — say "Hey Claude, …"')
     speaker.chime("done")
-    await stop.wait()
+    stopper = asyncio.create_task(stop.wait(), name="signal")
+    done, _ = await asyncio.wait([stopper, *tasks], return_when=asyncio.FIRST_COMPLETED)
+    failed = next((t for t in done if t is not stopper), None)
+    if failed is not None:
+        # The mic loop, the assistant or the watchdog ended: exit non-zero so
+        # launchd's KeepAlive restarts us instead of leaving a deaf process.
+        exc = failed.exception() if not failed.cancelled() else None
+        log.error(
+            "%s stopped (%s); exiting so launchd restarts the app", failed.get_name(), exc or "no error"
+        )
 
     log.info("shutting down")
     mic.stop()
     speaker.stop()
-    for t in tasks:
+    for t in [*tasks, stopper]:
         t.cancel()
-    await assistant.shutdown()
+    try:
+        await asyncio.wait_for(assistant.shutdown(), 3)
+    except Exception:
+        log.exception("assistant shutdown")
     if runner:
-        await runner.cleanup()
+        try:
+            await asyncio.wait_for(runner.cleanup(), 3)
+        except Exception:
+            log.exception("web shutdown")
+    if failed is not None:
+        raise SystemExit(1)
+
+
+async def _watch(mic: Microphone, speaker: Speaker) -> None:
+    """Return (ending the app, so launchd restarts it) when the mic stops
+    delivering frames or playback keeps failing, e.g. a device was unplugged."""
+    while True:
+        await asyncio.sleep(2)
+        if mic.seconds_since_frame() > 10:
+            logging.getLogger("claude_voice").error("no audio from the microphone for 10 s")
+            return
+        if speaker.consecutive_failures >= 5:
+            logging.getLogger("claude_voice").error("audio playback failed 5 times in a row")
+            return
 
 
 def main() -> None:

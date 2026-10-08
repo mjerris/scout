@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Coroutine
@@ -106,7 +107,9 @@ def test_stop_during_approval_stops_everything() -> None:
 
 
 def test_unclear_push_to_talk_answer_asks_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(assistant_mod, "analyze", lambda pcm: LOUD)  # a real 1.5 s of speech
+    monkeypatch.setattr(
+        assistant_mod, "analyze", lambda pcm, aggressiveness=2: LOUD
+    )  # a real 1.5 s of speech
 
     async def go() -> tuple[dict[str, Any], list[str]]:
         r = make()
@@ -240,7 +243,7 @@ def test_busy_reply_goes_to_whoever_spoke() -> None:
         return r.spk.said, says
 
     said, says = run(go())
-    assert said == ["I'm still working on the last request. Say stop to cancel it."] and says == []
+    assert said == ["Okay, I'll do that next."] and says == []
 
 
 def test_typed_stop_and_reset_are_handled_not_sent_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,7 +252,7 @@ def test_typed_stop_and_reset_are_handled_not_sent_to_claude(monkeypatch: pytest
         sent: list[str] = []
         resets: list[int] = []
 
-        async def fake_reset() -> None:
+        async def fake_reset(speak: bool = True, client: str | None = None) -> None:
             resets.append(1)
 
         monkeypatch.setattr(r.a, "start_turn", recorder(sent))
@@ -372,3 +375,127 @@ def test_quiet_reply_to_session_is_rejected() -> None:
         return await task
 
     assert run(go())["status"] == "no_reply"
+
+
+def test_mic_cannot_answer_a_question_asked_only_on_a_phone() -> None:
+    async def go() -> bool | str | None:
+        r = make()
+        r.a._out = {"mini": False, "client": "phone"}  # a phone-only turn
+        task = asyncio.create_task(r.a._confirm("Run git push?", "run: git push --force"))
+        await asyncio.sleep(0.01)
+        await hear(r, "Okay.", started=time.monotonic())  # the TV, via the mini's mic
+        await asyncio.sleep(0.01)
+        r.a.answer_confirm(False, r.a._confirm_id)  # the phone user denies
+        return await task
+
+    assert run(go()) is False
+
+
+def test_stale_web_answer_cannot_approve_the_next_question() -> None:
+    async def go() -> list[bool | str | None]:
+        r = make()
+        first = asyncio.create_task(r.a._confirm("Run echo?", "run: echo first"))
+        await asyncio.sleep(0.01)
+        first_id = r.a._confirm_id
+        r.a.answer_confirm(True, first_id)
+        a1 = await first
+        second = asyncio.create_task(r.a._confirm("Run rm?", "run: rm -rf ~/x"))
+        await asyncio.sleep(0.01)
+        r.a.answer_confirm(True, first_id)  # the double tap arrives late
+        await asyncio.sleep(0.01)
+        r.a.answer_confirm(False, r.a._confirm_id)
+        return [a1, await second]
+
+    assert run(go()) == [True, False]
+
+
+def test_phone_only_turn_opens_no_mic_follow_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> list[str]:
+        r = make()
+
+        async def fake_ask(text: str) -> AsyncIterator[tuple[str, Any]]:
+            yield "text", "Here you go."
+
+        monkeypatch.setattr(r.a.brain, "ask", fake_ask)
+        await r.a.submit_text("what's on my calendar", speak=False, client="phone")
+        await asyncio.sleep(0.1)
+        sent: list[str] = []
+        monkeypatch.setattr(r.a, "start_turn", recorder(sent))
+        await hear(r, "can you pass the salt please", started=time.monotonic())
+        return sent
+
+    assert run(go()) == []
+
+
+def test_hang_on_then_never_mind_cancels_instead_of_sending(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> tuple[list[str], list[str]]:
+        r = make()
+        sent: list[str] = []
+        monkeypatch.setattr(r.a, "start_turn", recorder(sent))
+        r.a._room_command("remind me to, hang on")
+        r.a._room_command("never mind")
+        await asyncio.sleep(0.05)
+        return sent, r.a._held_words
+
+    sent, held = run(go())
+    assert sent == [] and held == []
+
+
+def test_hang_on_words_are_not_joined_across_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> list[str]:
+        r = make()
+        sent: list[str] = []
+        monkeypatch.setattr(r.a, "start_turn", recorder(sent))
+        r.a._room_command("remind me to, hang on", speak=False, client="phone")
+        r.a._room_command("the dishwasher is done now")  # someone at the mini
+        return sent
+
+    assert run(go()) == ["the dishwasher is done now"]
+
+
+def test_stop_ends_a_session_floor_hold_and_queued_discuss() -> None:
+    async def go() -> tuple[str | None, dict[str, Any]]:
+        r = make()
+        await r.a.discuss("desk#1", "step one", listen=False, hold=True)
+        queued = asyncio.create_task(r.a.discuss("desk#2", "hello", listen=False, wait_for_floor=5))
+        await asyncio.sleep(0.05)
+        await r.a.stop()
+        return r.a.floor.owner(), await queued
+
+    owner, result = run(go())
+    assert owner is None and result["status"] == "stopped"
+
+
+def test_discuss_reports_a_muted_mic() -> None:
+    async def go() -> dict[str, Any]:
+        r = make()
+        r.a.set_mic_muted(True)
+        return await r.a.discuss("desk#1", "Deploy?", listen=True, timeout=1)
+
+    assert run(go()) == {"status": "muted"}
+
+
+def test_cancelled_confirm_leaves_no_stale_question() -> None:
+    async def go() -> tuple[bool, str]:
+        r = make()
+        r.spk.idle_delay = 0.3  # the question is still playing when the SDK withdraws it
+        task = asyncio.create_task(r.a._confirm("Run command?", "run: x"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return r.a._confirm_fut is None, r.a.state
+
+    no_question, state = run(go())
+    assert no_question and state == "idle"
+
+
+def test_listening_state_times_out() -> None:
+    async def go() -> tuple[str, str]:
+        r = make()
+        r.a._listen_for_more(0.1, speak=False)
+        first = r.a.state
+        await asyncio.sleep(0.3)
+        return first, r.a.state
+
+    assert run(go()) == ("listening", "idle")

@@ -16,7 +16,9 @@ class WakeConfig:
     # an utterance. Whisper spells "Claude" many ways, so the near-misses are
     # included.
     names: list[str] = field(
-        default_factory=lambda: ["claude", "claud", "clod", "clawed", "cloud", "klaud", "claudia"]
+        # Not "cloud", "clawed", "clod" or "claudia": those are everyday words and
+        # names, and woke the assistant during ordinary talk.
+        default_factory=lambda: ["claude", "claud", "klaud"]
     )
     max_position: int = 3  # name must be within the first N words
     # After a reply, listen this many seconds for a follow-up without the wake word.
@@ -165,6 +167,33 @@ class Config:
         return q if q.is_absolute() else ROOT / q
 
 
+def _coerce(key: str, val: Any, cur: Any) -> Any:
+    """Check a config value against the default's type, with clear errors."""
+    if isinstance(cur, bool):
+        if not isinstance(val, bool):
+            raise ValueError(f"config {key} must be true or false, not {val!r}")
+        return val
+    if isinstance(cur, int):
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ValueError(f"config {key} must be a whole number, not {val!r}")
+        return val
+    if isinstance(cur, float):
+        if isinstance(val, bool) or not isinstance(val, int | float):
+            raise ValueError(f"config {key} must be a number, not {val!r}")
+        return float(val)
+    if isinstance(cur, str):
+        if isinstance(val, int) and not isinstance(val, bool) and key.endswith("_device"):
+            return str(val)  # a device index
+        if not isinstance(val, str):
+            raise ValueError(f"config {key} must be a string, not {val!r}")
+        return val
+    if isinstance(cur, list):
+        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+            raise ValueError(f"config {key} must be a list of strings, not {val!r}")
+        return val
+    return val
+
+
 def _merge(obj: Any, data: dict[str, Any], where: str) -> None:
     for f in fields(obj):
         if f.name not in data:
@@ -172,9 +201,11 @@ def _merge(obj: Any, data: dict[str, Any], where: str) -> None:
         val = data.pop(f.name)
         cur = getattr(obj, f.name)
         if is_dataclass(cur):
+            if not isinstance(val, dict):
+                raise ValueError(f"config [{where}{f.name}] must be a section, not {val!r}")
             _merge(cur, dict(val), f"{where}{f.name}.")
         else:
-            setattr(obj, f.name, val)
+            setattr(obj, f.name, _coerce(f"{where}{f.name}", val, cur))
     if data:
         raise ValueError(f"unknown config keys: {', '.join(where + k for k in data)}")
 

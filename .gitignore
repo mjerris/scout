@@ -18,3 +18,8 @@ config.toml
 .tmp/
 .DS_Store
 pronounce.txt
+models/*.part
+*.wav
+.env
+.env.*
+.claude/worktrees/

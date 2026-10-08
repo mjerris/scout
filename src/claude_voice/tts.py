@@ -69,6 +69,9 @@ class Speaker:
         # [start, end, text] per sentence actually played; end is inf while playing.
         self._played: deque[list[Any]] = deque(maxlen=100)
         self._play_lock = threading.Lock()
+        self.consecutive_failures = 0  # playback errors in a row (the watchdog restarts the app)
+        # Web-page reply audio has its own thread, so it never delays the mini's speech.
+        self._web_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-web")
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._synth_loop()), asyncio.create_task(self._play_loop())]
@@ -138,7 +141,7 @@ class Speaker:
         if self.pronounce is not None:
             text = self.pronounce.tts(text)
         samples, sr = await asyncio.get_running_loop().run_in_executor(
-            self._synth_pool, lambda: self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
+            self._web_pool, lambda: self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
         )
         buf = io.BytesIO()
         sf.write(buf, samples, sr, format="WAV", subtype="PCM_16")
@@ -201,7 +204,9 @@ class Speaker:
                         entry = [time.monotonic(), float("inf"), text]
                         self._played.append(entry)
                     await loop.run_in_executor(self._play_pool, self._play_blocking, samples, gen)
+                    self.consecutive_failures = 0
             except Exception:
+                self.consecutive_failures += 1
                 log.exception("playback failed")
             finally:
                 self._playing = False

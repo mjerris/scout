@@ -3,10 +3,10 @@
 #   bash scripts/run-ci.sh          # locally: applies formatting, then checks
 #   CI=1 bash scripts/run-ci.sh     # in CI: checks only
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 PATHS=(src tests)
 
-lint_gate() { uv run --frozen ruff check "${PATHS[@]}" scripts; }
+lint_gate() { uv run --frozen ruff check "${PATHS[@]}"; }
 
 fmt_gate() {
     if [ -z "${CI:-}" ]; then
@@ -18,15 +18,26 @@ fmt_gate() {
 
 types_gate() { uv run --frozen mypy; }  # strict; config in pyproject.toml
 
+shell_gate() {
+    if ! command -v shellcheck >/dev/null; then
+        echo "    shellcheck not installed (brew install shellcheck)"
+        return 1
+    fi
+    shellcheck scripts/*.sh
+}
+
 test_gate() { uv run --frozen pytest -q tests; }
 
 results=()
 failed=0
-for gate in LINT FMT TYPES TEST; do
-    echo "==> $gate"
-    fn="$(echo "$gate" | tr '[:upper:]' '[:lower:]')_gate"
-    if "$fn"; then results+=("$gate PASS"); else results+=("$gate FAIL"); failed=1; fi
-done
+record() {
+    if [ "$2" -eq 0 ]; then results+=("$1 PASS"); else results+=("$1 FAIL"); failed=1; fi
+}
+echo "==> LINT";  lint_gate;  record LINT $?
+echo "==> FMT";   fmt_gate;   record FMT $?
+echo "==> TYPES"; types_gate; record TYPES $?
+echo "==> SHELL"; shell_gate; record SHELL $?
+echo "==> TEST";  test_gate;  record TEST $?
 echo
 printf '  %s\n' "${results[@]}"
 exit $failed

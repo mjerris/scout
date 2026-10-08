@@ -181,7 +181,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                 elif kind == "confirm":
                     assistant.answer_confirm("always" if m.get("always") else bool(m.get("approved")))
                 elif kind == "remove_rule":
-                    assistant.remove_rule(int(m.get("index", -1)))
+                    assistant.remove_rule(str(m.get("id", "")))
                 elif kind == "stop":
                     await assistant.stop()
                 elif kind == "mute":

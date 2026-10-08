@@ -12,9 +12,14 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
 
 - **Wake word:** say "Hey Claude, …" (or just "Claude, …") with the request in
   the same breath, or say "Hey Claude", wait for the chime, then speak. For 8
-  seconds after a reply you can follow up without the wake word.
-- **Stop:** "Claude, stop" interrupts speech and the running request. "Claude,
-  new conversation" starts a fresh session.
+  seconds after a reply the room heard you can follow up without the wake word
+  (replies that only went to your phone open no such window).
+- **Stop:** "Claude, stop" (also "Stop, Claude", "stop, stop", "that's enough")
+  interrupts speech and the running request, cancels a pending question, ends a
+  session's listen or floor hold, and drops anything queued. "Claude, new
+  conversation" starts a fresh session.
+- **Busy:** a "Hey Claude …" request while one is running is queued ("Okay, I'll
+  do that next.") and runs when the current one ends.
 - **Local gate:** every transcript passes deterministic checks before it can
   reach Claude, so noise and hallucinations cost no tokens. The checks use
   Whisper's confidence and no-speech estimate, repetition, words per second
@@ -32,29 +37,45 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   - `settings_no_hooks`: your allow rules apply but your hooks are off, since a
     hook that answers "allow" would skip every prompt.
 
-  Spoken prompts are short ("Run command?", "Edit config.py?"). Answer yes or
-  no; the web page shows the details. No answer within 30 s counts as a skip.
-  Under the settings policies, `claude.always_ask` rules (git push, PR
-  merge/create by default) are always asked.
-- **Built-in tools (never ask):** open a URL; search Netflix, YouTube, Google,
-  Amazon, Wikipedia or Maps; open an app; see which app is in front and which
-  are open; list, switch and open Chrome tabs; full screen on/off;
-  play/pause/next/previous (Spotify or Music, or the video in the front
-  browser); volume get/set/up/down/mute; timers that announce themselves; web
-  search and page fetches. Each tool's AppleScript is fixed in `mac.py`, and
-  your words are passed in only as checked arguments, so these can't be used
-  to run arbitrary scripts. Timers live in memory and are lost on restart.
-- **"Yes, always":** answer a prompt with "yes, always" (or tap **Always** on
-  the web page) and it stops asking for that exact shell command, any page on
-  that site (for page fetches), or that tool (for other MCP tools). File edits
-  and writes always ask. Saved rules are in `state/voice_allow.json` and can
-  be removed from the web page.
-- **"Hang on":** end with "hang on", "wait" or "give me a sec" and it keeps
-  listening (20 s) and joins what you say next onto the request.
+  Under every policy: **shell commands** always ask (except the harmless list
+  and exact commands you've said "yes, always" to; your `~/.claude` Bash allow
+  rules don't apply to the voice agent), **fetching a page or opening a URL**
+  asks once per site, **secrets** (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
+  `~/.config/gh`, keychains, this app's `state/`) can't be read at all, and
+  this app's own files can't be changed. `claude.always_ask` rules (git push,
+  PR merge/create) are always asked, even with a saved rule, in any spelling
+  (`git -C ~/x push`, `env git push`).
+
+  Spoken prompts are short ("Run git push?", "Edit config.py in src?"); the web
+  page shows the full command first. Answers are strict: only a clear yes or no
+  counts ("yes", "sure, go ahead", "no", "don't"); anything unclear ("okay, hold
+  on", "what does it do?", "I'm not sure") gets "yes or no?" again. A question
+  asked only on your phone can't be answered by the room's mic. No answer within
+  30 s counts as a skip.
+- **Built-in tools:** search Netflix, YouTube, Google, Amazon, Wikipedia or
+  Maps; open an app; see which app is in front and which are open; list and
+  switch Chrome tabs; full screen on/off; play/pause/next/previous (Spotify or
+  Music, or the video in the front browser); volume get/set/up/down/mute;
+  timers that announce themselves; web search. These never ask. Opening a URL
+  or a new tab asks once per site. Each tool's AppleScript is fixed in
+  `mac.py`, and your words are passed in only as checked arguments, so these
+  can't be used to run arbitrary scripts. Timers live in memory and are lost
+  on restart.
+- **"Yes, always":** answer a prompt with "yes, always" (or "yes, don't ask me
+  again", or tap **Always** on the web page) and it stops asking for that exact
+  shell command, that site (for page fetches and URLs), or that tool (for MCP
+  tools that only read). File edits, writes, always-ask commands and MCP tools
+  that send, post, create or delete always ask. "Yes, but always ask me" is a
+  one-time yes. Saved rules are in `state/voice_allow.json` and can be removed
+  from the web page.
+- **"Hang on":** end with "hang on", "give me a sec" or ", wait" and it keeps
+  listening (20 s) and joins what you say next onto the request ("tell them not
+  to wait" is an ordinary request). Saying "never mind" or "stop" instead
+  cancels it.
 - **Working sounds:** a soft tick every few seconds while tools run and nothing
   is being said, so a quiet stretch doesn't sound like a hang.
 - **Pronunciation:** regex rules fix how words are spoken ("config.toml" →
-  "config dot toml") and common mishearings ("clawed" → "Claude"). Built-in
+  "config dot toml") and common mishearings ("Claud" → "Claude"). Built-in
   defaults are in `src/claude_voice/pronounce_default.txt`; add your own in
   `pronounce.txt` in the project root (`TTS|STT  pattern  replacement`).
 - **Changing the app by voice:** the voice agent can't edit this project. When
@@ -104,6 +125,9 @@ to enable Serve for the tailnet.
 
 ## Setup
 
+Needs [uv](https://docs.astral.sh/uv/) and `ffmpeg` (`brew install ffmpeg`;
+push-to-talk decodes browser recordings with it).
+
 ```sh
 scripts/fetch-models.sh     # Kokoro voice model (~350 MB); Whisper (~1.6 GB) downloads on first run
 cp config.example.toml config.toml   # optional; every key has a default
@@ -124,6 +148,8 @@ scripts/launchd.sh status | restart | uninstall
   Settings → Users & Groups → automatic login).
 - `run.sh` holds a `caffeinate` assertion, so the mini won't idle-sleep while
   the assistant runs.
+- If the microphone stops delivering audio (unplugged, device changed) or
+  playback keeps failing, the app exits so launchd restarts it.
 - Under launchd, macOS attributes mic access to the process itself rather than
   your terminal. If the log says *microphone has delivered pure silence*, enable
   it under System Settings → Privacy & Security → Microphone.
@@ -138,8 +164,9 @@ Everything said and heard is also written to
 stats) in `state/utterances/` for tuning; off by default.
 
 Checks: `bash scripts/run-ci.sh` runs LINT (ruff), FMT (ruff format; applied
-locally, checked in CI), TYPES (mypy strict) and TEST (pytest), the same
-script GitHub Actions runs. `scripts/install-hooks.sh` adds a pre-commit hook
+locally, checked in CI), TYPES (mypy strict), SHELL (shellcheck) and TEST
+(pytest, including a few hundred real-world phrases in `tests/data/phrases.json`),
+the same script GitHub Actions runs. `scripts/install-hooks.sh` adds a pre-commit hook
 for lint, format and types.
 
 ## Tuning
