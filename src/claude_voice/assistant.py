@@ -61,6 +61,9 @@ class Assistant:
         self._confirm_fut: asyncio.Future | None = None
         self._confirm_started = 0.0
         self._listen: _Listen | None = None
+        # Where the current room turn's speech goes: the mini's speakers and/or
+        # the web page (by client id) that asked.
+        self._out: dict = {"mini": True, "client": None}
         self.history: deque[dict] = deque(maxlen=300)
         self._listeners: set[asyncio.Queue[dict]] = set()
         self._saved: deque = deque()
@@ -72,7 +75,7 @@ class Assistant:
 
     def emit(self, kind: str, **data: Any) -> None:
         ev = {"type": kind, "ts": time.time(), **data}
-        if kind != "state":
+        if kind not in ("state", "say"):
             self.history.append(ev)
             self._write_transcript(ev)
         for q in list(self._listeners):
@@ -100,8 +103,19 @@ class Assistant:
         self.speaker.chime("wake")
         self.speaker.speak("Your timer is done." if label == "timer" else f"Your {label} timer is done.")
 
+    def say(self, text: str) -> None:
+        """Speak where the current turn's replies go."""
+        if self._out["mini"]:
+            self.speaker.speak(text)
+        if self._out["client"]:
+            self.emit("say", text=text, to=self._out["client"])
+
+    def chime(self, kind: str) -> None:
+        if self._out["mini"]:
+            self.speaker.chime(kind)
+
     def _notify(self, kind: str, text: str) -> None:
-        self.speaker.speak(text)
+        self.say(text)
         self.emit("rules", rules=self.rules.listing(), text=text)
 
     def remove_rule(self, index: int) -> None:
@@ -267,7 +281,7 @@ class Assistant:
         self.emit("heard", text=text)
         self._room_command(cmd)
 
-    def _room_command(self, cmd: str, speak: bool = True) -> None:
+    def _room_command(self, cmd: str, speak: bool = True, client: str | None = None) -> None:
         cmd, waiting = speech.split_wait(cmd)
         if waiting:
             # "…, hang on": keep what was said and keep listening.
@@ -292,11 +306,11 @@ class Assistant:
         if speech.is_reset(cmd):
             asyncio.create_task(self.reset())
             return
-        self.start_turn(cmd, speak)
+        self.start_turn(cmd, speak, client)
 
     # --- push-to-talk from the web page -------------------------------------------------
 
-    async def submit_audio(self, pcm: bytes, speak: bool = True) -> dict:
+    async def submit_audio(self, pcm: bytes, speak: bool = True, client: str | None = None) -> dict:
         """A clip recorded on the web page: no wake word needed, same gate."""
         t = await self.asr.transcribe(pcm)
         t.text = self.pronounce.stt(t.text)
@@ -321,7 +335,7 @@ class Assistant:
                 return {"text": t.text, "ignored": "busy with another request"}
         else:
             cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
-            self._room_command(cmd if cmd is not None else t.text, speak)
+            self._room_command(cmd if cmd is not None else t.text, speak, client)
         return {"text": t.text}
 
     # --- Claude sessions talking through the MCP server ------------------------------------
@@ -392,10 +406,10 @@ class Assistant:
 
     # --- room turns ---------------------------------------------------------------------
 
-    def start_turn(self, text: str, speak: bool = True) -> bool:
+    def start_turn(self, text: str, speak: bool = True, client: str | None = None) -> bool:
         if self.busy:
             return False
-        self._turn = asyncio.create_task(self._run_turn(text, speak))
+        self._turn = asyncio.create_task(self._run_turn(text, speak, client))
         return True
 
     async def _working_ticks(self) -> None:
@@ -409,28 +423,29 @@ class Assistant:
                 self.speaker.chime("tick")
                 quiet_since = time.monotonic()
 
-    async def _run_turn(self, text: str, speak: bool) -> None:
+    async def _run_turn(self, text: str, speak: bool, client: str | None = None) -> None:
+        self._out = {"mini": speak, "client": client}
         self._silence_turn = False
         self.follow_up_until = 0
         if not await self.floor.acquire(ROOM, self.cfg.floor.room_wait_seconds):
             owner = self.floor.owner()
             self.emit("error", text=f"{owner} has the floor; request dropped: {text}")
-            self.speaker.speak("Another session is using the voice right now. Try again in a moment.")
+            self.say("Another session is using the voice right now. Try again in a moment.")
+            self._out = {"mini": True, "client": None}
             return
         self.emit("you", text=text)
         self._set_state("thinking")
         ticks = asyncio.create_task(self._working_ticks()) if speak and self.cfg.tts.working_sound else None
-        if speak:
-            self.speaker.chime("ack")
+        self.chime("ack")
         try:
             async for kind, data in self.brain.ask(text):
                 if kind == "text":
                     self.emit("claude", text=data)
-                    if speak and not self._silence_turn:
+                    if not self._silence_turn:
                         said = speech.to_speech(data)
                         if said:
                             self._set_state("speaking")
-                            self.speaker.speak(said)
+                            self.say(said)
                 elif kind == "tool":
                     name, args = data
                     self.emit("tool", name=name, input=_preview(args))
@@ -443,9 +458,8 @@ class Assistant:
         except Exception as exc:
             log.exception("Claude turn failed")
             self.emit("error", text=str(exc))
-            if speak:
-                self.speaker.chime("error")
-                self.speaker.speak("Sorry, something went wrong talking to Claude.")
+            self.chime("error")
+            self.say("Sorry, something went wrong talking to Claude.")
             await self.brain.reset()
         finally:
             if ticks:
@@ -455,6 +469,7 @@ class Assistant:
             self.follow_up_until = time.monotonic() + follow
             # Keep the floor through the follow-up window so other sessions don't cut in.
             self.floor.release(ROOM, hold=follow > 0, ttl=follow)
+            self._out = {"mini": True, "client": None}
             queued, self._queued = self._queued, None
             if queued and not self._silence_turn and queued.strip():
                 asyncio.get_running_loop().call_soon(self._start_queued, queued)
@@ -472,7 +487,7 @@ class Assistant:
         self._confirm_fut = fut
         self.emit("confirm", text=description)
         self._set_state("confirming")
-        self.speaker.speak(spoken)
+        self.say(spoken)
         await self.speaker.wait_idle()
         self._confirm_started = time.monotonic()
         ok: bool | str | None
@@ -480,7 +495,7 @@ class Assistant:
             ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
         except TimeoutError:
             ok = None
-            self.speaker.speak("No answer, so I skipped that.")
+            self.say("No answer, so I skipped that.")
         finally:
             self._confirm_fut = None
         self.emit("confirm_done", approved=bool(ok), always=ok == "always")

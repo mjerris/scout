@@ -9,6 +9,7 @@ import json
 import logging
 import secrets
 import socket
+import uuid
 from importlib import resources
 
 from aiohttp import WSMsgType, web
@@ -96,7 +97,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         ws = web.WebSocketResponse(heartbeat=30, max_msg_size=30 * 1024 * 1024)
         await ws.prepare(req)
         q = assistant.subscribe()
-        play_here = False  # this page wants reply audio too
+        client_id = uuid.uuid4().hex
         await ws.send_json({"type": "hello", "history": list(assistant.history),
                             "rules": assistant.rules.listing(), **assistant.snapshot()})
 
@@ -110,12 +111,12 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         async def pump():
             while True:
                 ev = await q.get()
-                await ws.send_json(ev)
-                if play_here and ev["type"] in ("claude", "agent_said"):
-                    from .speech import to_speech
-                    said = to_speech(ev.get("text", ""))
-                    if said:
-                        asyncio.create_task(send_audio(said))
+                if ev["type"] != "say":
+                    await ws.send_json(ev)
+                if ev["type"] == "say":
+                    if ev.get("to") == client_id and ev.get("text"):
+                        await send_audio(ev["text"])  # in order, one sentence block at a time
+                    continue
 
         pump_task = asyncio.create_task(pump())
         try:
@@ -127,8 +128,11 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                 except ValueError:
                     continue
                 kind = m.get("type")
+                output = m.get("output", "device")  # where replies play: device | mini | both
+                to_mini = output in ("mini", "both")
+                to_me = client_id if output in ("device", "both") else None
                 if kind == "say" and str(m.get("text", "")).strip():
-                    if not assistant.start_turn(m["text"].strip(), speak=bool(m.get("speak", True))):
+                    if not assistant.start_turn(m["text"].strip(), speak=to_mini, client=to_me):
                         await ws.send_json({"type": "error", "text": "Busy with another request; stop it first."})
                 elif kind == "confirm":
                     assistant.answer_confirm("always" if m.get("always") else bool(m.get("approved")))
@@ -140,15 +144,13 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                     assistant.set_mic_muted(bool(m.get("value")))
                 elif kind == "reset":
                     asyncio.create_task(assistant.reset())
-                elif kind == "play_here":
-                    play_here = bool(m.get("value"))
                 elif kind == "audio":
                     try:
                         clip = base64.b64decode(m.get("data", ""))
                         if len(clip) > 20_000_000:
                             raise ValueError("clip too long")
                         pcm = await decode_to_pcm(clip)
-                        result = await assistant.submit_audio(pcm, speak=bool(m.get("speak", True)))
+                        result = await assistant.submit_audio(pcm, speak=to_mini, client=to_me)
                         await ws.send_json({"type": "ptt_result", **result})
                     except Exception as exc:
                         log.exception("push-to-talk failed")
