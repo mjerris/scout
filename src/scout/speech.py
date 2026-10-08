@@ -15,6 +15,9 @@ _LEADERS = {"hey", "hi", "hello", "ok", "okay", "yo", "a", "ay", "hay"}
 # sentence ("Um, hey Claude", "So anyway, Claude"). At most _MAX_FILLERS of them.
 _WAKE_FILLERS = {"uh", "um", "er", "erm", "ah", "oh", "so", "and", "anyway", "well", "alright"}
 _MAX_FILLERS = 2
+# Greetings that let a "greeted" name wake the assistant ("Hey Scott" is a misheard
+# "Hey Scout"; "Scott said..." is about someone else).
+_GREETINGS = {"hey", "hay", "hi", "hello", "ok", "okay", "yo", "ay"}
 
 STOP_WORDS = {
     "stop",
@@ -53,21 +56,28 @@ def words(text: str) -> list[str]:
     return _WORD.findall(normalize(text))
 
 
-def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
+def strip_wake(
+    text: str, names: list[str], max_position: int, greeted: list[str] | tuple[str, ...] = ()
+) -> str | None:
     """If text is addressed to the assistant, return the command after the wake
     name (possibly ""). Otherwise None.
 
     The name has to be said to the assistant, not about it: at the start (after
     "hey", "okay", a filler or two), or set off by a comma ("Oh and Claude, ...",
     "Excuse me, Claude, ..."). "I think Claude is great" and "Did Claude finish
-    the build?" are about it, so they don't wake it."""
+    the build?" are about it, so they don't wake it. `greeted` names (near-misses that
+    are also everyday names, like "Scott") count only straight after a greeting."""
     raw = text.strip().translate(_APOSTROPHES)
     tokens = list(re.finditer(r"[A-Za-z0-9']+", raw))
     wanted = {n.lower() for n in names}
+    alias = {n.lower() for n in greeted}
     seen = 0  # words before the name that count toward max_position
     fillers = 0
+    prev = ""
     for m in tokens:
         w = m.group().lower()
+        if w in alias and prev in _GREETINGS:
+            return raw[m.end() :].lstrip(" ,.!?:;-")
         if w in wanted:
             before = raw[: m.start()].rstrip()
             after = raw[m.end() :]
@@ -81,6 +91,7 @@ def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
             if vocative:
                 return after.lstrip(" ,.!?:;-")
             return None
+        prev = w
         if w in _LEADERS:
             continue
         if w in _WAKE_FILLERS and fillers < _MAX_FILLERS:
@@ -144,18 +155,23 @@ def is_stop(cmd: str) -> bool:
     return _is_stop_words(words(_STOP_EXTRA.sub(" ", normalize(cmd))))
 
 
-def is_stop_utterance(text: str, names: list[str], max_position: int) -> bool:
+def is_stop_utterance(
+    text: str, names: list[str], max_position: int, greeted: list[str] | tuple[str, ...] = ()
+) -> bool:
     """True when the whole utterance is a stop, with or without the wake name
     before or after it: "Stop, Claude.", "Claude, stop, stop.", "Stop. Stop.
     Stop.", "Um, stop." The name may only sit within the first max_position
     words or at the end."""
     w = words(_STOP_EXTRA.sub(" ", normalize(text)))
     wanted = {n.lower() for n in names}
+    alias = {n.lower() for n in greeted}
     kept: list[str] = []
     for i, x in enumerate(w):
         if x in _LEADERS:
             continue
         if x in wanted and (i < max_position or i == len(w) - 1):
+            continue
+        if x in alias and i > 0 and w[i - 1] in _GREETINGS:  # "Hey Scott, stop"
             continue
         kept.append(x)
     return _is_stop_words(kept)

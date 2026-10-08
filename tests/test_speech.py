@@ -23,7 +23,22 @@ W = WakeConfig()
     ],
 )
 def test_strip_wake(heard: str, cmd: str | None) -> None:
-    assert strip_wake(heard, W.names, W.max_position) == cmd
+    assert strip_wake(heard, W.names, W.max_position, W.greeted_names) == cmd
+
+
+@pytest.mark.parametrize(
+    "heard, cmd",
+    [
+        ("Hey Scott, what's on my calendar today?", "what's on my calendar today?"),  # heard live
+        ("Okay Scott set a timer", "set a timer"),
+        ("Hey Scott.", ""),
+        ("Scott said the build failed.", None),  # about someone named Scott
+        ("Scott, can you pass the salt?", None),
+        ("I told Scott hey about it", None),
+    ],
+)
+def test_greeted_names_wake_only_after_a_greeting(heard: str, cmd: str | None) -> None:
+    assert strip_wake(heard, W.names, W.max_position, W.greeted_names) == cmd
 
 
 def test_stop_and_reset() -> None:
@@ -183,3 +198,10 @@ def test_echo_removal_matches_spelled_numbers_to_digits() -> None:
     heard = "That's about 100 fixes, plus a test file of nearly 500 real phrases. 650 tests pass. Approve? Approve."
     assert strip_own_speech(heard, spoken) == "approve"
     assert strip_own_speech("I need 5 minutes", "How long?") == "I need 5 minutes"
+
+
+def test_greeted_name_stop() -> None:
+    from scout.speech import is_stop_utterance
+
+    assert is_stop_utterance("Hey Scott, stop.", W.names, W.max_position, W.greeted_names)
+    assert not is_stop_utterance("Scott, stop.", W.names, W.max_position, W.greeted_names)
