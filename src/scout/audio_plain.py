@@ -69,6 +69,17 @@ class SoundAPI(Protocol):
 
     def device_name(self, device: int | None, kind: str) -> str: ...
 
+    def output_channels(self, device: int | None) -> int: ...
+
+
+def speaker_channels(sound: SoundAPI, device: int | None) -> int:
+    """Play mono on two channels where the device has them: opened as one channel,
+    a stereo or multichannel output (an HDMI TV) plays only its left speaker."""
+    try:
+        return 2 if sound.output_channels(device) >= 2 else 1
+    except Exception:
+        return 1
+
 
 class SoundDevice:
     """Thin adapter over the `sounddevice` module."""
@@ -106,6 +117,9 @@ class SoundDevice:
 
     def device_name(self, device: int | None, kind: str) -> str:
         return str(self.sd.query_devices(device, kind)["name"])
+
+    def output_channels(self, device: int | None) -> int:
+        return int(self.sd.query_devices(device, "output")["max_output_channels"])
 
 
 def resolve_device(spec: str, kind: str, devices: Any) -> int | None:
@@ -352,6 +366,8 @@ class PlainAudioIO:
                 with self._lock:  # stop_playback can't slip in between this check and play()
                     started = gen == self._gen
                     if started:
+                        if speaker_channels(self._sd, self._out_dev) == 2:
+                            samples = np.column_stack([samples, samples])
                         self._sd.play(samples, sr, self._out_dev)
                 if started:
                     self._sd.wait()

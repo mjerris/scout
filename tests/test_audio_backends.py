@@ -232,8 +232,10 @@ class FakeStream:
         """Run one duplex callback; returns what was written to the speaker."""
         block = self.kwargs["blocksize"]
         indata = np.zeros((block, 1), np.int16) if mic is None else mic.reshape(block, 1)
-        outdata = np.full((block, 1), 12345, np.int16)  # garbage the callback must overwrite
+        out_ch = self.kwargs["channels"][1] if isinstance(self.kwargs.get("channels"), tuple) else 1
+        outdata = np.full((block, out_ch), 12345, np.int16)  # garbage the callback must overwrite
         self.callback(indata, outdata, block, None, status)
+        self.last_out = outdata.copy()
         return outdata[:, 0].copy()
 
 
@@ -249,6 +251,7 @@ class FakeSound:
         self._done = threading.Event()
         self.playing = threading.Event()
         self.stops = 0
+        self.speaker_channels = 1  # set 2 to be a stereo (or HDMI) output
 
     def _open(self, duplex: bool, kwargs: dict[str, Any]) -> FakeStream:
         if self.fail_opens:
@@ -289,6 +292,9 @@ class FakeSound:
     def device_name(self, device: int | None, kind: str) -> str:
         return f"fake {kind} {device}"
 
+    def output_channels(self, device: int | None) -> int:
+        return self.speaker_channels
+
 
 Events = list[tuple[str, dict[str, Any]]]
 
@@ -319,6 +325,25 @@ def test_webrtc_opens_one_duplex_stream_at_48k() -> None:
         assert io.stats()["delay_ms"] == 10  # input + output latency
         await io.close()
         assert stream.closed
+
+    asyncio.run(go())
+
+
+def test_webrtc_plays_mono_on_both_channels_of_a_stereo_output() -> None:
+    """An HDMI TV or stereo speakers: opened as one channel, only the left one plays."""
+
+    async def go() -> None:
+        sound = FakeSound()
+        sound.speaker_channels = 2
+        io = WebRTCAudioIO("3", "", sound=sound, watch_devices=False)
+        await io.start(asyncio.get_running_loop(), lambda kind, info: None)
+        stream = sound.streams[0]
+        assert stream.kwargs["channels"] == (1, 2)
+        io.play(tone(440.0, 24000, 0.05, amp=0.25), 24000)
+        stream.tick()
+        left, right = stream.last_out[:, 0], stream.last_out[:, 1]
+        assert left.any() and np.array_equal(left, right)
+        await io.close()
 
     asyncio.run(go())
 
