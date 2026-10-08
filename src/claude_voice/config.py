@@ -36,8 +36,9 @@ class AudioConfig:
     min_speech_ms: int = 300
     max_utterance_s: float = 30.0
     echo_tail_ms: int = 400  # ignore speech starting this soon after TTS stops
-    # The voice layer: "auto" (Apple voice processing on macOS when the helper is
-    # built, else WebRTC), "apple", "webrtc", or "plain" (no echo cancellation).
+    # The voice layer: "auto" (= webrtc: WebRTC echo cancellation on one duplex
+    # stream; measured best on the Mac mini), "apple" (macOS voice processing;
+    # build it with scripts/build-voiceio.sh), or "plain" (no echo cancellation).
     backend: str = "auto"
     # Talking over the assistant stops it (needs an echo-cancelling backend).
     barge_in: bool = True

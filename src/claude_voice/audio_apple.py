@@ -89,7 +89,7 @@ class AppleAudioIO:
         output_device: str = "",
         *,
         voice_processing: bool = True,
-        agc: bool = True,
+        agc: bool = False,
         helper_cmd: Sequence[str] | None = None,
         ready_timeout: float = 10.0,
         close_timeout: float = 2.0,

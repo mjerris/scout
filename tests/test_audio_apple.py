@@ -130,7 +130,7 @@ def test_mic_frames_are_exact_30ms() -> None:
         "input_device": "",
         "output_device": "",
         "voice_processing": True,
-        "agc": True,
+        "agc": False,
     }
     assert io.ready_info["output_device"] == "Fake Speaker"
 
