@@ -176,7 +176,7 @@ $("approve").onclick = () => send({type: "confirm", approved: true});
 $("deny").onclick = () => send({type: "confirm", approved: false});
 $("always").onclick = () => send({type: "confirm", approved: true, always: true});
 // --- push-to-talk (needs https or localhost for the microphone) ---------------------
-let rec = null, chunks = [];
+let rec = null, chunks = [], pressed = false;
 const audioQ = [];
 let playing = false;
 function playReply(b64) {
@@ -194,12 +194,15 @@ function nextReply() {
 async function startRec(e) {
   e.preventDefault();
   unlockAudio();
+  if (pressed || (rec && rec.state === "recording")) return;
+  pressed = true;
   if (!navigator.mediaDevices || !window.isSecureContext) {
     add("err", "The microphone needs an https page (use the Tailscale address) or localhost.");
     return;
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
+    if (!pressed) { stream.getTracks().forEach((t) => t.stop()); return; }  // released while we waited
     chunks = [];
     rec = new MediaRecorder(stream);
     rec.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
@@ -213,10 +216,11 @@ async function startRec(e) {
     };
     rec.start();
     $("ptt").classList.add("rec");
-  } catch (err) { add("err", "Microphone unavailable: " + err.message); }
+  } catch (err) { pressed = false; add("err", "Microphone unavailable: " + err.message); }
 }
 function stopRec(e) {
   e.preventDefault();
+  pressed = false;
   $("ptt").classList.remove("rec");
   if (rec && rec.state === "recording") rec.stop();
 }

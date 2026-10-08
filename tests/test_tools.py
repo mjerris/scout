@@ -111,3 +111,15 @@ def test_human_durations():
     assert _human(90) == "1 minute 30 seconds"
     assert _human(3600 * 2 + 60 * 5) == "2 hours 5 minutes"
     assert _human(1) == "1 second"
+
+
+def test_forbidden_calls(tmp_path):
+    from claude_voice.brain import Brain
+    from claude_voice.config import ROOT, ClaudeConfig
+
+    b = Brain(ClaudeConfig(), None, None, [], Rules(tmp_path / "r.json"), lambda *a: None)
+    assert b._forbidden("Edit", {"file_path": str(ROOT / "src/claude_voice/brain.py")})
+    assert b._forbidden("Write", {"file_path": str(ROOT / "config.toml")})
+    assert b._forbidden("mcp__voice__discuss", {})
+    assert b._forbidden("Edit", {"file_path": str(tmp_path / "notes.txt")}) is None
+    assert b._forbidden("Bash", {"command": "ls"}) is None

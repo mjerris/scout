@@ -48,6 +48,8 @@ class Speaker:
         self._play_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="play")
         self._tasks: list[asyncio.Task] = []
         self._said: deque[tuple[float, str]] = deque(maxlen=50)
+        # [start, end, text] per sentence actually played; end is inf while playing.
+        self._played: deque[list] = deque(maxlen=100)
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._synth_loop()), asyncio.create_task(self._play_loop())]
@@ -65,9 +67,19 @@ class Speaker:
         self._idle.clear()
         self._text.put_nowait((self._gen, item))
 
-    def recent_speech(self, seconds: float = 60.0) -> str:
-        cutoff = time.monotonic() - seconds
-        return " ".join(t for ts, t in self._said if ts >= cutoff)
+    def recent_speech(self, since: float | None = None, seconds: float = 60.0) -> str:
+        """What was played from `since` on (or in the last `seconds`)."""
+        if since is None:
+            cutoff = time.monotonic() - seconds
+            return " ".join(t for ts, t in self._said if ts >= cutoff)
+        return " ".join(text for start, end, text in self._played if end >= since - 0.5)
+
+    def last_speech_end(self, since: float) -> float | None:
+        """When the speech overlapping a clip that began at `since` ended (now if still playing)."""
+        ends = [end for start, end, text in self._played if end >= since - 0.5]
+        if not ends:
+            return None
+        return min(max(ends), time.monotonic())
 
     def speak(self, text: str, voice: str | None = None) -> None:
         if self.pronounce is not None:
@@ -123,7 +135,7 @@ class Speaker:
                 self._done_one()
                 continue
             if isinstance(item, np.ndarray):
-                samples = item
+                samples, text = item, None
             else:
                 text, voice = item
                 try:
@@ -135,7 +147,7 @@ class Speaker:
                     log.exception("TTS failed for %r", item)
                     self._done_one()
                     continue
-            self._audio.put_nowait((gen, samples))
+            self._audio.put_nowait((gen, samples, text))
 
     def _play_blocking(self, samples: np.ndarray) -> None:
         sd.play(samples, self.sr, device=self.device)
@@ -144,14 +156,20 @@ class Speaker:
     async def _play_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            gen, samples = await self._audio.get()
+            gen, samples, text = await self._audio.get()
+            entry = None
             try:
                 if gen == self._gen:
                     self._playing = True
+                    if text:
+                        entry = [time.monotonic(), float("inf"), text]
+                        self._played.append(entry)
                     await loop.run_in_executor(self._play_pool, self._play_blocking, samples)
             except Exception:
                 log.exception("playback failed")
             finally:
                 self._playing = False
                 self._last_end = time.monotonic()
+                if entry is not None:
+                    entry[1] = self._last_end
                 self._done_one()

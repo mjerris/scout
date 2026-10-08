@@ -59,6 +59,7 @@ class Assistant:
         self._held_words: list[str] = []  # words before a "hang on"
         self._ref_db: float | None = None  # your voice level on accepted wake requests
         self._confirm_fut: asyncio.Future | None = None
+        self._confirm_lock = asyncio.Lock()  # parallel tool calls ask one at a time
         self._confirm_started = 0.0
         self._listen: _Listen | None = None
         # Where the current room turn's speech goes: the mini's speakers and/or
@@ -199,7 +200,7 @@ class Assistant:
                 self.emit("heard", text=text)
                 await self.stop()
                 return
-            residual = speech.strip_own_speech(text, self.speaker.recent_speech())
+            residual = speech.strip_own_speech(text, self.speaker.recent_speech(since=utt.started))
             if not residual:
                 return
             # Leftovers are often misheard bits of our own speech: during an approval
@@ -210,7 +211,9 @@ class Assistant:
             elif self._reject("residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
                 return
             log.info("heard after own speech: %s", residual)
-            text, started = residual, time.monotonic()
+            # The leftover words came after our speech in the clip.
+            text = residual
+            started = self.speaker.last_speech_end(utt.started) or utt.started
             cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
             if self._listen is None and self.busy and not confirming and not (cmd is not None and speech.is_stop(cmd)):
                 # Spoke over the end of the reply: run it once this turn finishes.
@@ -222,7 +225,7 @@ class Assistant:
 
         # A Claude session is waiting for the user's reply: it gets the speech.
         if self._listen is not None and not self._listen.fut.done():
-            if started < self._listen.since:
+            if started < self._listen.since - 0.5:
                 return
             if not utt.echo and self._reject(
                     "reply", text, gate.check("direct", text, t, a, self._ref_db, self.cfg.gate)):
@@ -238,8 +241,10 @@ class Assistant:
                 self.emit("heard", text=text)
                 self.speaker.stop()
                 return
-            self._reject("request", text, f"{owner} has the floor")
-            return
+            if cmd is None:  # no wake word: not for us while a session has the floor
+                self._reject("request", text, f"{owner} has the floor")
+                return
+            # A "Hey Claude" request goes ahead; its turn queues for the floor.
 
         if not utt.echo:
             if confirming:
@@ -254,7 +259,7 @@ class Assistant:
                     return
 
         if confirming:
-            if started < self._confirm_started:
+            if started < self._confirm_started - 0.5:
                 return
             self.emit("heard", text=text)
             answer = speech.parse_answer(cmd if cmd is not None else text)
@@ -362,6 +367,8 @@ class Assistant:
         agent = (agent or "session").strip()[:40] or "session"
         if agent == ROOM:
             return {"status": "error", "error": "reserved agent name"}
+        if voice and voice not in self.speaker.voices():
+            return {"status": "error", "error": f"unknown voice {voice!r}; see voice_status for the list"}
         if not await self.floor.acquire(agent, wait_for_floor):
             return {"status": "floor_busy", **self.floor.status()}
         prev_state = self.state
@@ -373,10 +380,9 @@ class Assistant:
                 await self.speaker.wait_idle()
             if not listen:
                 return {"status": "ok", "spoke": bool(message)}
-            self.speaker.chime("wake")
-            await self.speaker.wait_idle()
             fut = asyncio.get_running_loop().create_future()
             lst = self._listen = _Listen(agent, fut, time.monotonic(), [])
+            self.speaker.chime("wake")
             deadline = time.monotonic() + timeout
             while True:
                 try:
@@ -482,6 +488,10 @@ class Assistant:
 
     async def _confirm(self, spoken: str, description: str) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered."""
+        async with self._confirm_lock:
+            return await self._confirm_one(spoken, description)
+
+    async def _confirm_one(self, spoken: str, description: str) -> bool | str | None:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._confirm_fut = fut

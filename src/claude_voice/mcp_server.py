@@ -22,7 +22,12 @@ which comes back as the tool result. Speak in short, plain spoken sentences:
 no markdown, code or URLs (they are read aloud). The reply has already been
 filtered for noise, so an empty reply means the user said nothing. The app
 has one speaker at a time (the floor); set hold_floor=true when your next
-discuss call follows straight on, so nobody cuts in between turns."""
+discuss call follows straight on, so nobody cuts in between turns.
+
+The user may be watching this session's text as well as listening. Every time
+a discuss result comes back, first write its `Heard: "..."` line into your
+reply as a quote line (> 🎙 ...) so they can see what you heard, then act on
+it."""
 
 mcp = MCPServer("voice", instructions=INSTRUCTIONS)
 
@@ -48,9 +53,17 @@ async def _call(method: str, path: str, body: dict | None = None, timeout: float
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
             async with s.request(method, base + path, json=body, headers=headers) as r:
+                if r.status == 401:
+                    return {"status": "error", "error": "the app's token changed; restart this session's voice MCP server (/mcp)"}
+                if r.status != 200:
+                    return {"status": "error", "error": f"HTTP {r.status}: {(await r.text())[:200]}"}
                 return await r.json()
     except aiohttp.ClientConnectorError:
         return {"status": "error", "error": "claude-voice is not running (start it with scripts/launchd.sh restart)"}
+    except TimeoutError:
+        return {"status": "error", "error": "timed out waiting for the voice app"}
+    except (aiohttp.ClientError, ValueError) as exc:
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
 @mcp.tool()
@@ -73,7 +86,8 @@ async def discuss(message: str = "", wait_for_response: bool = True, listen_time
     if status == "ok":
         if not wait_for_response:
             return "(spoken)"
-        return r.get("text") or "(the user said nothing)"
+        text = r.get("text") or ""
+        return f'Heard: "{text}"' if text else "(the user said nothing)"
     if status == "no_reply":
         return "(no reply within the listen timeout)"
     if status == "stopped":

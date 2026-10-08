@@ -51,3 +51,12 @@ def test_to_speech_flattens_markdown():
     out = to_speech("## Result\n**Done!** Here's `foo`:\n```py\nprint(1)\n```\n- one\n- two\nSee [docs](https://x.y)")
     assert "#" not in out and "*" not in out and "`" not in out and "https" not in out
     assert "code omitted" in out and "docs" in out
+
+
+@pytest.mark.parametrize("text, stop", [
+    ("stop", True), ("Stop talking.", True), ("that's enough", True), ("never mind please", True),
+    ("Claude, stop", True), ("cancel the timer", False), ("no, cancel it", False),
+    ("start the stopwatch", False), ("make it quieter", False),
+])
+def test_is_stop_whole_utterance(text, stop):
+    assert is_stop(text) is stop
