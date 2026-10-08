@@ -504,14 +504,86 @@ def _ours(h: list[str], sp: list[str]) -> list[bool]:
     return ours
 
 
+_UNITS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000}
+
+
+def _numbers_as_digits(tokens: list[str]) -> tuple[list[str], list[list[int]]]:
+    """Collapse spelled-out numbers into digits, the way Whisper writes them, so
+    our "about a hundred fixes" matches the mic's "about 100 fixes". Returns the
+    new tokens and, for each, the indices of the original tokens it came from."""
+    out: list[str] = []
+    src: list[list[int]] = []
+    i = 0
+    while i < len(tokens):
+        j, total, current, used = i, 0, 0, False
+        if tokens[j] == "a" and j + 1 < len(tokens) and tokens[j + 1] in _SCALES:
+            current, j, used = 1, j + 1, True  # "a hundred"
+        while j < len(tokens):
+            t = tokens[j]
+            if t in _UNITS:
+                current += _UNITS[t]
+            elif t in _SCALES and (used or current):
+                current = max(current, 1) * _SCALES[t]
+                if _SCALES[t] >= 1000:
+                    total, current = total + current, 0
+            elif t == "and" and used and j + 1 < len(tokens) and tokens[j + 1] in _UNITS:
+                pass  # "two hundred and five"
+            else:
+                break
+            used = True
+            j += 1
+        if used and j > i:
+            out.append(str(total + current))
+            src.append(list(range(i, j)))
+            i = j
+        else:
+            out.append(tokens[i])
+            src.append([i])
+            i += 1
+    return out, src
+
+
 def _strip(heard: str, spoken: str) -> tuple[str, int]:
-    h, sp = words(heard), words(spoken)
-    if not h or not sp:
-        return heard, len(h)
+    h_raw, sp_raw = words(heard), words(spoken)
+    if not h_raw or not sp_raw:
+        return heard, len(h_raw)
+    h, h_src = _numbers_as_digits(h_raw)
+    sp, _ = _numbers_as_digits(sp_raw)
     ours = _ours(h, sp)
     if not any(ours):
-        return heard, len(h)
-    left = [w for w, o in zip(h, ours, strict=True) if not o]
+        return heard, len(h_raw)
+    keep = sorted(k for tok_src, o in zip(h_src, ours, strict=True) if not o for k in tok_src)
+    left = [h_raw[k] for k in keep]
     return " ".join(left), len(left)
 
 
