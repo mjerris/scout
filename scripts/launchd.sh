@@ -16,7 +16,8 @@ DOMAIN="gui/$(id -u)"
 case "${1:-}" in
 install)
   mkdir -p "$HOME/Library/LaunchAgents" "$DATA/logs"
-  cat > "$PLIST" <<PLIST
+  NEW="$PLIST.new"
+  cat > "$NEW" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -34,7 +35,21 @@ install)
 </dict>
 </plist>
 PLIST
+  if cmp -s "$NEW" "$PLIST" && launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    # Same login item (it runs the stable DATA/current link): just restart in place.
+    rm -f "$NEW"
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+    echo "restarted $LABEL; logs in $DATA/logs/"
+    exit 0
+  fi
+  mv "$NEW" "$PLIST"
+  # bootout returns before the old process has exited (up to ExitTimeOut); loading
+  # again before it's gone fails with "Bootstrap failed: 5: Input/output error".
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
   launchctl bootstrap "$DOMAIN" "$PLIST"
   echo "installed $PLIST; logs in $DATA/logs/"
   ;;
