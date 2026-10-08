@@ -11,14 +11,15 @@ W = WakeConfig()
 @pytest.mark.parametrize(
     "heard, cmd",
     [
-        ("Hey Claude, what time is it?", "what time is it?"),
-        ("Hey, Claude.", ""),
-        ("A Claude run echo hello.", "run echo hello."),
-        ("He Claude, run echo hello.", "run echo hello."),
-        ("Okay Claude stop", "stop"),
-        ("so anyway claude can you", "can you"),
-        ("I was talking to my friend about clouds", None),
-        ("A conversation with an assistant named Claude.", None),
+        ("Hey Scout, what time is it?", "what time is it?"),
+        ("Hey, Scout.", ""),
+        ("A Scout run echo hello.", "run echo hello."),
+        ("He Scout, run echo hello.", "run echo hello."),
+        ("Okay Scout stop", "stop"),
+        ("so anyway scout can you", "can you"),
+        ("I was talking to my friend about scouting", None),
+        ("A conversation with a dog named Scout.", None),
+        ("Hey Claude, what time is it?", None),  # the old name no longer wakes it by default
     ],
 )
 def test_strip_wake(heard: str, cmd: str | None) -> None:

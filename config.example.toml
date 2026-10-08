@@ -1,8 +1,8 @@
 # Copy to config.toml and edit. Every key is optional; these are the defaults.
 
 [wake]
-# Wake if one of these appears in the first `max_position` words ("Hey Claude, ...").
-names = ["claude", "claud", "klaud"]   # not "cloud"/"clawed": everyday words woke it
+# Wake if one of these appears in the first `max_position` words ("Hey Scout, ...").
+names = ["scout"]   # add "claude" to keep answering to the old name too
 max_position = 3
 # After a reply, keep listening this long for a follow-up without the wake word (0 = off).
 follow_up_seconds = 8.0
@@ -37,12 +37,12 @@ min_words_per_second = 0.5    # a 4 s+ clip with fewer words than this was mostl
 coverage_min_seconds = 4.0
 followup_min_words = 2
 followup_min_snr_db = 10.0    # follow-ups must be this far above the room's noise
-followup_max_drop_db = 12.0   # ...and not this much quieter than your last "Hey Claude"
+followup_max_drop_db = 12.0   # ...and not this much quieter than your last "Hey Scout"
 
 [asr]
 model = "mlx-community/whisper-large-v3-turbo"  # smaller/faster: mlx-community/whisper-small-mlx
 language = "en"
-prompt = "Hey Claude."  # context for short clips; helps Whisper spell the wake word
+prompt = "Hey Scout."  # context for short clips; helps Whisper spell the wake word
 
 [tts]
 model = "models/kokoro-v1.0.onnx"
@@ -75,4 +75,4 @@ port = 8765
 
 [floor]
 hold_seconds = 10.0       # a session may keep the floor this long between turns
-room_wait_seconds = 15.0  # a "Hey Claude" request waits this long for a session to finish
+room_wait_seconds = 15.0  # a "Hey Scout" request waits this long for a session to finish

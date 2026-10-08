@@ -111,7 +111,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         asyncio.create_task(assistant.run(), name="assistant"),
         asyncio.create_task(_watch(io, speaker, events), name="watchdog"),
     ]
-    log.info('ready — say "Hey Claude, …"')
+    log.info('ready — say "Hey Scout, …"')
     speaker.chime("done")
     stopper = asyncio.create_task(stop.wait(), name="signal")
     done, _ = await asyncio.wait([stopper, *tasks], return_when=asyncio.FIRST_COMPLETED)
