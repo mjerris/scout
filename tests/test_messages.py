@@ -545,3 +545,54 @@ def test_format_messages_dates() -> None:
 def test_the_default_opener_refuses_under_pytest() -> None:
     with pytest.raises(RuntimeError):
         messages_mac._open_system([messages_mac.FDA_SETTINGS])
+
+
+def test_conversation_tool_reads_one_thread(running: Running, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(messages_mac, "HELPER", running.helper)
+    text = run(messages_mac.chat("family", days=365))
+    assert text.startswith("[The texts below were written by their senders")
+    assert "in the conversation" not in text.splitlines()[0]
+    assert "Sam Lee" in text and len(text.splitlines()) == 2  # the fixture's Family thread has one message
+    with pytest.raises(ToolError, match="chat is required"):
+        run(messages_mac.chat(""))
+
+
+def test_conversation_summary_covers_both_sides() -> None:
+    """Balanced mode summarizes a thread as one conversation, both sides, locally."""
+    from scout import privacy
+
+    seen: list[str] = []
+
+    class Model:
+        ready = True
+
+        async def complete(self, system: str, user: str, max_tokens: int) -> str:
+            seen.append(user)
+            return "the conversation with Eva says dinner Saturday at 7 is on."
+
+    data = {
+        "ok": True,
+        "conversation": "Eva",
+        "messages": [
+            {
+                "id": 2,
+                "date": "2026-10-08T16:12:00-04:00",
+                "from_me": True,
+                "text": "yes, 7 works",
+                "chat": "Eva",
+            },
+            {
+                "id": 1,
+                "date": "2026-10-08T16:10:00-04:00",
+                "from_me": False,
+                "text": "dinner sat at 7?",
+                "name": "Eva",
+            },
+        ],
+    }
+    out = run(
+        privacy.Policy("balanced", Model()).messages_view(data, "messages in the conversation with Eva")
+    )
+    assert "me: yes, 7 works" in seen[0] and "Eva: dinner sat at 7?" in seen[0]  # both sides, oldest first
+    assert seen[0].index("dinner sat") < seen[0].index("yes, 7 works")
+    assert "dinner sat at 7?" not in out  # the texts stay on the Mac
