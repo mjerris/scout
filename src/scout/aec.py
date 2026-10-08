@@ -22,6 +22,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 _REF_ACTIVE_POWER = (32768.0 * 10 ** (-60 / 20)) ** 2
 
 
+MAX_DELAY_HINT_MS = 500  # set_stream_delay_ms fails above this
+
+
 class EchoCanceller:
     """WebRTC audio processing on 10 ms mono int16 frames.
 
@@ -70,8 +73,11 @@ class EchoCanceller:
         self._erle_blocks = 0
 
     def set_delay_ms(self, delay_ms: float) -> None:
-        """Delay between a reference sample being processed and its echo being captured."""
-        self.delay_ms = max(0, round(delay_ms))
+        """Delay between a reference sample being processed and its echo being captured.
+        Only a hint: AEC3 finds the real delay itself (it found a TV's ~750 ms from an
+        80 ms hint). The processor rejects hints over 500 ms ("Failed to set stream
+        delay" on every block, so no mic audio at all), so the hint is capped there."""
+        self.delay_ms = min(MAX_DELAY_HINT_MS, max(0, round(delay_ms)))
 
     def _power(self, x: np.ndarray) -> float:
         np.multiply(x, x, out=self._scratch, dtype=np.float32)

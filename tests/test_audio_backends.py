@@ -605,3 +605,18 @@ def test_plain_device_change_reopens_input() -> None:
         await io.close()
 
     asyncio.run(go())
+
+
+def test_canceller_delay_hint_is_capped_where_webrtc_accepts_it() -> None:
+    """Above 500 ms every block failed ("Failed to set stream delay") and no mic audio
+    came through at all: found live with a TV's 700 ms output delay."""
+    from scout.aec import EchoCanceller
+
+    aec = EchoCanceller(48000)
+    try:
+        aec.set_delay_ms(780)
+        assert aec.delay_ms == 500
+        out = aec.process(np.zeros(480, np.int16), np.zeros(480, np.int16))
+        assert out.shape == (480,)
+    finally:
+        aec.close()
