@@ -12,15 +12,15 @@ from typing import Any, TypeVar, cast
 
 import pytest
 
-import claude_voice.assistant as assistant_mod
-from claude_voice.asr import Transcriber
-from claude_voice.assistant import Assistant
-from claude_voice.audio import Utterance
-from claude_voice.audio_io import AudioIO
-from claude_voice.config import Config
-from claude_voice.gate import AudioStats, Transcript
-from claude_voice.pronounce import Pronouncer, parse
-from claude_voice.tts import Speaker
+import scout.assistant as assistant_mod
+from scout.asr import Transcriber
+from scout.assistant import Assistant
+from scout.audio import Utterance
+from scout.audio_io import AudioIO
+from scout.config import Config
+from scout.gate import AudioStats, Transcript
+from scout.pronounce import Pronouncer, parse
+from scout.tts import Speaker
 
 T = TypeVar("T")
 
@@ -514,7 +514,7 @@ class FakeIO:
         self.frames: asyncio.Queue[bytes] = asyncio.Queue()
 
     def play(self, samples: Any, sample_rate: int) -> Any:
-        from claude_voice.audio_io import PlayHandle
+        from scout.audio_io import PlayHandle
 
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         h = PlayHandle(len(self.played) + 1, len(samples) / sample_rate, fut)
@@ -621,7 +621,7 @@ def _shared(monkeypatch: pytest.MonkeyPatch, name: str) -> list[dict[str, Any]]:
     """Swap a shared tool's action for a recorder; returns the calls it got."""
     import dataclasses
 
-    from claude_voice import shared_tools
+    from scout import shared_tools
 
     ran: list[dict[str, Any]] = []
 

@@ -16,7 +16,7 @@ turn_detection = "smart"  # smart (Silero + smart-turn) or simple (silence_ms of
 min_pause_ms = 250        # smart: ask the turn model after this much quiet
 max_pause_ms = 1500       # smart: end the turn after this much quiet regardless
 turn_threshold = 0.5      # smart: "finished" probability that ends the turn
-input_device = ""     # name substring or index from `uv run claude-voice --list-devices`
+input_device = ""     # name substring or index from `uv run scout --list-devices`
 output_device = ""
 vad_aggressiveness = 2
 silence_ms = 1200     # pause that ends an utterance
@@ -63,7 +63,7 @@ confirm_timeout_s = 30.0
 # "settings_no_hooks": same, but your hooks are off (a hook answering "allow" skips every prompt).
 approval_policy = "strict"
 always_ask = ["Bash(git push:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)"]  # settings policies only
-remote_control = ""           # e.g. "claude-voice" to show the session in Remote Control
+remote_control = ""           # e.g. "scout" to show the session in Remote Control
 auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]   # secrets stay unreadable
 auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
 extra_system_prompt = ""

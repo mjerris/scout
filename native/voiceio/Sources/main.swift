@@ -1,4 +1,4 @@
-// voiceio: full-duplex audio for claude-voice with macOS voice processing.
+// voiceio: full-duplex audio for scout with macOS voice processing.
 //
 //   voiceio              open the audio devices once a C (config) frame arrives
 //   voiceio --self-test  same protocol, no audio devices (synthetic mic, timed playback)

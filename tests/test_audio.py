@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from claude_voice.audio import FRAME_SAMPLES, Segmenter, Utterance, utterances
+from scout.audio import FRAME_SAMPLES, Segmenter, Utterance, utterances
 
 
 class FakeMic:

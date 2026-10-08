@@ -16,8 +16,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from claude_voice import audio_apple
-from claude_voice.audio_apple import (
+from scout import audio_apple
+from scout.audio_apple import (
     AppleAudioIO,
     decode_done,
     decode_event,
@@ -26,7 +26,7 @@ from claude_voice.audio_apple import (
     encode_play,
     helper_available,
 )
-from claude_voice.audio_io import FRAME_BYTES
+from scout.audio_io import FRAME_BYTES
 
 FAKE = Path(__file__).with_name("fake_voiceio.py")
 ROOT = Path(__file__).resolve().parents[1]

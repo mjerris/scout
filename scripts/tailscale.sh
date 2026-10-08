@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 TS=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)
-PORT=$(uv run --frozen python -c "from claude_voice.config import load; print(load().web.port)")
+PORT=$(uv run --frozen python -c "from scout.config import load; print(load().web.port)")
 case "${1:-status}" in
 enable)
   "$TS" serve --bg --https=443 "http://127.0.0.1:$PORT"

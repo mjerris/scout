@@ -1,7 +1,7 @@
 [project]
-name = "claude-voice"
+name = "scout"
 version = "0.1.0"
-description = "Always-on local voice front-end (wake word, ASR, TTS) for a Claude Code agent"
+description = "Scout: an always-on helper for Claude on the Mac: local voice, Mac tools, mail and calendar, with spoken approvals"
 authors = [
     { name = "Michael Jerris", email = "mike@jerris.com" }
 ]
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-claude-voice = "claude_voice:main"
+scout = "scout:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]

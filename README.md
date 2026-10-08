@@ -1,4 +1,4 @@
-# claude-voice
+# scout
 
 An always-on voice front-end for a Claude Code agent on a Mac mini. Speech
 recognition and speech synthesis run locally on Apple Silicon; only the request
@@ -16,7 +16,7 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   WebRTC AEC3 + noise suppression; cross-platform), `apple` (macOS voice
   processing in a small Swift helper, `scripts/build-voiceio.sh`), or `plain`
   (no canceller; the app then strips its own words from transcripts
-  instead). Measured on the Mac mini with `python -m claude_voice.measure`:
+  instead). Measured on the Mac mini with `python -m scout.measure`:
   WebRTC removed 27.7 dB of the assistant's voice (Whisper could recover 2%
   of its words, vs 97% with no canceller); Apple 15 dB / 6%, with ~100 ms
   more latency, so WebRTC is the default.
@@ -95,7 +95,7 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   is being said, so a quiet stretch doesn't sound like a hang.
 - **Pronunciation:** regex rules fix how words are spoken ("config.toml" →
   "config dot toml") and common mishearings ("Claud" → "Claude"). Built-in
-  defaults are in `src/claude_voice/pronounce_default.txt`; add your own in
+  defaults are in `src/scout/pronounce_default.txt`; add your own in
   `pronounce.txt` in the project root (`TTS|STT  pattern  replacement`).
 - **Changing the app by voice:** the voice agent can't edit this project. When
   you ask it to change how it listens, talks or asks, it calls its
@@ -117,7 +117,7 @@ The app also runs an MCP server, so any Claude Code session (at your desk,
 in a terminal) can talk out loud through the same mic, voice and filtering:
 
 ```sh
-claude mcp add --scope user voice -- uv run --project ~/src/claude-voice python -m claude_voice.mcp_server
+claude mcp add --scope user voice -- uv run --project ~/src/scout python -m scout.mcp_server
 ```
 
 - `discuss(message, wait_for_response=True, listen_timeout=30, hold_floor=False,
@@ -180,7 +180,7 @@ scripts/launchd.sh status | restart | uninstall
   your terminal. If the log says *microphone has delivered pure silence*, enable
   it under System Settings → Privacy & Security → Microphone.
 
-Logs: `logs/claude-voice.log` (plus `logs/launchd.*.log` under launchd). Each
+Logs: `logs/scout.log` (plus `logs/launchd.*.log` under launchd). Each
 heard line includes the stats the gate used, e.g. `[conf -0.31, no-speech 0.01,
 2.4 words/s, 24 dB over noise]`.
 
@@ -197,7 +197,7 @@ for lint, format and types.
 
 ## Tuning
 
-`uv run claude-voice --list-devices` lists audio devices for `[audio]
+`uv run scout --list-devices` lists audio devices for `[audio]
 input_device` and `output_device`. Other useful knobs in `config.toml`:
 
 | Key | Effect |
@@ -216,7 +216,7 @@ is talking is ignored, except "Claude, stop".
 
 The mail and calendar tools are defined once (`shared_tools.py`) and offered
 both to the room assistant and, through the MCP server, to any other Claude
-Code session, as `mcp__voice__calendar_events`, `mcp__voice__mail_recent`, and
+Code session, as `mcp__scout__calendar_events`, `mcp__scout__mail_recent`, and
 so on. The running app always does the work: other sessions' calls go to it
 (`POST /api/tool`), so macOS's calendar and Mail permissions belong to the app
 alone. Sending mail and adding events are confirmed by voice in the room on

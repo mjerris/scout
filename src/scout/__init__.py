@@ -30,7 +30,7 @@ def _setup_logging(verbose: bool) -> None:
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
     handlers: list[logging.Handler] = [
-        logging.handlers.RotatingFileHandler(logs / "claude-voice.log", maxBytes=5_000_000, backupCount=3)
+        logging.handlers.RotatingFileHandler(logs / "scout.log", maxBytes=5_000_000, backupCount=3)
     ]
     # Under launchd stdout is logs/launchd.out.log, which nothing rotates; the
     # rotating file above already has every line. Echo to the terminal only.
@@ -54,7 +54,7 @@ async def _amain(cfg: config_mod.Config) -> None:
     from .audio import utterances
     from .tts import Speaker
 
-    log = logging.getLogger("claude_voice")
+    log = logging.getLogger("scout")
     loop = asyncio.get_running_loop()
 
     for p in (cfg.tts.model, cfg.tts.voices):
@@ -148,7 +148,7 @@ async def _amain(cfg: config_mod.Config) -> None:
 async def _watch(io: AudioIO, speaker: Speaker, events: asyncio.Queue[tuple[str, dict[str, Any]]]) -> None:
     """Return (ending the app, so launchd restarts it) when the mic stops
     delivering frames, playback keeps failing, or the voice layer gives up."""
-    log = logging.getLogger("claude_voice")
+    log = logging.getLogger("scout")
     while True:
         try:
             kind, data = await asyncio.wait_for(events.get(), 2)
@@ -185,7 +185,7 @@ def _segmenter(cfg: config_mod.Config) -> Any:
                 max_pause_ms=a.max_pause_ms,
                 turn_threshold=a.turn_threshold,
             )
-        logging.getLogger("claude_voice").warning(
+        logging.getLogger("scout").warning(
             "smart end-of-turn models missing; using silence-based detection (run scripts/fetch-models.sh)"
         )
     elif a.turn_detection != "simple":
@@ -194,7 +194,7 @@ def _segmenter(cfg: config_mod.Config) -> Any:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="claude-voice", description=__doc__)
+    ap = argparse.ArgumentParser(prog="scout", description=__doc__)
     ap.add_argument("--config", help="path to config.toml (default: project root)")
     ap.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     ap.add_argument("-v", "--verbose", action="store_true")

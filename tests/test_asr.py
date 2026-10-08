@@ -4,8 +4,8 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from claude_voice.asr import Transcriber
-from claude_voice.gate import Transcript
+from scout.asr import Transcriber
+from scout.gate import Transcript
 
 
 def _fake_run(

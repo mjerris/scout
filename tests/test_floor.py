@@ -7,9 +7,9 @@ from typing import Any, TypeVar
 
 import pytest
 
-from claude_voice.floor import Floor
-from claude_voice.pronounce import Pronouncer, parse
-from claude_voice.speech import split_wait
+from scout.floor import Floor
+from scout.pronounce import Pronouncer, parse
+from scout.speech import split_wait
 
 T = TypeVar("T")
 
@@ -117,7 +117,7 @@ def test_same_agent_cannot_hold_two_exchanges() -> None:
 
 
 def test_web_hosts_never_all_interfaces(monkeypatch: pytest.MonkeyPatch) -> None:
-    from claude_voice import web
+    from scout import web
 
     async def no_tailscale() -> None:
         return None

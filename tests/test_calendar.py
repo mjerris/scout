@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from claude_voice import calendar_mac
-from claude_voice.mac import ToolError
+from scout import calendar_mac
+from scout.mac import ToolError
 
 EVENTS: dict[str, Any] = {
     "events": [
@@ -166,10 +166,10 @@ def test_create_event_rejects_bad_arguments(tmp_path: Path, args: dict[str, Any]
 
 
 def _brain(tmp_path: Path) -> Any:
-    from claude_voice.brain import Brain
-    from claude_voice.config import ClaudeConfig
-    from claude_voice.rules import Rules
-    from claude_voice.tools import Timers, build_server
+    from scout.brain import Brain
+    from scout.config import ClaudeConfig
+    from scout.rules import Rules
+    from scout.tools import Timers, build_server
 
     async def never(spoken: str, detail: str) -> bool | None:
         return None

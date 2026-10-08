@@ -23,6 +23,6 @@ mkdir -p "$OUT"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name vcal \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$SRC/Info.plist" \
     -o "$OUT/vcal.part" "$SRC/main.swift"
-codesign --force -s - -i com.local.claude-voice.vcal "$OUT/vcal.part"
+codesign --force -s - -i com.local.scout.vcal "$OUT/vcal.part"
 mv "$OUT/vcal.part" "$OUT/vcal"
 echo "built $OUT/vcal"

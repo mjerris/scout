@@ -22,9 +22,9 @@ import pytest
 from aiohttp import web as aioweb
 from aiohttp.test_utils import make_mocked_request
 
-import claude_voice.mcp_server as mcp_mod
-import claude_voice.web as web_mod
-from claude_voice.config import Config, WebConfig
+import scout.mcp_server as mcp_mod
+import scout.web as web_mod
+from scout.config import Config, WebConfig
 
 TOKEN = "t" * 32
 CLIENT = "page0001abcd"
@@ -233,7 +233,7 @@ def test_empty_token_never_matches() -> None:
 
 def test_api_auth_and_token_only_in_page_url(token_file: Path, caplog: pytest.LogCaptureFixture) -> None:
     async def main() -> None:
-        caplog.set_level(logging.INFO, logger="claude_voice.web")
+        caplog.set_level(logging.INFO, logger="scout.web")
         async with serve() as srv, aiohttp.ClientSession() as s:
             async with s.get(srv.url + "/api/status") as r:
                 assert r.status == 401
@@ -670,7 +670,7 @@ def test_mcp_result_text() -> None:
 
 
 def test_mcp_agent_names_stay_unique(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLAUDE_VOICE_AGENT", "a-really-long-project-directory-name-here-and-more")
+    monkeypatch.setenv("SCOUT_AGENT", "a-really-long-project-directory-name-here-and-more")
     name = mcp_mod._agent()
     assert name.endswith(f"#{os.getpid()}")
     assert len(name) <= 30 + 1 + len(str(os.getpid()))
@@ -687,7 +687,7 @@ def _mcp_config(monkeypatch: pytest.MonkeyPatch, port: int) -> None:
     cfg = Config()
     cfg.web.port = port
     monkeypatch.setattr(mcp_mod, "load", lambda: cfg)
-    monkeypatch.delenv("CLAUDE_VOICE_ROOM", raising=False)
+    monkeypatch.delenv("SCOUT_ROOM", raising=False)
 
 
 def test_mcp_token_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

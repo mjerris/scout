@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.local.claude-voice.vcal</string>
+	<string>com.local.scout.vcal</string>
 	<key>CFBundleName</key>
-	<string>claude-voice calendar</string>
+	<string>scout calendar</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>claude-voice reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
+	<string>scout reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>claude-voice reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
+	<string>scout reads your calendar to answer questions like "what's on today", and adds events only after you approve each one by voice.</string>
 </dict>
 </plist>

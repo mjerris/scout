@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from claude_voice import mail_mac
-from claude_voice.mac import ToolError
+from scout import mail_mac
+from scout.mac import ToolError
 
 INBOX = {
     "messages": [
@@ -135,10 +135,10 @@ def test_bad_messages_never_reach_mail(msg: dict[str, Any], error: str) -> None:
 
 
 def _brain(tmp_path: Path) -> Any:
-    from claude_voice.brain import Brain
-    from claude_voice.config import ClaudeConfig
-    from claude_voice.rules import Rules
-    from claude_voice.tools import Timers, build_server
+    from scout.brain import Brain
+    from scout.config import ClaudeConfig
+    from scout.rules import Rules
+    from scout.tools import Timers, build_server
 
     async def never(spoken: str, detail: str) -> bool | None:
         return None

@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")/.."
 cat > .git/hooks/pre-commit <<'HOOK'
 #!/bin/sh
-# claude-voice: lint + format check before every commit (scripts/install-hooks.sh).
+# scout: lint + format check before every commit (scripts/install-hooks.sh).
 cd "$(git rev-parse --show-toplevel)"
 if ! uv run --frozen ruff check src tests -q || ! uv run --frozen ruff format --check -q src tests \
     || ! uv run --frozen mypy --no-error-summary; then

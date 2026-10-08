@@ -2,8 +2,8 @@
 
 import pytest
 
-from claude_voice.config import WakeConfig
-from claude_voice.speech import is_reset, is_stop, parse_yes_no, strip_own_speech, strip_wake, to_speech
+from scout.config import WakeConfig
+from scout.speech import is_reset, is_stop, parse_yes_no, strip_own_speech, strip_wake, to_speech
 
 W = WakeConfig()
 
@@ -122,7 +122,7 @@ def test_strip_own_speech_keeps_words_before_our_speech() -> None:
     ],
 )
 def test_agreeing_phrases_with_no_words(text: str, answer: bool | str) -> None:
-    from claude_voice.speech import parse_answer
+    from scout.speech import parse_answer
 
     assert parse_answer(text) == answer
 
@@ -144,7 +144,7 @@ def test_agreeing_phrases_with_no_words(text: str, answer: bool | str) -> None:
     ],
 )
 def test_answers_are_conservative(text: str, answer: bool | str | None) -> None:
-    from claude_voice.speech import parse_answer
+    from scout.speech import parse_answer
 
     assert parse_answer(text) == answer
 
@@ -164,7 +164,7 @@ def test_answers_are_conservative(text: str, answer: bool | str | None) -> None:
     ],
 )
 def test_wait_detection_is_not_fooled(text: str, waiting: bool) -> None:
-    from claude_voice.speech import split_wait
+    from scout.speech import split_wait
 
     assert split_wait(text)[1] is waiting
 
