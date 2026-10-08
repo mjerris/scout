@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 
 from .config import GateConfig
+from .speech import normalize
 
 # Things Whisper produces from noise, silence or music rather than speech.
 HALLUCINATIONS = {
@@ -60,7 +61,33 @@ class AudioStats:
 
 
 def norm(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z' ]", " ", text.lower())).strip()
+    """Lowercase words (letters of any script, digits, apostrophes) separated by
+    single spaces: "5." and "10:30" are speech, not empty."""
+    return re.sub(r"\s+", " ", re.sub(r"[^\w']|_", " ", normalize(text))).strip()
+
+
+# Short commands people really do say several times in a row ("Stop. Stop.
+# Stop.", "No, no, no"); a repeat of these is not a decoding loop.
+_COMMAND_WORDS = {
+    "stop",
+    "no",
+    "yes",
+    "yeah",
+    "yep",
+    "nope",
+    "wait",
+    "cancel",
+    "okay",
+    "ok",
+    "enough",
+    "quiet",
+    "hush",
+    "shh",
+    "go",
+    "next",
+    "louder",
+    "help",
+}
 
 
 def clean(text: str) -> str:
@@ -71,7 +98,12 @@ def clean(text: str) -> str:
 def repeats(text: str, times: int = 3) -> bool:
     """True if a single sentence appears `times` or more times."""
     sentences = [s for s in (norm(x) for x in re.split(r"[.!?]+", text)) if s]
-    return any(sentences.count(s) >= times for s in set(sentences))
+    return any(sentences.count(s) >= times and not _command(s) for s in set(sentences))
+
+
+def _command(sentence: str) -> bool:
+    w = sentence.split()
+    return any(x in _COMMAND_WORDS for x in w) and all(x in _COMMAND_WORDS or x == "claude" for x in w)
 
 
 def junk(text: str) -> str | None:
