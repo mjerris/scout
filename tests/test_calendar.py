@@ -12,7 +12,7 @@ import pytest
 from claude_voice import calendar_mac
 from claude_voice.mac import ToolError
 
-EVENTS = {
+EVENTS: dict[str, Any] = {
     "events": [
         {
             "title": "Standup",
@@ -206,3 +206,15 @@ def test_adding_an_event_is_spoken_plainly_and_never_saved_as_always(tmp_path: P
     asked, rules = asyncio.run(go())
     assert asked == ["Add Dentist, Friday October 9, 3:00 PM, to Home?"] * 2
     assert rules == []
+
+
+def test_conferencing_boilerplate_is_dropped_from_notes() -> None:
+    notes = (
+        "-::~:~::~:~:~:~:~:~::-\nJoin with Google Meet: https://meet.google.com/abc-defg-hij\n"
+        "Or dial: (US) +1 605-555-0100 PIN: 1234#\nMore phone numbers: https://tel.meet/abc\n"
+        "Bring the Q3 numbers.\n"
+    )
+    assert calendar_mac.clean_notes(notes) == ("Bring the Q3 numbers.", True)
+    assert calendar_mac.clean_notes("Room 4B") == ("Room 4B", False)
+    out = calendar_mac.format_events({"events": [{**EVENTS["events"][1], "notes": notes}], "total": 1})
+    assert "(has a video link)\n  notes: Bring the Q3 numbers." in out

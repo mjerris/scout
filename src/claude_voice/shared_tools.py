@@ -80,14 +80,14 @@ SHARED: tuple[SharedTool, ...] = (
     ),
     SharedTool(
         "mail_recent",
-        "List the newest messages in Mail's inbox (all accounts): id, received time, sender, "
-        "subject. count 1-50 (default 10); unread_only=true for unread only.",
+        "List the newest messages in Mail's inbox (all accounts, last 30 days, newest first): "
+        "id, received time, sender, subject. count 1-50 (default 10); unread_only=true for unread only.",
         _obj({"count": _INT, "unread_only": _BOOL}),
         lambda a: mail_mac.recent(a.get("count"), a.get("unread_only", False)),
     ),
     SharedTool(
         "mail_search",
-        "Find recent inbox messages whose subject or sender contains query (searches the newest 300).",
+        "Find recent inbox messages whose subject or sender contains query (last 180 days, newest first).",
         _obj({"query": _STR, "count": _INT}, ["query"]),
         lambda a: mail_mac.search(a.get("query"), a.get("count")),
     ),
