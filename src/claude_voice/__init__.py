@@ -46,8 +46,13 @@ async def _amain(cfg: config_mod.Config) -> None:
             raise SystemExit(f"missing {p}; run scripts/fetch-models.sh")
 
     speaker = Speaker(
-        str(cfg.path(cfg.tts.model)), str(cfg.path(cfg.tts.voices)), cfg.tts.voice, cfg.tts.speed,
-        resolve_device(cfg.audio.output_device, "output"), cfg.audio.echo_tail_ms, cfg.tts.chimes,
+        str(cfg.path(cfg.tts.model)),
+        str(cfg.path(cfg.tts.voices)),
+        cfg.tts.voice,
+        cfg.tts.speed,
+        resolve_device(cfg.audio.output_device, "output"),
+        cfg.audio.echo_tail_ms,
+        cfg.tts.chimes,
     )
     speaker.start()
     asr = Transcriber(cfg.asr.model, cfg.asr.language)
@@ -59,8 +64,9 @@ async def _amain(cfg: config_mod.Config) -> None:
 
     mic = Microphone(resolve_device(cfg.audio.input_device, "input"))
     mic.start(loop)
-    seg = Segmenter(cfg.audio.vad_aggressiveness, cfg.audio.silence_ms,
-                    cfg.audio.min_speech_ms, cfg.audio.max_utterance_s)
+    seg = Segmenter(
+        cfg.audio.vad_aggressiveness, cfg.audio.silence_ms, cfg.audio.min_speech_ms, cfg.audio.max_utterance_s
+    )
 
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -70,7 +76,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         asyncio.create_task(utterances(mic, seg, speaker.is_echo, assistant.utterances)),
         asyncio.create_task(assistant.run()),
     ]
-    log.info("ready — say \"Hey Claude, …\"")
+    log.info('ready — say "Hey Claude, …"')
     speaker.chime("done")
     await stop.wait()
 
@@ -93,10 +99,12 @@ def main() -> None:
 
     if args.list_devices:
         import sounddevice as sd
+
         print(sd.query_devices())
         return
 
     _setup_logging(args.verbose)
     from pathlib import Path
+
     cfg = config_mod.load(Path(args.config) if args.config else None)
     asyncio.run(_amain(cfg))

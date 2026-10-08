@@ -60,7 +60,7 @@ extra_system_prompt = ""
 
 [web]
 enabled = true
-host = "0.0.0.0"   # "127.0.0.1" to keep the page local-only
+hosts = ["localhost", "lan", "tailscale"]   # never all interfaces; drop "lan" to keep it off Wi-Fi
 port = 8765
 
 [floor]

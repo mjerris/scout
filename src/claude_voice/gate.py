@@ -13,11 +13,33 @@ from .config import GateConfig
 
 # Things Whisper produces from noise, silence or music rather than speech.
 HALLUCINATIONS = {
-    "you", "thank you", "thanks", "thanks for watching", "thank you for watching",
-    "thank you so much for watching", "please subscribe", "subscribe", "like and subscribe",
-    "bye", "bye bye", "so", "uh", "um", "hmm", "mmm", "mm", "oh", "ah", "huh",
-    "subtitles by the amaraorg community", "transcribed by", "music", "applause", "silence",
-    "i'm sorry", "sorry",
+    "you",
+    "thank you",
+    "thanks",
+    "thanks for watching",
+    "thank you for watching",
+    "thank you so much for watching",
+    "please subscribe",
+    "subscribe",
+    "like and subscribe",
+    "bye",
+    "bye bye",
+    "so",
+    "uh",
+    "um",
+    "hmm",
+    "mmm",
+    "mm",
+    "oh",
+    "ah",
+    "huh",
+    "subtitles by the amaraorg community",
+    "transcribed by",
+    "music",
+    "applause",
+    "silence",
+    "i'm sorry",
+    "sorry",
 }
 _NON_SPEECH = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|[♪♫]+")
 
@@ -64,8 +86,21 @@ def junk(text: str) -> str | None:
     return None
 
 
-def check(kind: str, text: str, t: Transcript, a: AudioStats, ref_db: float | None,
-          cfg: GateConfig) -> str | None:
+def coverage(text: str, a: AudioStats, cfg: GateConfig) -> str | None:
+    """Reject a long clip whose transcript has far too few words for its speech:
+    Whisper skipped most of the audio, so what it did write isn't reliable."""
+    seconds = a.voiced_ms / 1000
+    if seconds < cfg.coverage_min_seconds:
+        return None
+    rate = len(norm(text).split()) / seconds
+    if rate < cfg.min_words_per_second:
+        return f"transcript covers too little of {seconds:.0f}s of speech ({rate:.1f} words/s)"
+    return None
+
+
+def check(
+    kind: str, text: str, t: Transcript, a: AudioStats, ref_db: float | None, cfg: GateConfig
+) -> str | None:
     """kind: "wake" (wake word present), "followup" (no wake word, inside the
     follow-up window), "confirm" (answering an approval) or "residual" (speech
     recovered from a clip that also held the assistant's own voice)."""
@@ -84,9 +119,8 @@ def check(kind: str, text: str, t: Transcript, a: AudioStats, ref_db: float | No
         if t.avg_logprob < floor:
             return f"low confidence ({t.avg_logprob:.2f})"
 
-    if kind in ("followup", "residual"):
-        if words < cfg.followup_min_words:
-            return f"too short without the wake word ({words} word{'s' if words != 1 else ''})"
+    if kind in ("followup", "residual") and words < cfg.followup_min_words:
+        return f"too short without the wake word ({words} word{'s' if words != 1 else ''})"
     if kind == "followup":
         snr = a.level_db - a.floor_db
         if snr < cfg.followup_min_snr_db:

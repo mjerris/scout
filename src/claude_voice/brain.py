@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -27,7 +26,7 @@ from claude_agent_sdk import (
 from pathlib import Path
 
 from .config import ROOT, ClaudeConfig
-from .rules import Rules, rule_for
+from .rules import Rules
 
 log = logging.getLogger(__name__)
 
@@ -82,10 +81,10 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
         return "Run command?", f"run a command: {what[:200]}" + (f" ({cmd[:200]})" if cmd != what else "")
     if name in ("Edit", "MultiEdit", "NotebookEdit"):
         path = args.get("file_path") or args.get("notebook_path") or "a file"
-        return f"Edit {os.path.basename(path)}?", f"edit {path}"
+        return f"Edit {Path(path).name}?", f"edit {path}"
     if name == "Write":
         path = args.get("file_path", "a file")
-        return f"Write {os.path.basename(path)}?", f"write {path}"
+        return f"Write {Path(path).name}?", f"write {path}"
     if name == "WebFetch":
         host = urlparse(args.get("url", "")).netloc or "the web"
         return f"Fetch {host}?", f"fetch {args.get('url', '')}"
@@ -97,8 +96,15 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
 
 
 class Brain:
-    def __init__(self, cfg: ClaudeConfig, confirm: Confirm, tool_server, tool_names: list[str],
-                 rules: Rules, notify: Callable[[str, str], None]):
+    def __init__(
+        self,
+        cfg: ClaudeConfig,
+        confirm: Confirm,
+        tool_server,
+        tool_names: list[str],
+        rules: Rules,
+        notify: Callable[[str, str], None],
+    ):
         self.cfg = cfg
         self.confirm = confirm
         self.tool_server = tool_server
@@ -110,23 +116,31 @@ class Brain:
         self._lock = asyncio.Lock()
 
     def _options(self) -> ClaudeAgentOptions:
-        append = VOICE_PROMPT.format(root=ROOT) + ("\n" + self.cfg.extra_system_prompt if self.cfg.extra_system_prompt else "")
+        append = VOICE_PROMPT.format(root=ROOT) + (
+            "\n" + self.cfg.extra_system_prompt if self.cfg.extra_system_prompt else ""
+        )
         strict = self.cfg.approval_policy == "strict"
         if self.cfg.approval_policy not in ("strict", "settings", "settings_no_hooks"):
             raise ValueError(f"unknown approval_policy {self.cfg.approval_policy!r}")
         project = str(ROOT)
-        overrides: dict[str, Any] = {"permissions": {
-            # The app itself is maintained by its owner session, not by voice.
-            "allow": [*self.tool_names, "WebSearch", "WebFetch"],
-            # "//" = absolute path in Claude Code permission rules ("/x" is relative to the settings file).
-            "deny": [f"Edit(/{project}/**)", f"Write(/{project}/**)", f"MultiEdit(/{project}/**)",
-                     "mcp__voice"],  # the desk-session voice tool; the room agent already owns the voice
-            "ask": [] if strict else list(self.cfg.always_ask),
-        }}
+        overrides: dict[str, Any] = {
+            "permissions": {
+                # The app itself is maintained by its owner session, not by voice.
+                "allow": [*self.tool_names, "WebSearch", "WebFetch"],
+                # "//" = absolute path in Claude Code permission rules ("/x" is relative to the settings file).
+                "deny": [
+                    f"Edit(/{project}/**)",
+                    f"Write(/{project}/**)",
+                    f"MultiEdit(/{project}/**)",
+                    "mcp__voice",
+                ],  # the desk-session voice tool; the room agent already owns the voice
+                "ask": [] if strict else list(self.cfg.always_ask),
+            }
+        }
         if self.cfg.approval_policy == "settings_no_hooks":
             overrides["disableAllHooks"] = True
         return ClaudeAgentOptions(
-            cwd=os.path.expanduser(self.cfg.cwd),
+            cwd=str(Path(self.cfg.cwd).expanduser()),
             settings=json.dumps(overrides),
             env={"CLAUDE_VOICE_ROOM": "1"},  # our own MCP voice tool refuses to run inside the room agent
             mcp_servers={"voice_app": self.tool_server},
@@ -138,29 +152,43 @@ class Brain:
             can_use_tool=self._can_use_tool,
             # Strict policy: the hook gates every tool call, ahead of any allow
             # rules inherited from ~/.claude settings.
-            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=900)]}
-            if strict else None,
+            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=900)]} if strict else None,
         )
 
     async def _pre_tool_use(self, hook_input, tool_use_id, context):
         name, args = hook_input["tool_name"], hook_input["tool_input"]
         if reason := self._forbidden(name, args):
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                           "permissionDecision": "deny",
-                                           "permissionDecisionReason": reason}}
-        if name in self.cfg.auto_allow_tools or name in self.tool_names or (
-            name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        if (
+            name in self.cfg.auto_allow_tools
+            or name in self.tool_names
+            or (name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands))
         ):
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                           "permissionDecision": "allow",
-                                           "permissionDecisionReason": "on the voice auto-allow list"}}
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "on the voice auto-allow list",
+                }
+            }
         answer = await self._ask(name, args)
-        return {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow" if answer else "deny",
-            "permissionDecisionReason": "approved by voice" if answer
-            else _NO_ANSWER if answer is None else _DENIED,
-        }}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow" if answer else "deny",
+                "permissionDecisionReason": "approved by voice"
+                if answer
+                else _NO_ANSWER
+                if answer is None
+                else _DENIED,
+            }
+        }
 
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
         """Calls the voice agent may never make, whatever the user answers."""
@@ -169,12 +197,14 @@ class Brain:
         if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
             path = args.get("file_path") or args.get("notebook_path") or ""
             try:
-                inside = Path(os.path.expanduser(path)).resolve().is_relative_to(ROOT)
+                inside = Path(path).expanduser().resolve().is_relative_to(ROOT)
             except (OSError, ValueError):
                 inside = False
             if inside:
-                return ("This voice app is maintained by its owner session; use "
-                        "request_app_change instead of editing it.")
+                return (
+                    "This voice app is maintained by its owner session; use "
+                    "request_app_change instead of editing it."
+                )
         return None
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:

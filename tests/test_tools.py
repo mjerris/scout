@@ -15,17 +15,27 @@ def test_url_ok(url):
     assert mac.check_url(url) == url
 
 
-@pytest.mark.parametrize("url", [
-    "file:///etc/passwd", "javascript:alert(1)", "ssh://host", "netflix.com",
-    "https://x.com/a b", "https://x.com/\nrm -rf", "",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "ssh://host",
+        "netflix.com",
+        "https://x.com/a b",
+        "https://x.com/\nrm -rf",
+        "",
+    ],
+)
 def test_url_rejected(url):
     with pytest.raises(mac.ToolError):
         mac.check_url(url)
 
 
 def test_search_url_encodes_query():
-    assert mac.search_url("Netflix", "Nobody Wants This") == "https://www.netflix.com/search?q=Nobody+Wants+This"
+    assert (
+        mac.search_url("Netflix", "Nobody Wants This") == "https://www.netflix.com/search?q=Nobody+Wants+This"
+    )
     assert mac.search_url("youtube", 'a"b & c') == "https://www.youtube.com/results?search_query=a%22b+%26+c"
     with pytest.raises(mac.ToolError):
         mac.search_url("evil.com", "x")
@@ -55,17 +65,30 @@ def test_scripts_take_arguments_not_spliced_text():
         assert "on run argv" in script and "{" not in script.replace("{URL:u}", "")
 
 
-@pytest.mark.parametrize("text, answer", [
-    ("yes always", "always"), ("Always.", "always"), ("always allow that", "always"),
-    ("yes", True), ("no, not always", False), ("never", None),
-])
+@pytest.mark.parametrize(
+    "text, answer",
+    [
+        ("yes always", "always"),
+        ("Always.", "always"),
+        ("always allow that", "always"),
+        ("yes", True),
+        ("no, not always", False),
+        ("never", None),
+    ],
+)
 def test_parse_answer(text, answer):
     assert parse_answer(text) == answer
 
 
 def test_rule_scope():
-    assert rule_for("Bash", {"command": "osascript -e 'x'"}) == {"tool": "Bash", "command": "osascript -e 'x'"}
-    assert rule_for("WebFetch", {"url": "https://Example.com/a"}) == {"tool": "WebFetch", "domain": "example.com"}
+    assert rule_for("Bash", {"command": "osascript -e 'x'"}) == {
+        "tool": "Bash",
+        "command": "osascript -e 'x'",
+    }
+    assert rule_for("WebFetch", {"url": "https://Example.com/a"}) == {
+        "tool": "WebFetch",
+        "domain": "example.com",
+    }
     assert rule_for("mcp__github__create_issue", {"title": "t"}) == {"tool": "mcp__github__create_issue"}
     assert rule_for("Edit", {"file_path": "/x"}) is None
     assert rule_for("Write", {"file_path": "/x"}) is None
@@ -94,6 +117,7 @@ def test_timers_fire_and_cancel():
         assert t.cancel("pasta") == ["pasta"]
         await asyncio.sleep(1.1)
         return fired, t.listing()
+
     fired, left = asyncio.run(go())
     assert fired == ["tea"] and left == []
 
@@ -104,6 +128,7 @@ def test_timer_limits():
         for bad in (0, 0.5, 24 * 3600 + 1):
             with pytest.raises(mac.ToolError):
                 t.set(bad, "x")
+
     asyncio.run(go())
 
 

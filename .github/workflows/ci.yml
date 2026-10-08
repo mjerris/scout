@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  ci:
+    # Apple Silicon: the speech stack (MLX Whisper) only installs on arm64 macOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: bash scripts/run-ci.sh
+        env:
+          CI: "1"

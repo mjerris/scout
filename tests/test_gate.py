@@ -15,19 +15,33 @@ def tr(text, **kw):
     return Transcript(**{**CLEAR.__dict__, "text": text, **kw})
 
 
-@pytest.mark.parametrize("text", [
-    "Mmm.", "you", "Thank you.", "[Music]", "Thanks for watching!",
-    "A conversation with an assistant named Claude. A conversation with an assistant named "
-    "Claude. A conversation with an assistant named Claude. you",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Mmm.",
+        "you",
+        "Thank you.",
+        "[Music]",
+        "Thanks for watching!",
+        "A conversation with an assistant named Claude. A conversation with an assistant named "
+        "Claude. A conversation with an assistant named Claude. you",
+    ],
+)
 def test_noise_is_junk(text):
     assert junk(clean(text)) is not None
 
 
-@pytest.mark.parametrize("text", [
-    "Hey Claude, what time is it?", "Yes.", "Okay.", "no", "Echo hello.",
-    "Great. How long do you maintain and follow up after a previous?",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hey Claude, what time is it?",
+        "Yes.",
+        "Okay.",
+        "no",
+        "Echo hello.",
+        "Great. How long do you maintain and follow up after a previous?",
+    ],
+)
 def test_speech_is_not_junk(text):
     assert junk(clean(text)) is None
 

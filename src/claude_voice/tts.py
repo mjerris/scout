@@ -28,8 +28,17 @@ class Speaker:
     """speak() queues text; a synth worker and a playback worker run in parallel
     so the next sentence is ready while the current one plays."""
 
-    def __init__(self, model: str, voices: str, voice: str, speed: float, device: int | None,
-                 echo_tail_ms: int, chimes: bool, pronounce=None):
+    def __init__(
+        self,
+        model: str,
+        voices: str,
+        voice: str,
+        speed: float,
+        device: int | None,
+        echo_tail_ms: int,
+        chimes: bool,
+        pronounce=None,
+    ):
         self.kokoro = Kokoro(model, voices)
         self.pronounce = pronounce
         self.voice, self.speed, self.device = voice, speed, device
@@ -74,8 +83,9 @@ class Speaker:
     def overlap(self, start: float, end: float) -> float:
         """Seconds of our own speech that played between start and end."""
         now = time.monotonic()
-        return sum(max(0.0, min(e if e != float("inf") else now, end) - max(s, start))
-                   for s, e, _ in self._played)
+        return sum(
+            max(0.0, min(e if e != float("inf") else now, end) - max(s, start)) for s, e, _ in self._played
+        )
 
     def last_speech_end(self, since: float) -> float | None:
         """When the speech overlapping a clip that began at `since` ended (now if still playing)."""
@@ -109,10 +119,12 @@ class Speaker:
         import io
 
         import soundfile as sf
+
         if self.pronounce is not None:
             text = self.pronounce.tts(text)
         samples, sr = await asyncio.get_running_loop().run_in_executor(
-            self._synth_pool, lambda: self.kokoro.create(text, voice=voice or self.voice, speed=self.speed))
+            self._synth_pool, lambda: self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
+        )
         buf = io.BytesIO()
         sf.write(buf, samples, sr, format="WAV", subtype="PCM_16")
         return buf.getvalue()
@@ -143,7 +155,10 @@ class Speaker:
                 try:
                     samples, sr = await loop.run_in_executor(
                         self._synth_pool,
-                        lambda: self.kokoro.create(text, voice=voice or self.voice, speed=self.speed))
+                        lambda t=text, v=voice: self.kokoro.create(
+                            t, voice=v or self.voice, speed=self.speed
+                        ),
+                    )
                     self.sr = sr
                 except Exception:
                     log.exception("TTS failed for %r", item)

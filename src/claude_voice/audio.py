@@ -53,7 +53,7 @@ def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
     n = FRAME_SAMPLES * 2
     voiced, quiet = [], []
     for i in range(0, len(pcm) - n + 1, n):
-        f = pcm[i:i + n]
+        f = pcm[i : i + n]
         (voiced if vad.is_speech(f, SAMPLE_RATE) else quiet).append(frame_db(f))
     level = 10 * np.log10(np.mean([10 ** (d / 10) for d in voiced]) + 1e-12) if voiced else -100.0
     floor = float(np.percentile(quiet, 20)) if quiet else level - 30
@@ -63,9 +63,23 @@ def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
 async def decode_to_pcm(data: bytes) -> bytes:
     """Any audio container (webm/opus, mp4/aac, wav...) to 16 kHz mono int16 via ffmpeg."""
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
-        "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1",
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE),
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     out, err = await asyncio.wait_for(proc.communicate(data), 30)
     if proc.returncode != 0:
         raise ValueError(f"could not decode audio: {err.decode(errors='replace')[:200]}")
@@ -133,7 +147,7 @@ class Segmenter:
         s = np.frombuffer(frame, np.int16).astype(np.float32) / 32768.0
         return float(np.mean(s * s))
 
-    def feed(self, frame: bytes) -> bytes | None | bool:
+    def feed(self, frame: bytes) -> bytes | bool | None:
         """Returns True at speech onset, the utterance bytes at its end, else None."""
         speech = self.vad.is_speech(frame, SAMPLE_RATE)
         if not self.triggered:

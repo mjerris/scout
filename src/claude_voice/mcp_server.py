@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 
+from pathlib import Path
+
 import aiohttp
 from mcp.server.mcpserver import MCPServer
 
@@ -33,7 +35,7 @@ mcp = MCPServer("voice", instructions=INSTRUCTIONS)
 
 
 def _agent() -> str:
-    name = os.environ.get("CLAUDE_VOICE_AGENT") or os.path.basename(os.getcwd()) or "session"
+    name = os.environ.get("CLAUDE_VOICE_AGENT") or Path.cwd().name or "session"
     return f"{name}#{os.getpid() % 10000}"
 
 
@@ -45,21 +47,32 @@ def _base() -> tuple[str, dict]:
 
 async def _call(method: str, path: str, body: dict | None = None, timeout: float = 30) -> dict:
     if os.environ.get("CLAUDE_VOICE_ROOM"):
-        return {"status": "error", "error": "the room assistant already owns the voice; it cannot use this tool"}
+        return {
+            "status": "error",
+            "error": "the room assistant already owns the voice; it cannot use this tool",
+        }
     try:
         base, headers = _base()
     except OSError:
         return {"status": "error", "error": "claude-voice has never run here (no state/web_token)"}
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
-            async with s.request(method, base + path, json=body, headers=headers) as r:
-                if r.status == 401:
-                    return {"status": "error", "error": "the app's token changed; restart this session's voice MCP server (/mcp)"}
-                if r.status != 200:
-                    return {"status": "error", "error": f"HTTP {r.status}: {(await r.text())[:200]}"}
-                return await r.json()
+        async with (
+            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s,
+            s.request(method, base + path, json=body, headers=headers) as r,
+        ):
+            if r.status == 401:
+                return {
+                    "status": "error",
+                    "error": "the app's token changed; restart this session's voice MCP server (/mcp)",
+                }
+            if r.status != 200:
+                return {"status": "error", "error": f"HTTP {r.status}: {(await r.text())[:200]}"}
+            return await r.json()
     except aiohttp.ClientConnectorError:
-        return {"status": "error", "error": "claude-voice is not running (start it with scripts/launchd.sh restart)"}
+        return {
+            "status": "error",
+            "error": "claude-voice is not running (start it with scripts/launchd.sh restart)",
+        }
     except TimeoutError:
         return {"status": "error", "error": "timed out waiting for the voice app"}
     except (aiohttp.ClientError, ValueError) as exc:
@@ -67,8 +80,14 @@ async def _call(method: str, path: str, body: dict | None = None, timeout: float
 
 
 @mcp.tool()
-async def discuss(message: str = "", wait_for_response: bool = True, listen_timeout: float = 30.0,
-                   hold_floor: bool = False, wait_for_floor: float = 15.0, voice: str = "") -> str:
+async def discuss(
+    message: str = "",
+    wait_for_response: bool = True,
+    listen_timeout: float = 30.0,
+    hold_floor: bool = False,
+    wait_for_floor: float = 15.0,
+    voice: str = "",
+) -> str:
     """Say `message` out loud on the Mac and, unless wait_for_response is false,
     return what the user says back (no wake word needed).
 
@@ -77,11 +96,20 @@ async def discuss(message: str = "", wait_for_response: bool = True, listen_time
     seconds to queue if someone else is talking. voice: a Kokoro voice name
     (see voice_status), or empty for the default.
     """
-    r = await _call("POST", "/api/discuss", {
-        "agent": _agent(), "message": message, "wait_for_response": wait_for_response,
-        "listen_timeout": listen_timeout, "hold_floor": hold_floor,
-        "wait_for_floor": wait_for_floor, "voice": voice or None,
-    }, timeout=listen_timeout + wait_for_floor + 180)
+    r = await _call(
+        "POST",
+        "/api/discuss",
+        {
+            "agent": _agent(),
+            "message": message,
+            "wait_for_response": wait_for_response,
+            "listen_timeout": listen_timeout,
+            "hold_floor": hold_floor,
+            "wait_for_floor": wait_for_floor,
+            "voice": voice or None,
+        },
+        timeout=listen_timeout + wait_for_floor + 180,
+    )
     status = r.get("status")
     if status == "ok":
         if not wait_for_response:

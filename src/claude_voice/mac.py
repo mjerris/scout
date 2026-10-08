@@ -29,6 +29,7 @@ class ToolError(ValueError):
 
 # --- validation (pure) -----------------------------------------------------------
 
+
 def check_url(url: str) -> str:
     url = (url or "").strip()
     p = urlparse(url)
@@ -68,9 +69,11 @@ def check_int(value, lo: int, hi: int, what: str) -> int:
 
 # --- running things ------------------------------------------------------------------
 
+
 async def _run(*argv: str, timeout: float = 10.0) -> str:
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
@@ -87,12 +90,17 @@ async def osascript(script: str, *args: str) -> str:
 
 async def is_running(process_name: str) -> bool:
     proc = await asyncio.create_subprocess_exec(
-        "/usr/bin/pgrep", "-xq", process_name,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        "/usr/bin/pgrep",
+        "-xq",
+        process_name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
     return await proc.wait() == 0
 
 
 # --- set 1: open things, browser, apps --------------------------------------------------
+
 
 async def open_url(url: str) -> str:
     url = check_url(url)
@@ -112,25 +120,25 @@ async def open_app(name: str) -> str:
     return f"Opened {name}."
 
 
-_FRONTMOST = '''
+_FRONTMOST = """
 tell application "System Events" to return name of first application process whose frontmost is true
-'''
+"""
 
 
 async def frontmost_app() -> str:
     return await osascript(_FRONTMOST)
 
 
-_RUNNING = '''
+_RUNNING = """
 tell application "System Events" to return name of every application process whose background only is false
-'''
+"""
 
 
 async def running_apps() -> str:
     return await osascript(_RUNNING)
 
 
-_CHROME_TABS = '''
+_CHROME_TABS = """
 on run argv
   set out to ""
   tell application "Google Chrome"
@@ -146,7 +154,7 @@ on run argv
   end tell
   return out
 end run
-'''
+"""
 
 
 async def list_tabs() -> str:
@@ -161,7 +169,7 @@ async def list_tabs() -> str:
     return "\n".join(rows) or "No tabs open."
 
 
-_CHROME_SWITCH = '''
+_CHROME_SWITCH = """
 on run argv
   set w to (item 1 of argv) as integer
   set t to (item 2 of argv) as integer
@@ -171,7 +179,7 @@ on run argv
     activate
   end tell
 end run
-'''
+"""
 
 
 async def switch_tab(window: int, tab: int) -> str:
@@ -183,7 +191,7 @@ async def switch_tab(window: int, tab: int) -> str:
     return f"Switched to window {w} tab {t}."
 
 
-_CHROME_NEW_TAB = '''
+_CHROME_NEW_TAB = """
 on run argv
   set u to item 1 of argv
   tell application "Google Chrome"
@@ -196,7 +204,7 @@ on run argv
     activate
   end tell
 end run
-'''
+"""
 
 
 async def new_tab(url: str) -> str:
@@ -205,7 +213,7 @@ async def new_tab(url: str) -> str:
     return f"Opened a new tab for {urlparse(url).netloc}."
 
 
-_FULLSCREEN = '''
+_FULLSCREEN = """
 on run argv
   set want to (item 1 of argv) is "true"
   tell application "System Events"
@@ -214,7 +222,7 @@ on run argv
     return name of p
   end tell
 end run
-'''
+"""
 
 
 async def fullscreen(on: bool) -> str:
@@ -226,20 +234,24 @@ async def fullscreen(on: bool) -> str:
 
 _MEDIA = {
     # app -> action -> fixed script
-    "Spotify": {"play_pause": 'tell application "Spotify" to playpause',
-                "next": 'tell application "Spotify" to next track',
-                "previous": 'tell application "Spotify" to previous track'},
-    "Music": {"play_pause": 'tell application "Music" to playpause',
-              "next": 'tell application "Music" to next track',
-              "previous": 'tell application "Music" to previous track'},
+    "Spotify": {
+        "play_pause": 'tell application "Spotify" to playpause',
+        "next": 'tell application "Spotify" to next track',
+        "previous": 'tell application "Spotify" to previous track',
+    },
+    "Music": {
+        "play_pause": 'tell application "Music" to playpause',
+        "next": 'tell application "Music" to next track',
+        "previous": 'tell application "Music" to previous track',
+    },
 }
-_BROWSER_SPACE = '''
+_BROWSER_SPACE = """
 tell application "System Events"
   set p to first application process whose frontmost is true
   key code 49
   return name of p
 end tell
-'''
+"""
 
 
 async def media(action: str) -> str:
@@ -259,7 +271,7 @@ async def media(action: str) -> str:
 
 
 _GET_VOLUME = 'set s to get volume settings\nreturn ((output volume of s) as text) & "," & ((output muted of s) as text)'
-_SET_VOLUME = 'on run argv\nset volume output volume ((item 1 of argv) as integer)\nset volume output muted false\nend run'
+_SET_VOLUME = "on run argv\nset volume output volume ((item 1 of argv) as integer)\nset volume output muted false\nend run"
 _SET_MUTED = 'on run argv\nset volume output muted ((item 1 of argv) is "true")\nend run'
 
 

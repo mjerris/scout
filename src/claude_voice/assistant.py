@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import time
 import wave
 from collections import deque
@@ -28,9 +29,25 @@ log = logging.getLogger(__name__)
 ROOM = "room"
 
 
+def _transcript_log() -> logging.Logger:
+    """logs/transcript.jsonl, one event per line, rotated at midnight (kept 30 days)."""
+    tx = logging.getLogger("claude_voice.transcript")
+    if not tx.handlers:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        h = logging.handlers.TimedRotatingFileHandler(
+            ROOT / "logs" / "transcript.jsonl", when="midnight", backupCount=30, encoding="utf-8"
+        )
+        h.setFormatter(logging.Formatter("%(message)s"))
+        tx.addHandler(h)
+        tx.setLevel(logging.INFO)
+        tx.propagate = False  # not in the main log
+    return tx
+
+
 @dataclass
 class _Listen:
     """A Claude session (via MCP) waiting for the user's spoken reply."""
+
     agent: str
     fut: asyncio.Future
     since: float  # only speech that starts after this counts
@@ -71,6 +88,7 @@ class Assistant:
         self.history: deque[dict] = deque(maxlen=300)
         self._listeners: set[asyncio.Queue[dict]] = set()
         self._saved: deque = deque()
+        self._bg: set[asyncio.Task] = set()  # keeps fire-and-forget tasks alive until done
 
     # --- events: web page, transcript file ------------------------------------------
 
@@ -83,15 +101,13 @@ class Assistant:
             q.put_nowait(ev)
 
     def _write_transcript(self, ev: dict) -> None:
-        try:
-            path = ROOT / "logs" / f"transcript-{datetime.now():%Y-%m-%d}.jsonl"
-            if getattr(self, "_tx_path", None) != path:
-                if getattr(self, "_tx", None):
-                    self._tx.close()
-                self._tx, self._tx_path = open(path, "a", buffering=1), path  # line-buffered
-            self._tx.write(json.dumps(ev, default=str) + "\n")
-        except OSError:
-            log.exception("could not write transcript")
+        _transcript_log().info(json.dumps(ev, default=str))
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+        return task
 
     def subscribe(self) -> asyncio.Queue[dict]:
         q: asyncio.Queue[dict] = asyncio.Queue()
@@ -103,7 +119,7 @@ class Assistant:
 
     def _timer_done(self, label: str) -> None:
         self.emit("timer", text=f"{label} done")
-        asyncio.create_task(self._announce_timer(label))
+        self._spawn(self._announce_timer(label))
 
     async def _announce_timer(self, label: str) -> None:
         # Take the floor like any speaker, so it never talks over a session or a
@@ -145,8 +161,12 @@ class Assistant:
         self.emit("rules", rules=self.rules.listing())
 
     def snapshot(self) -> dict:
-        return {"state": self.state, "mic_muted": self.mic_muted,
-                "confirming": self._confirm_fut is not None, "floor": self.floor.status()}
+        return {
+            "state": self.state,
+            "mic_muted": self.mic_muted,
+            "confirming": self._confirm_fut is not None,
+            "floor": self.floor.status(),
+        }
 
     def _set_state(self, state: str) -> None:
         if state != self.state:
@@ -189,8 +209,12 @@ class Assistant:
             w.setsampwidth(2)
             w.setframerate(16000)
             w.writeframes(utt.pcm)
-        stem.with_suffix(".json").write_text(json.dumps(
-            {"text": t.text, "echo": utt.echo, "transcript": t.__dict__, "audio": utt.stats.__dict__}, indent=1))
+        stem.with_suffix(".json").write_text(
+            json.dumps(
+                {"text": t.text, "echo": utt.echo, "transcript": t.__dict__, "audio": utt.stats.__dict__},
+                indent=1,
+            )
+        )
         self._saved.append(stem)
         while len(self._saved) > keep:
             old = self._saved.popleft()
@@ -205,11 +229,19 @@ class Assistant:
         if not text:
             return
         a = utt.stats
-        log.info("heard%s: %s  [conf %.2f, no-speech %.2f, %.1f words/s, %.0f dB over noise]",
-                 " (echo)" if utt.echo else "", text, t.avg_logprob, t.no_speech_prob,
-                 len(gate.norm(text).split()) / max(a.voiced_ms / 1000, 0.3), a.level_db - a.floor_db)
+        log.info(
+            "heard%s: %s  [conf %.2f, no-speech %.2f, %.1f words/s, %.0f dB over noise]",
+            " (echo)" if utt.echo else "",
+            text,
+            t.avg_logprob,
+            t.no_speech_prob,
+            len(gate.norm(text).split()) / max(a.voiced_ms / 1000, 0.3),
+            a.level_db - a.floor_db,
+        )
         if gate.junk(text):
             return  # not speech at all; nothing to show
+        if self._reject("clip", text, gate.coverage(text, a, self.cfg.gate)):
+            return
         cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
         confirming = self._confirm_fut is not None and not self._confirm_fut.done()
         listening = self._listen is not None and not self._listen.fut.done()
@@ -234,13 +266,19 @@ class Assistant:
                 if speech.parse_answer(residual) is None:
                     return
             elif not listening and self._reject(
-                    "residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
+                "residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)
+            ):
                 return
             log.info("heard after own speech: %s", residual)
             text = residual
             started = self.speaker.last_speech_end(utt.started) or utt.started
             cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
-            if not listening and self.busy and not confirming and not (cmd is not None and speech.is_stop(cmd)):
+            if (
+                not listening
+                and self.busy
+                and not confirming
+                and not (cmd is not None and speech.is_stop(cmd))
+            ):
                 # Spoke over the end of the reply: run it once this turn finishes.
                 self.emit("heard", text=text)
                 self._queued = cmd if cmd is not None else text
@@ -258,8 +296,16 @@ class Assistant:
             self._ref_db = a.level_db if self._ref_db is None else 0.7 * self._ref_db + 0.3 * a.level_db
         await self._route(text, cmd, started, check, direct=False)
 
-    async def _route(self, text: str, cmd: str | None, started: float, check, direct: bool,
-                     speak: bool = True, client: str | None = None) -> str | None:
+    async def _route(
+        self,
+        text: str,
+        cmd: str | None,
+        started: float,
+        check,
+        direct: bool,
+        speak: bool = True,
+        client: str | None = None,
+    ) -> str | None:
         reply = lambda msg: self._reply(msg, speak, client)  # noqa: E731
         """Where a heard utterance goes. Shared by the mic and web push-to-talk.
         `check(kind)` returns a gate rejection reason (None = passes); `direct`
@@ -304,7 +350,7 @@ class Assistant:
                 # and "no" itself) has finished playing.
                 self._confirm_started = float("inf")
                 reply("Sorry, was that a yes or a no?")
-                asyncio.create_task(self._reopen_confirm())
+                self._spawn(self._reopen_confirm())
             else:
                 self._confirm_fut.set_result(answer)
             return None
@@ -312,9 +358,12 @@ class Assistant:
         if cmd is not None or direct:
             if self._reject("request", text, check("wake")):
                 return "gate"
-        elif not self.busy and started <= self.follow_up_until:
-            if self._reject("follow-up", text, check("followup")):
-                return "gate"
+        elif (
+            not self.busy
+            and started <= self.follow_up_until
+            and self._reject("follow-up", text, check("followup"))
+        ):
+            return "gate"
 
         if self.busy:
             if cmd is not None or direct:
@@ -360,7 +409,7 @@ class Assistant:
             self._set_state("idle")
             return
         if speech.is_reset(cmd):
-            asyncio.create_task(self.reset())
+            self._spawn(self.reset())
             return
         self.start_turn(cmd, speak, client)
 
@@ -375,8 +424,9 @@ class Assistant:
         """A request typed on the web page: same routing as speech (stop, reset,
         approvals, a listening session), no gate. Returns why it was ignored, if it was."""
         cmd = speech.strip_wake(text, self.cfg.wake.names, self.cfg.wake.max_position)
-        return await self._route(text, cmd, time.monotonic(), lambda kind: None, direct=True,
-                                 speak=speak, client=client)
+        return await self._route(
+            text, cmd, time.monotonic(), lambda kind: None, direct=True, speak=speak, client=client
+        )
 
     async def submit_audio(self, pcm: bytes, speak: bool = True, client: str | None = None) -> dict:
         """A clip recorded on the web page: no wake word needed, same gate and routing."""
@@ -389,8 +439,9 @@ class Assistant:
         if self._reject("web", t.text, reason):
             return {"text": t.text, "ignored": reason}
         cmd = speech.strip_wake(t.text, self.cfg.wake.names, self.cfg.wake.max_position)
-        ignored = await self._route(t.text, cmd, time.monotonic(), lambda kind: None, direct=True,
-                                    speak=speak, client=client)
+        ignored = await self._route(
+            t.text, cmd, time.monotonic(), lambda kind: None, direct=True, speak=speak, client=client
+        )
         return {"text": t.text, **({"ignored": ignored} if ignored else {})}
 
     # --- Claude sessions talking through the MCP server ------------------------------------
@@ -412,9 +463,16 @@ class Assistant:
         if not lst.fut.done():
             lst.fut.set_result(" ".join(lst.parts).strip())
 
-    async def discuss(self, agent: str, message: str | None, listen: bool = True,
-                       timeout: float = 30.0, hold: bool = False, voice: str | None = None,
-                       wait_for_floor: float = 0.0) -> dict:
+    async def discuss(
+        self,
+        agent: str,
+        message: str | None,
+        listen: bool = True,
+        timeout: float = 30.0,
+        hold: bool = False,
+        voice: str | None = None,
+        wait_for_floor: float = 0.0,
+    ) -> dict:
         """Speak `message` for a Claude session and (optionally) return the
         user's spoken reply, filtered by the same gate as the room assistant."""
         agent = (agent or "session").strip()[:40] or "session"
@@ -464,8 +522,14 @@ class Assistant:
             self._set_state(prev_state if prev_state != "agent" else "idle")
 
     def voice_status(self) -> dict:
-        return {"state": self.state, "mic_muted": self.mic_muted, "floor": self.floor.status(),
-                "room_busy": self.busy, "voices": self.speaker.voices(), "default_voice": self.speaker.voice}
+        return {
+            "state": self.state,
+            "mic_muted": self.mic_muted,
+            "floor": self.floor.status(),
+            "room_busy": self.busy,
+            "voices": self.speaker.voices(),
+            "default_voice": self.speaker.voice,
+        }
 
     # --- room turns ---------------------------------------------------------------------
 
@@ -521,8 +585,13 @@ class Assistant:
                     if self.state == "speaking" and not self.speaker.busy:
                         self._set_state("thinking")
                 elif kind == "result":
-                    self.emit("result", cost=data.total_cost_usd, turns=data.num_turns,
-                              error=data.is_error, session=data.session_id)
+                    self.emit(
+                        "result",
+                        cost=data.total_cost_usd,
+                        turns=data.num_turns,
+                        error=data.is_error,
+                        session=data.session_id,
+                    )
             await self.speaker.wait_idle()
         except Exception as exc:
             log.exception("Claude turn failed")
@@ -545,7 +614,7 @@ class Assistant:
 
     def _start_queued(self, text: str) -> None:
         if speech.is_reset(text):
-            asyncio.create_task(self.reset())
+            self._spawn(self.reset())
         elif not speech.is_stop(text):
             self._room_command(text)
 

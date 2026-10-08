@@ -38,6 +38,7 @@ def test_hold_keeps_floor_then_lapses():
         f.release("desk#1", hold=True, ttl=0.3)
         await asyncio.sleep(0.4)
         return blocked, regained, f.try_acquire("room")
+
     assert run(go()) == (True, True, True)
 
 
@@ -59,6 +60,7 @@ def test_waiters_get_floor_in_order():
         f.release("room")
         await asyncio.gather(*tasks)
         return order
+
     assert run(go()) == ["a", "b"]
 
 
@@ -67,17 +69,21 @@ def test_wait_times_out():
         f = Floor()
         f.try_acquire("room")
         return await f.acquire("desk#1", wait=0.3), f.status()["queue"]
+
     assert run(go()) == (False, [])
 
 
-@pytest.mark.parametrize("text, rest, waiting", [
-    ("Open Netflix and hang on", "Open Netflix and", True),
-    ("what about, give me a sec.", "what about", True),
-    ("wait", "", True),
-    ("Run the tests. Hold on!", "Run the tests", True),
-    ("I want to wait for the train", "I want to wait for the train", False),
-    ("hold on to that file", "hold on to that file", False),
-])
+@pytest.mark.parametrize(
+    "text, rest, waiting",
+    [
+        ("Open Netflix and hang on", "Open Netflix and", True),
+        ("what about, give me a sec.", "what about", True),
+        ("wait", "", True),
+        ("Run the tests. Hold on!", "Run the tests", True),
+        ("I want to wait for the train", "I want to wait for the train", False),
+        ("hold on to that file", "hold on to that file", False),
+    ],
+)
 def test_split_wait(text, rest, waiting):
     assert split_wait(text) == (rest, waiting)
 
@@ -103,3 +109,15 @@ def test_same_agent_cannot_hold_two_exchanges():
     assert not f.try_acquire("desk#1")  # a parallel second call waits
     f.release("desk#1", hold=True, ttl=5)
     assert f.try_acquire("desk#1")  # but it can re-take its own hold
+
+
+def test_web_hosts_never_all_interfaces(monkeypatch):
+    from claude_voice import web
+
+    async def no_tailscale():
+        return None
+
+    monkeypatch.setattr(web, "_lan_ip", lambda: "10.0.0.5")
+    monkeypatch.setattr(web, "_tailscale_ip", no_tailscale)
+    hosts = asyncio.run(web.resolve_hosts(["localhost", "lan", "tailscale", "10.0.0.5"]))
+    assert hosts == ["127.0.0.1", "10.0.0.5"]
