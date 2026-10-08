@@ -84,10 +84,13 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   and logs `change request: ...` for the Claude session that maintains the app.
 - **Remote Control:** set `claude.remote_control = "<name>"` to start the voice
   session with Remote Control enabled.
-- **Web page:** the log prints `http://<mini-ip>:8765/?token=…`. The page shows
-  a live transcript and lets you type requests, approve or deny actions, stop,
-  mute the mic and reset the session. The token lives in `state/web_token`;
-  delete that file to rotate it.
+- **Web page:** open `http://<mini-ip>:8765/?token=<token>` (the token is in
+  `state/web_token`; the log doesn't print it). The page drops the token from
+  the address bar and keeps a cookie. It shows a live transcript and lets you
+  type requests, approve or deny actions, stop, mute the mic and reset the
+  session. Delete `state/web_token` and restart the app to rotate the token.
+  Over the LAN address the page is plain HTTP; use the Tailscale HTTPS address
+  (below) on networks you don't trust, or drop "lan" from `web.hosts`.
 
 ## Voice for your other Claude Code sessions (MCP)
 
