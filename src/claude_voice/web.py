@@ -77,13 +77,6 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
             raise web.HTTPUnauthorized()
         return web.json_response(assistant.voice_status())
 
-    async def api_release(req: web.Request) -> web.StreamResponse:
-        if not authed(req):
-            raise web.HTTPUnauthorized()
-        b = await req.json()
-        assistant.floor.release(str(b.get("agent") or ""))
-        return web.json_response(assistant.floor.status())
-
     async def index(req: web.Request) -> web.StreamResponse:
         if not authed(req):
             return web.Response(status=401, text="Missing or wrong token. Use the URL printed in the log.")
@@ -162,8 +155,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
 
     app = web.Application(client_max_size=30 * 1024 * 1024)
     app.add_routes([web.get("/", index), web.get("/ws", ws_handler),
-                    web.post("/api/discuss", api_discuss), web.get("/api/status", api_status),
-                    web.post("/api/release", api_release)])
+                    web.post("/api/discuss", api_discuss), web.get("/api/status", api_status)])
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.TCPSite(runner, cfg.host, cfg.port).start()

@@ -53,9 +53,13 @@ class Pronouncer:
             self.rules += parse(user_file.read_text(), str(user_file))
 
     def _apply(self, direction: str, text: str) -> str:
-        for r in self.rules:
+        for r in list(self.rules):
             if r.direction == direction:
-                text = r.pattern.sub(r.replacement, text)
+                try:
+                    text = r.pattern.sub(r.replacement, text)
+                except (re.error, IndexError) as exc:
+                    log.warning("pronounce rule %r -> %r disabled: %s", r.pattern.pattern, r.replacement, exc)
+                    self.rules.remove(r)
         return text
 
     def tts(self, text: str) -> str:
