@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local runtime data
+models/*.onnx
+models/*.bin
+state/
+logs/
+config.toml
+.tmp/
+.DS_Store
