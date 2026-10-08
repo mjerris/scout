@@ -58,6 +58,14 @@ def parse_yes_no(text: str) -> bool | None:
     return None
 
 
+def parse_answer(text: str) -> bool | str | None:
+    """Like parse_yes_no, plus "always" ("yes always", "always allow that")."""
+    answer = parse_yes_no(text)
+    if answer is not False and "always" in words(text):
+        return "always"
+    return answer
+
+
 def to_speech(md: str) -> str:
     """Flatten markdown into something pleasant to hear."""
     s = re.sub(r"```.*?```", " (code omitted) ", md, flags=re.S)

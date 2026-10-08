@@ -85,7 +85,7 @@ class ClaudeConfig:
     # Tools that run without asking under the strict policy.
     auto_allow_tools: list[str] = field(default_factory=lambda: [
         "Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent",
-        "BashOutput", "NotebookRead", "mcp__voice_app__request_app_change",
+        "BashOutput", "NotebookRead", "WebFetch",
     ])
     # Programs allowed as a single plain Bash command (no pipes, chaining or redirects).
     auto_allow_commands: list[str] = field(default_factory=lambda: [

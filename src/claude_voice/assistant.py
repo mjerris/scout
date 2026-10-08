@@ -12,7 +12,9 @@ from . import gate, speech
 from .asr import Transcriber
 from .audio import Utterance
 from .brain import Brain
-from .config import Config
+from .config import ROOT, Config
+from .rules import Rules
+from .tools import Timers, build_server
 from .tts import Speaker
 
 log = logging.getLogger(__name__)
@@ -23,7 +25,10 @@ class Assistant:
         self.cfg = cfg
         self.asr = asr
         self.speaker = speaker
-        self.brain = Brain(cfg.claude, self._confirm)
+        self.rules = Rules(ROOT / "state" / "voice_allow.json")
+        self.timers = Timers(self._timer_done)
+        server, names = build_server(self.timers)
+        self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming
         self.mic_muted = False
@@ -56,6 +61,20 @@ class Assistant:
 
     def unsubscribe(self, q: asyncio.Queue[dict]) -> None:
         self._listeners.discard(q)
+
+    def _timer_done(self, label: str) -> None:
+        self.emit("timer", text=f"{label} done")
+        self.speaker.chime("wake")
+        self.speaker.chime("wake")
+        self.speaker.speak("Your timer is done." if label == "timer" else f"Your {label} timer is done.")
+
+    def _notify(self, kind: str, text: str) -> None:
+        self.speaker.speak(text)
+        self.emit("rules", rules=self.rules.listing(), text=text)
+
+    def remove_rule(self, index: int) -> None:
+        self.rules.remove(index)
+        self.emit("rules", rules=self.rules.listing())
 
     def snapshot(self) -> dict:
         return {"state": self.state, "mic_muted": self.mic_muted, "confirming": self._confirm_fut is not None}
@@ -117,7 +136,7 @@ class Assistant:
             # Leftovers are often misheard bits of our own speech: during an approval
             # only a clear yes/no counts; otherwise apply the follow-up rules.
             if confirming:
-                if speech.parse_yes_no(residual) is None:
+                if speech.parse_answer(residual) is None:
                     return
             elif self._reject("residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
                 return
@@ -146,7 +165,7 @@ class Assistant:
             if started < self._confirm_started:
                 return
             self.emit("heard", text=text)
-            answer = speech.parse_yes_no(cmd if cmd is not None else text)
+            answer = speech.parse_answer(cmd if cmd is not None else text)
             if answer is None:
                 self.speaker.speak("Sorry, was that a yes or a no?")
                 self._confirm_started = time.monotonic()
@@ -235,7 +254,7 @@ class Assistant:
         elif not speech.is_stop(text):
             self.start_turn(text)
 
-    async def _confirm(self, spoken: str, description: str) -> bool | None:
+    async def _confirm(self, spoken: str, description: str) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered."""
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[bool] = loop.create_future()
@@ -245,7 +264,7 @@ class Assistant:
         self.speaker.speak(spoken)
         await self.speaker.wait_idle()
         self._confirm_started = time.monotonic()
-        ok: bool | None
+        ok: bool | str | None
         try:
             ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
         except TimeoutError:
@@ -253,11 +272,11 @@ class Assistant:
             self.speaker.speak("No answer, so I skipped that.")
         finally:
             self._confirm_fut = None
-        self.emit("confirm_done", approved=bool(ok))
+        self.emit("confirm_done", approved=bool(ok), always=ok == "always")
         self._set_state("thinking")
         return ok
 
-    def answer_confirm(self, approved: bool) -> None:
+    def answer_confirm(self, approved: bool | str) -> None:
         if self._confirm_fut is not None and not self._confirm_fut.done():
             self._confirm_fut.set_result(approved)
 

@@ -48,6 +48,11 @@
   form { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
   #text { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
           background: var(--panel); color: var(--ink); }
+  #rules { font-size: 13px; color: var(--muted); padding: 6px 0; }
+  #rules ul { list-style: none; padding: 0; margin: 6px 0 0; }
+  #rules li { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  #rules li span { flex: 1; overflow-wrap: anywhere; }
+  #rules button { font-size: 12px; padding: 2px 8px; }
   label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
 </style>
 </head>
@@ -63,7 +68,9 @@
   <div id="log"></div>
   <div id="confirm"><span id="ctext"></span>
     <button class="yes" type="button" id="approve">Approve</button>
+    <button type="button" id="always">Always</button>
     <button class="no" type="button" id="deny">Deny</button></div>
+  <details id="rules"><summary>Always allowed (<span id="rcount">0</span>)</summary><ul id="rlist"></ul></details>
   <form id="f">
     <input id="text" placeholder="Type a request…" autocomplete="off">
     <label><input type="checkbox" id="speak" checked> speak on mini</label>
@@ -93,6 +100,18 @@ function setState(s) {
   if (!s.confirming) $("confirm").classList.remove("show");
 }
 
+function renderRules(rules) {
+  const ul = $("rlist"); ul.innerHTML = "";
+  $("rcount").textContent = rules.length;
+  for (const r of rules) {
+    const li = document.createElement("li");
+    const s = document.createElement("span"); s.textContent = r.text;
+    const b = document.createElement("button"); b.textContent = "Remove"; b.type = "button";
+    b.onclick = () => send({type: "remove_rule", index: r.index});
+    li.append(s, b); ul.appendChild(li);
+  }
+}
+
 function render(ev) {
   switch (ev.type) {
     case "state": setState(ev); break;
@@ -102,7 +121,9 @@ function render(ev) {
     case "claude": add("msg claude", ev.text); break;
     case "tool": add("tool", ev.name + " " + JSON.stringify(ev.input)); break;
     case "confirm": $("ctext").textContent = "Claude wants to " + ev.text + "."; $("confirm").classList.add("show"); break;
-    case "confirm_done": $("confirm").classList.remove("show"); add("meta", ev.approved ? "approved" : "denied"); break;
+    case "confirm_done": $("confirm").classList.remove("show"); add("meta", ev.always ? "approved (always)" : ev.approved ? "approved" : "denied"); break;
+    case "rules": if (ev.rules) renderRules(ev.rules); if (ev.text) add("meta", ev.text); break;
+    case "timer": add("meta", "⏰ " + ev.text); break;
     case "result": if (ev.cost != null) add("meta", `$${ev.cost.toFixed(4)} · ${ev.turns} turn${ev.turns === 1 ? "" : "s"}`); break;
     case "stopped": add("meta", "stopped"); break;
     case "reset": add("meta", "— new conversation —"); break;
@@ -120,6 +141,7 @@ function connect() {
       for (const h of ev.history) { render(h); if (h.type === "confirm") pending = true; if (h.type === "confirm_done") pending = false; }
       if (!(pending && ev.confirming)) $("confirm").classList.remove("show");
       setState(ev);
+      renderRules(ev.rules || []);
     } else render(ev);
   };
   ws.onclose = () => { setState({state: "offline", mic_muted: muted}); setTimeout(connect, 2000); };
@@ -138,6 +160,7 @@ $("mute").onclick = () => send({type: "mute", value: !muted});
 $("reset").onclick = () => send({type: "reset"});
 $("approve").onclick = () => send({type: "confirm", approved: true});
 $("deny").onclick = () => send({type: "confirm", approved: false});
+$("always").onclick = () => send({type: "confirm", approved: true, always: true});
 connect();
 </script>
 </body>
