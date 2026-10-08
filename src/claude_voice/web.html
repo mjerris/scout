@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Voice</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1c1a; --muted: #6f6c66; --line: #e4e1da;
+    --you: #e9eef7; --claude: #ffffff; --accent: #c4673f; --ok: #2f7d4f; --bad: #b3402f; --tool: #f1efe8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1a18; --panel: #24231f; --ink: #ecebe6; --muted: #9c988f; --line: #37352f;
+      --you: #2a3242; --claude: #24231f; --accent: #e08a62; --ok: #5cb27e; --bad: #e0705c; --tool: #2c2a25;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px; display: flex; flex-direction: column; height: 100dvh; }
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; flex: 1; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--tool); color: var(--muted); }
+  .pill.thinking, .pill.confirming { background: var(--accent); color: #fff; }
+  .pill.speaking { background: var(--ok); color: #fff; }
+  .pill.listening { background: #3d6fd1; color: #fff; }
+  .pill.offline { background: var(--bad); color: #fff; }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.on { background: var(--bad); color: #fff; border-color: var(--bad); }
+  #log { flex: 1; overflow-y: auto; padding: 16px 0; display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 9px 12px; border-radius: 10px; max-width: 88%; white-space: pre-wrap; word-wrap: break-word; }
+  .you { background: var(--you); align-self: flex-end; }
+  .claude { background: var(--claude); border: 1px solid var(--line); align-self: flex-start; }
+  .meta { font-size: 12px; color: var(--muted); align-self: center; }
+  .tool { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--tool); color: var(--muted);
+          align-self: flex-start; padding: 6px 10px; border-radius: 8px; max-width: 88%; overflow-x: auto; }
+  .heard { font-size: 12px; color: var(--muted); align-self: flex-end; font-style: italic; }
+  .err { color: var(--bad); align-self: center; font-size: 13px; }
+  #confirm { display: none; padding: 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); }
+  #confirm.show { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #confirm span { flex: 1; min-width: 200px; }
+  #confirm .yes { background: var(--ok); color: #fff; border-color: var(--ok); }
+  #confirm .no { background: var(--bad); color: #fff; border-color: var(--bad); }
+  form { display: flex; gap: 8px; padding: 12px 0 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  #text { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--panel); color: var(--ink); }
+  label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Claude Voice</h1>
+    <span id="state" class="pill offline">offline</span>
+    <button id="stop" type="button">Stop</button>
+    <button id="mute" type="button">Mute mic</button>
+    <button id="reset" type="button">New conversation</button>
+  </header>
+  <div id="log"></div>
+  <div id="confirm"><span id="ctext"></span>
+    <button class="yes" type="button" id="approve">Approve</button>
+    <button class="no" type="button" id="deny">Deny</button></div>
+  <form id="f">
+    <input id="text" placeholder="Type a request…" autocomplete="off">
+    <label><input type="checkbox" id="speak" checked> speak on mini</label>
+    <button type="submit">Send</button>
+  </form>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let ws, muted = false;
+
+function add(cls, text) {
+  const el = document.createElement("div");
+  el.className = cls; el.textContent = text;
+  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  log.appendChild(el);
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+
+function setState(s) {
+  const pill = $("state");
+  pill.textContent = s.state + (s.mic_muted ? " · mic muted" : "");
+  pill.className = "pill " + s.state;
+  muted = s.mic_muted;
+  $("mute").textContent = muted ? "Unmute mic" : "Mute mic";
+  $("mute").classList.toggle("on", muted);
+  if (!s.confirming) $("confirm").classList.remove("show");
+}
+
+function render(ev) {
+  switch (ev.type) {
+    case "state": setState(ev); break;
+    case "heard": add("heard", "🎙 " + ev.text); break;
+    case "you": add("msg you", ev.text); break;
+    case "claude": add("msg claude", ev.text); break;
+    case "tool": add("tool", ev.name + " " + JSON.stringify(ev.input)); break;
+    case "confirm": $("ctext").textContent = "Claude wants to " + ev.text + "."; $("confirm").classList.add("show"); break;
+    case "confirm_done": $("confirm").classList.remove("show"); add("meta", ev.approved ? "approved" : "denied"); break;
+    case "result": if (ev.cost != null) add("meta", `$${ev.cost.toFixed(4)} · ${ev.turns} turn${ev.turns === 1 ? "" : "s"}`); break;
+    case "stopped": add("meta", "stopped"); break;
+    case "reset": add("meta", "— new conversation —"); break;
+    case "error": add("err", ev.text); break;
+  }
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === "hello") {
+      log.innerHTML = "";
+      let pending = false;
+      for (const h of ev.history) { render(h); if (h.type === "confirm") pending = true; if (h.type === "confirm_done") pending = false; }
+      if (!(pending && ev.confirming)) $("confirm").classList.remove("show");
+      setState(ev);
+    } else render(ev);
+  };
+  ws.onclose = () => { setState({state: "offline", mic_muted: muted}); setTimeout(connect, 2000); };
+}
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+$("f").onsubmit = (e) => {
+  e.preventDefault();
+  const t = $("text").value.trim();
+  if (!t) return;
+  send({type: "say", text: t, speak: $("speak").checked});
+  $("text").value = "";
+};
+$("stop").onclick = () => send({type: "stop"});
+$("mute").onclick = () => send({type: "mute", value: !muted});
+$("reset").onclick = () => send({type: "reset"});
+$("approve").onclick = () => send({type: "confirm", approved: true});
+$("deny").onclick = () => send({type: "confirm", approved: false});
+connect();
+</script>
+</body>
+</html>

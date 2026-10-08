@@ -1,0 +1,49 @@
+# Copy to config.toml and edit. Every key is optional; these are the defaults.
+
+[wake]
+# Wake if one of these appears in the first `max_position` words ("Hey Claude, ...").
+names = ["claude", "claud", "clod", "clawed", "cloud", "klaud", "claudia"]
+max_position = 3
+# After a reply, keep listening this long for a follow-up without the wake word (0 = off).
+follow_up_seconds = 8.0
+
+[audio]
+input_device = ""     # name substring or index from `uv run claude-voice --list-devices`
+output_device = ""
+vad_aggressiveness = 2
+silence_ms = 1200     # pause that ends an utterance
+min_speech_ms = 300
+max_utterance_s = 30.0
+echo_tail_ms = 400
+
+[asr]
+model = "mlx-community/whisper-large-v3-turbo"  # smaller/faster: mlx-community/whisper-small-mlx
+language = "en"
+
+[tts]
+model = "models/kokoro-v1.0.onnx"
+voices = "models/voices-v1.0.bin"
+voice = "af_heart"    # e.g. af_bella, am_michael, bf_emma, bm_george
+speed = 1.1
+chimes = true
+
+[claude]
+cwd = "~"                     # where the agent works
+model = ""                    # e.g. "sonnet" for snappier replies; empty = Claude Code default
+permission_mode = "default"   # "" = use defaultMode from your settings
+setting_sources = ["user"]    # load ~/.claude settings, MCP servers and CLAUDE.md
+confirm_timeout_s = 30.0
+# "strict": only the two lists below run without a spoken yes; your ~/.claude allow rules don't apply.
+# "settings": your ~/.claude allow rules and hooks apply; you're asked aloud only where Claude Code would prompt.
+# "settings_no_hooks": same, but your hooks are off (a hook answering "allow" skips every prompt).
+approval_policy = "strict"
+always_ask = ["Bash(git push:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)"]  # settings policies only
+remote_control = ""           # e.g. "claude-voice" to show the session in Remote Control
+auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]
+auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
+extra_system_prompt = ""
+
+[web]
+enabled = true
+host = "0.0.0.0"   # "127.0.0.1" to keep the page local-only
+port = 8765
