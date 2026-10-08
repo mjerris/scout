@@ -1,10 +1,10 @@
-"""Mail, calendar and reminders tools, defined once and served two ways:
+"""Mail, calendar, reminders and messages tools, defined once and served two ways:
 - to the room assistant, inside its in-process voice_app tool server;
 - to any other Claude session, through the MCP server (mcp_server.py), which
   forwards each call to the running app (POST /api/tool).
 
 The app always does the work, so macOS's calendar and Mail permissions belong
-to it alone. Tools with `asks=True` change something outside the Mac or under
+to it alone (Messages: to its scout-messages helper). Tools with `asks=True` change something outside the Mac or under
 the user's name; the app confirms each call by voice whoever made it (room:
 brain.ALWAYS_ASK_TOOLS; other sessions: Assistant.run_shared_tool), and a
 "yes, always" never applies to them.
@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, freebusy, mail_mac, reminders_mac
+from . import calendar_mac, freebusy, mail_mac, messages_mac, reminders_mac
 
 
 @dataclass(frozen=True)
@@ -156,6 +156,34 @@ SHARED: tuple[SharedTool, ...] = (
         _COMPOSE,
         mail_mac.send,
         asks=True,
+    ),
+    SharedTool(
+        "messages_recent",
+        "Read the newest iMessage and SMS messages across all conversations (newest first, sent "
+        "and received): time, who, conversation, text. count 1-50 (default 10). Read-only.",
+        _obj({"count": _INT}),
+        lambda a: messages_mac.recent(a.get("count")),
+    ),
+    SharedTool(
+        "messages_from",
+        "Read the texts one person sent the user (newest first). contact is a name from Contacts, "
+        "a phone number or an email address. count 1-50 (default 10); days back 1-365 (default 30).",
+        _obj({"contact": _STR, "count": _INT, "days": _INT}, ["contact"]),
+        lambda a: messages_mac.from_contact(a.get("contact"), a.get("count"), a.get("days")),
+    ),
+    SharedTool(
+        "messages_unread",
+        "List unread incoming iMessage and SMS messages (newest first). count 1-50 (default 20); "
+        "days back 1-365 (default 30).",
+        _obj({"count": _INT, "days": _INT}),
+        lambda a: messages_mac.unread(a.get("count"), a.get("days")),
+    ),
+    SharedTool(
+        "messages_search",
+        "Find iMessage and SMS messages whose text contains text (newest first, sent and "
+        "received). count 1-50 (default 10); days back 1-365 (default 90).",
+        _obj({"text": _STR, "count": _INT, "days": _INT}, ["text"]),
+        lambda a: messages_mac.search(a.get("text"), a.get("count"), a.get("days")),
     ),
 )
 

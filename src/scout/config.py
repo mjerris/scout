@@ -224,6 +224,13 @@ class BriefingConfig:
 
 
 @dataclass
+class MessagesConfig:
+    # The messages_* tools read iMessage and SMS history through the scout-messages
+    # helper (the only program given Full Disk Access). false = the tools refuse.
+    enabled: bool = True
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -235,6 +242,7 @@ class Config:
     floor: FloorConfig = field(default_factory=FloorConfig)
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
+    messages: MessagesConfig = field(default_factory=MessagesConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to Scout's data folder."""
