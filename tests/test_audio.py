@@ -2,11 +2,10 @@
 
 import asyncio
 from collections.abc import Callable
-from typing import cast
 
 import numpy as np
 
-from claude_voice.audio import FRAME_SAMPLES, Microphone, Segmenter, Utterance, utterances
+from claude_voice.audio import FRAME_SAMPLES, Segmenter, Utterance, utterances
 
 
 class FakeMic:
@@ -37,7 +36,7 @@ def silence(seconds: float) -> list[bytes]:
 def collect(frames: list[bytes], is_echo: Callable[[], bool]) -> list[Utterance]:
     async def go() -> list[Utterance]:
         out: asyncio.Queue[Utterance] = asyncio.Queue()
-        mic = cast(Microphone, FakeMic(frames))  # only .frames is used
+        mic = FakeMic(frames)
         task = asyncio.create_task(utterances(mic, Segmenter(1, 600, 200, 30), is_echo, out))
         await asyncio.sleep(0.3)
         task.cancel()

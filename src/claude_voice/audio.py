@@ -9,7 +9,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
-from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -93,48 +92,6 @@ async def decode_to_pcm(data: bytes) -> bytes:
     if proc.returncode != 0:
         raise ValueError(f"could not decode audio: {err.decode(errors='replace')[:200]}")
     return out
-
-
-class Microphone:
-    """Pushes 30 ms int16 frames from the input device onto an asyncio queue."""
-
-    def __init__(self, device: int | None) -> None:
-        self.device = device
-        self._last_frame = time.monotonic()
-        self.frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
-        self._stream: sd.RawInputStream | None = None
-
-    def start(self, loop: asyncio.AbstractEventLoop) -> None:
-        def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
-            if status:
-                log.debug("input status: %s", status)
-            loop.call_soon_threadsafe(self._put, bytes(indata))
-
-        self._stream = sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
-            blocksize=FRAME_SAMPLES,
-            channels=1,
-            dtype="int16",
-            device=self.device,
-            callback=callback,
-        )
-        self._stream.start()
-        name = sd.query_devices(self._stream.device)["name"]
-        log.info("microphone: %s", name)
-
-    def seconds_since_frame(self) -> float:
-        return time.monotonic() - self._last_frame
-
-    def _put(self, frame: bytes) -> None:
-        self._last_frame = time.monotonic()
-        if self.frames.full():
-            self.frames.get_nowait()
-        self.frames.put_nowait(frame)
-
-    def stop(self) -> None:
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
 
 
 class Segmenter:
