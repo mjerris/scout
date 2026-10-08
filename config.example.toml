@@ -2,7 +2,7 @@
 
 [wake]
 # Wake if one of these appears in the first `max_position` words ("Hey Claude, ...").
-names = ["claude", "claud", "clod", "clawed", "cloud", "klaud", "claudia"]
+names = ["claude", "claud", "klaud"]   # not "cloud"/"clawed": everyday words woke it
 max_position = 3
 # After a reply, keep listening this long for a follow-up without the wake word (0 = off).
 follow_up_seconds = 8.0
@@ -26,6 +26,8 @@ min_logprob_followup = -0.9   # stricter without it
 max_no_speech_prob = 0.6
 max_compression_ratio = 2.4
 max_words_per_second = 6.0
+min_words_per_second = 0.5    # a 4 s+ clip with fewer words than this was mostly not transcribed
+coverage_min_seconds = 4.0
 followup_min_words = 2
 followup_min_snr_db = 10.0    # follow-ups must be this far above the room's noise
 followup_max_drop_db = 12.0   # ...and not this much quieter than your last "Hey Claude"
@@ -54,7 +56,7 @@ confirm_timeout_s = 30.0
 approval_policy = "strict"
 always_ask = ["Bash(git push:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)"]  # settings policies only
 remote_control = ""           # e.g. "claude-voice" to show the session in Remote Control
-auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]
+auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]   # secrets stay unreadable
 auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
 extra_system_prompt = ""
 

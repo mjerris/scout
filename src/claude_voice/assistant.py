@@ -76,14 +76,20 @@ class Assistant:
         self.follow_up_until = 0.0
         self._turn: asyncio.Task[Any] | None = None
         self._silence_turn = False  # set by stop(): drain the turn without speaking
-        self._queued: str | None = None  # follow-up spoken over the end of a reply
+        self._queued: str | None = None  # a request to run when the current turn ends
+        self._queued_out: dict[str, Any] = {"mini": True, "client": None}  # ...and where to answer it
         self._held_words: list[str] = []  # words before a "hang on"
         self._held_until = 0.0  # ...kept only while the wait window is open
+        self._held_source: str | None = None  # who said them: a web client id, or None for the mic
         self._ref_db: float | None = None  # your voice level on accepted wake requests
         self._confirm_fut: asyncio.Future[Any] | None = None
         self._confirm_lock = asyncio.Lock()  # parallel tool calls ask one at a time
         self._confirm_gen = 0  # bumped by stop(): queued questions are dropped, not asked
         self._confirm_started = 0.0
+        self._confirm_id = 0  # id of the pending question (web answers must name it)
+        self._confirm_audience: dict[str, Any] = {"mini": True, "client": None}  # who was asked
+        self._confirm_waiting = 0  # questions queued behind the one being asked
+        self._stop_event = asyncio.Event()  # set (and replaced) by every stop()
         self._listen: _Listen | None = None
         self._discuss_stop: asyncio.Event | None = None  # set by stop() during a discuss call
         # Where the current room turn's speech goes: the mini's speakers and/or
@@ -160,8 +166,8 @@ class Assistant:
         self.say(text)
         self.emit("rules", rules=self.rules.listing(), text=text)
 
-    def remove_rule(self, index: int) -> None:
-        self.rules.remove(index)
+    def remove_rule(self, rule_id: str) -> None:
+        self.rules.remove(rule_id)
         self.emit("rules", rules=self.rules.listing())
 
     def snapshot(self) -> dict[str, Any]:
@@ -169,6 +175,7 @@ class Assistant:
             "state": self.state,
             "mic_muted": self.mic_muted,
             "confirming": self._confirm_fut is not None,
+            "confirm_id": self._confirm_id if self._confirm_fut is not None else None,
             "floor": self.floor.status(),
         }
 
@@ -318,28 +325,42 @@ class Assistant:
         client: str | None = None,
         ended: float | None = None,
     ) -> str | None:
-        """Where a heard utterance goes. Shared by the mic and web push-to-talk.
-        `check(kind)` returns a gate rejection reason (None = passes); `direct`
-        means the user addressed us explicitly (push-to-talk), no wake word needed.
+        """Where a heard utterance goes. Shared by the mic, web push-to-talk and
+        typed text. `check(kind)` returns a gate rejection reason (None = passes);
+        `direct` means the user addressed us explicitly (web), no wake word needed.
         Returns a reason when the utterance was ignored."""
 
         def reply(msg: str) -> None:
-            self._reply(msg, speak, client)
+            self._reply(msg, speak and not self._floor_taken_by_session(), client)
+
+        def ignore(reason: str) -> str:
+            self._reject("request", text, reason)
+            return reason
 
         confirming = self._confirm_fut is not None and not self._confirm_fut.done()
+        listening = self._listen is not None and not self._listen.fut.done()
+        in_follow_up = not self.busy and started <= self.follow_up_until
         via = {"via": "web"} if direct else {}
 
-        listening = self._listen is not None and not self._listen.fut.done()
-        # "Stop" ends whatever is going on: speech, a turn, a pending question, a session's listen.
-        if speech.is_stop(cmd if cmd is not None else (text if direct or confirming or listening else "")):
+        # "Stop" ends whatever is going on: speech, a turn, a pending question, a
+        # session's listen or floor hold, a "hang on".
+        bare = text if (direct or confirming or listening or in_follow_up) else ""
+        if speech.is_stop(cmd if cmd is not None else bare):
             self.emit("heard", text=text, **via)
             await self.stop()
+            return None
+
+        # "Claude, new conversation" is for the room even while a session listens.
+        if cmd is not None and speech.is_reset(cmd) and listening:
+            self.emit("heard", text=text, **via)
+            await self.stop()
+            self._spawn(self.reset(speak, client))
             return None
 
         # A Claude session is waiting for the user's reply: it gets the speech.
         if self._listen is not None and not self._listen.fut.done():
             if started < self._listen.since - 0.5:
-                return "said before the question"
+                return ignore("said before the question")
             if self._reject("reply", text, check("reply")):
                 return "gate"
             self.emit("heard", text=text, to=self._listen.agent, **via)
@@ -349,19 +370,23 @@ class Assistant:
         # Another session has the floor (it's mid-sentence or between turns).
         owner = self.floor.owner()
         if owner not in (None, ROOM) and not confirming and cmd is None and not direct:
-            self._reject("request", text, f"{owner} has the floor")
-            return "floor"
-        # (A "Hey Claude" or push-to-talk request goes ahead; its turn queues for the floor.)
+            return ignore(f"{owner} has the floor")
+        # (A "Hey Claude" or web request goes ahead; its turn queues for the floor.)
 
         if confirming:
+            aud = self._confirm_audience
+            if not direct and not aud["mini"]:
+                # Asked only on a web page: the room didn't hear the question.
+                return ignore("the question was asked on another device")
             if self._reject("answer", text, check("confirm")):
                 return "gate"
-            if started < self._confirm_started - 0.5:
-                return "said before the question"
+            # Web answers come from someone who can see the question already.
+            if not direct and started < self._confirm_started - 0.5:
+                return ignore("said before the question")
             self.emit("heard", text=text, **via)
-            answer = speech.parse_answer(cmd if cmd is not None else text)
+            answer = speech.parse_answer(cmd if cmd else text)
             if answer is None:
-                # 3. Nothing counts as an answer until the re-ask (which says "yes"
+                # Nothing counts as an answer until the re-ask (which says "yes"
                 # and "no" itself) has finished playing.
                 self._confirm_started = float("inf")
                 reply("Sorry, was that a yes or a no?")
@@ -373,62 +398,73 @@ class Assistant:
         if cmd is not None or direct:
             if self._reject("request", text, check("wake")):
                 return "gate"
-        elif (
-            not self.busy
-            and started <= self.follow_up_until
-            and self._reject("follow-up", text, check("followup"))
-        ):
+        elif in_follow_up and self._reject("follow-up", text, check("followup")):
             return "gate"
 
         if self.busy:
             if cmd is not None or direct:
+                # Run it next rather than dropping it.
                 self.emit("heard", text=text, **via)
-                reply("I'm still working on the last request. Say stop to cancel it.")
-                return "busy with another request"
-            return "busy"
+                self._queued = cmd if cmd is not None else text
+                self._queued_out = {"mini": speak, "client": client}
+                reply("Okay, I'll do that next.")
+                return None
+            return ignore("busy with another request (say the wake word to queue it)")
 
         if cmd is None:
             if not direct and started > self.follow_up_until:
                 return "no wake word"
-            cmd = text  # follow-up window or push-to-talk: no wake word needed
+            cmd = text  # follow-up window or web: no wake word needed
         self.emit("heard", text=text, **via)
         self._room_command(cmd, speak, client)
         return None
 
+    def _floor_taken_by_session(self) -> bool:
+        owner = self.floor.owner()
+        return owner not in (None, ROOM, "timer")
+
     def _room_command(self, cmd: str, speak: bool = True, client: str | None = None) -> None:
+        if speech.is_stop(cmd):  # before joining anything held by "hang on"
+            self._held_words = []
+            self._spawn(self.stop())
+            return
         cmd, waiting = speech.split_wait(cmd)
+        if self._held_words and (time.monotonic() > self._held_until or self._held_source != client):
+            self._held_words = []  # expired, or someone else (another device) said them
         if waiting:
             # "…, hang on": keep what was said and keep listening.
-            if self._held_words and time.monotonic() > self._held_until:
-                self._held_words = []
             if cmd:
                 self._held_words.append(cmd)
+                self._held_source = client
             self._held_until = time.monotonic() + self.cfg.wake.wait_seconds + 5
-            if speak:
-                self.speaker.chime("wake")
-            self._set_state("listening")
-            self.follow_up_until = time.monotonic() + self.cfg.wake.wait_seconds
-            if self.floor.try_acquire(ROOM):  # hold the floor so no session cuts in meanwhile
-                self.floor.release(ROOM, hold=True, ttl=self.cfg.wake.wait_seconds)
+            self._listen_for_more(self.cfg.wake.wait_seconds, speak)
             return
         if self._held_words:
-            if time.monotonic() <= self._held_until:
-                cmd = " ".join([*self._held_words, cmd]).strip()
+            cmd = " ".join([*self._held_words, cmd]).strip()
             self._held_words = []
-        if not cmd.strip():
-            if speak:
-                self.speaker.chime("wake")
-            self._set_state("listening")
-            self.follow_up_until = time.monotonic() + max(self.cfg.wake.follow_up_seconds, 6)
-            return
-        if speech.is_stop(cmd):
-            self.follow_up_until = 0
-            self._set_state("idle")
+        if not cmd.strip():  # a bare "Hey Claude": chime and wait for the request
+            self._listen_for_more(max(self.cfg.wake.follow_up_seconds, 6), speak)
             return
         if speech.is_reset(cmd):
-            self._spawn(self.reset())
+            self._spawn(self.reset(speak, client))
             return
         self.start_turn(cmd, speak, client)
+
+    def _listen_for_more(self, seconds: float, speak: bool) -> None:
+        """Open a no-wake-word window, hold the floor for it, and show "listening"
+        only while it's actually open."""
+        if speak:
+            self.speaker.chime("wake")
+        self._set_state("listening")
+        self.follow_up_until = time.monotonic() + seconds
+        if self.floor.try_acquire(ROOM):  # so no session cuts in meanwhile
+            self.floor.release(ROOM, hold=True, ttl=seconds)
+        self._spawn(self._idle_after(self.follow_up_until))
+
+    async def _idle_after(self, deadline: float) -> None:
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()) + 0.05)
+        if self.state == "listening" and time.monotonic() >= self.follow_up_until:
+            self._set_state("idle")
 
     # --- push-to-talk from the web page -------------------------------------------------
 
@@ -449,7 +485,7 @@ class Assistant:
         """A clip recorded on the web page: no wake word needed, same gate and routing."""
         t = await self.asr.transcribe(pcm)
         t.text = self.pronounce.stt(t.text)
-        a = analyze(pcm)
+        a = analyze(pcm, self.cfg.audio.vad_aggressiveness)
         if not t.text or gate.junk(t.text):
             return {"text": t.text, "ignored": "no speech heard"}
         reason = gate.check("direct", t.text, t, a, None, self.cfg.gate)
@@ -496,15 +532,20 @@ class Assistant:
     ) -> dict[str, Any]:
         """Speak `message` for a Claude session and (optionally) return the
         user's spoken reply, filtered by the same gate as the room assistant."""
-        agent = (agent or "session").strip()[:40] or "session"
+        agent = (agent or "session").strip()[:80] or "session"
         if agent in (ROOM, "timer"):
             return {"status": "error", "error": "reserved agent name"}
         if voice and voice not in self.speaker.voices():
             return {"status": "error", "error": f"unknown voice {voice!r}; see voice_status for the list"}
-        if not await self.floor.acquire(agent, wait_for_floor):
+        if self.mic_muted and listen:
+            return {"status": "muted"}
+        stop_ev = self._stop_event  # "stop" while queued for the floor cancels this call
+        if not await self.floor.acquire(agent, wait_for_floor, cancel=stop_ev):
+            if stop_ev.is_set():
+                return {"status": "stopped", "text": ""}
             return {"status": "floor_busy", **self.floor.status()}
-        prev_state = self.state
         stopped = self._discuss_stop = asyncio.Event()
+        cancelled = False
         try:
             self._set_state("agent")
             if message:
@@ -536,11 +577,17 @@ class Assistant:
             if speech.is_stop(text):
                 return {"status": "stopped", "text": text}
             return {"status": "ok", "text": text}
+        except asyncio.CancelledError:
+            # The session gave up (Esc, exit, HTTP timeout): stop its speech too.
+            cancelled = True
+            if self.speaker.busy:
+                self.speaker.stop()
+            raise
         finally:
             self._listen = None
             self._discuss_stop = None
-            self.floor.release(agent, hold=hold and not stopped.is_set())
-            self._set_state(prev_state if prev_state != "agent" else "idle")
+            self.floor.release(agent, hold=hold and not stopped.is_set() and not cancelled)
+            self._set_state("thinking" if self.busy else "idle")
 
     def voice_status(self) -> dict[str, Any]:
         return {
@@ -575,17 +622,27 @@ class Assistant:
         self._out = {"mini": speak, "client": client}
         self._silence_turn = False
         self.follow_up_until = 0
-        got = await self.floor.acquire(ROOM, self.cfg.floor.room_wait_seconds)
-        if got and self._silence_turn:  # "stop" while we waited for the floor
-            self.floor.release(ROOM)
+        stop_ev = self._stop_event
+        try:
+            got = await self.floor.acquire(ROOM, self.cfg.floor.room_wait_seconds, cancel=stop_ev)
+        except asyncio.CancelledError:
+            self._out = {"mini": True, "client": None}
+            raise
+        if not got or self._silence_turn or stop_ev.is_set():
+            if got:
+                self.floor.release(ROOM)
+            elif not stop_ev.is_set():
+                owner = self.floor.owner()
+                self.emit("error", text=f"{owner} has the floor; request dropped: {text}")
+                # Tell the asker, but never over the session that has the floor.
+                self._reply(
+                    "Another session is using the voice right now. Try again in a moment.",
+                    speak and not self._floor_taken_by_session(),
+                    client,
+                )
+            self._queued = None
             self._out = {"mini": True, "client": None}
             self._set_state("idle")
-            return
-        if not got:
-            owner = self.floor.owner()
-            self.emit("error", text=f"{owner} has the floor; request dropped: {text}")
-            self.say("Another session is using the voice right now. Try again in a moment.")
-            self._out = {"mini": True, "client": None}
             return
         self.emit("you", text=text)
         self._set_state("thinking")
@@ -624,64 +681,87 @@ class Assistant:
             if ticks:
                 ticks.cancel()
             self._set_state("idle")
-            follow = 0.0 if self._silence_turn else self.cfg.wake.follow_up_seconds
+            # The follow-up window is for a reply the room heard; a phone-only turn opens none.
+            heard_in_room = self._out["mini"]
+            follow = self.cfg.wake.follow_up_seconds if heard_in_room and not self._silence_turn else 0.0
             self.follow_up_until = time.monotonic() + follow
             # Keep the floor through the follow-up window so other sessions don't cut in.
             self.floor.release(ROOM, hold=follow > 0, ttl=follow)
             self._out = {"mini": True, "client": None}
             queued, self._queued = self._queued, None
+            out = self._queued_out
             if queued and not self._silence_turn and queued.strip():
-                asyncio.get_running_loop().call_soon(self._start_queued, queued)
+                asyncio.get_running_loop().call_soon(self._start_queued, queued, out)
 
-    def _start_queued(self, text: str) -> None:
+    def _start_queued(self, text: str, out: dict[str, Any]) -> None:
         if speech.is_reset(text):
-            self._spawn(self.reset())
+            self._spawn(self.reset(out["mini"], out["client"]))
         elif not speech.is_stop(text):
-            self._room_command(text)
+            self._room_command(text, out["mini"], out["client"])
 
     async def _confirm(self, spoken: str, description: str) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered."""
         gen = self._confirm_gen
-        async with self._confirm_lock:
-            if gen != self._confirm_gen:
-                return False  # the user said stop while this one was waiting its turn
-            return await self._confirm_one(spoken, description)
+        if self._confirm_waiting >= 5:  # a runaway fan-out of tool calls: don't queue forever
+            return False
+        self._confirm_waiting += 1
+        try:
+            async with self._confirm_lock:
+                if gen != self._confirm_gen:
+                    return False  # the user said stop while this one was waiting its turn
+                return await self._confirm_one(spoken, description)
+        finally:
+            self._confirm_waiting -= 1
 
     async def _confirm_one(self, spoken: str, description: str) -> bool | str | None:
         if self._silence_turn:  # the turn was stopped; don't ask about its tools
             return False
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
+        self._confirm_id += 1
+        cid = self._confirm_id
         self._confirm_started = float("inf")  # no speech counts until the question has been asked
+        self._confirm_audience = dict(self._out)
         self._confirm_fut = fut
-        self.emit("confirm", text=description)
-        self._set_state("confirming")
-        self.say(spoken)
-        await self.speaker.wait_idle()
-        self._confirm_started = time.monotonic()
-        ok: bool | str | None
+        ok: bool | str | None = False
         try:
-            ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
-        except TimeoutError:
-            ok = None
-            self.say("No answer, so I skipped that.")
+            self.emit("confirm", id=cid, text=description)
+            self._set_state("confirming")
+            self.say(spoken)
+            await self.speaker.wait_idle()
+            if not fut.done():
+                self._confirm_started = time.monotonic()
+            try:
+                ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
+            except TimeoutError:
+                ok = None
+                self.say("No answer, so I skipped that.")
         finally:
+            # Also on cancellation (the SDK withdrew the request): never leave a stale question.
             self._confirm_fut = None
-        self.emit("confirm_done", approved=bool(ok), always=ok == "always")
-        self._set_state("thinking")
+            self._confirm_started = 0.0
+            self.emit("confirm_done", id=cid, approved=bool(ok), always=ok == "always")
+            self._set_state("thinking" if self.busy else "idle")
         return ok
 
-    def answer_confirm(self, approved: bool | str) -> None:
+    def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> None:
+        """Answer the pending question. With `confirm_id`, only if it's still that
+        question (a late or double tap must not answer the next one)."""
+        if confirm_id is not None and confirm_id != self._confirm_id:
+            return
         if self._confirm_fut is not None and not self._confirm_fut.done():
             self._confirm_fut.set_result(approved)
 
     async def stop(self) -> None:
-        """Stop talking and interrupt the current Claude turn."""
+        """Stop talking, interrupt the current Claude turn, and end whatever is
+        waiting: a question, a session's listen or floor hold, a queued call."""
         self.speaker.stop()
         self.follow_up_until = 0
         self._queued = None
         self._held_words = []
         self._confirm_gen += 1
+        self._stop_event.set()  # cancels floor waits (room turns, queued discuss calls)
+        self._stop_event = asyncio.Event()
         self.answer_confirm(False)
         if self._listen is not None and not self._listen.fut.done():
             self._listen.fut.set_result("stop")
@@ -689,14 +769,16 @@ class Assistant:
             self._discuss_stop.set()
         if self.busy:
             self._silence_turn = True
-            await self.brain.interrupt()
-        elif self.floor.owner() == ROOM:
-            self.floor.release(ROOM)  # a "hang on" or follow-up hold
+            # The SDK interrupt can take a while; don't hold up the next utterance.
+            self._spawn(self.brain.interrupt())
+        owner = self.floor.owner()
+        if owner not in (None, "timer") and not self.floor.active and not (owner == ROOM and self.busy):
+            self.floor.release(owner)  # a hold between exchanges ("hang on", follow-up, a session)
         if self.state == "listening":
             self._set_state("idle")
         self.emit("stopped")
 
-    async def reset(self) -> None:
+    async def reset(self, speak: bool = True, client: str | None = None) -> None:
         await self.stop()
         turn = self._turn
         if turn is not None and not turn.done():
@@ -706,7 +788,9 @@ class Assistant:
                 turn.cancel()
         await self.brain.reset()
         self.emit("reset")
-        self.speaker.speak("Okay, starting a new conversation.")
+        self._reply(
+            "Okay, starting a new conversation.", speak and not self._floor_taken_by_session(), client
+        )
 
     async def shutdown(self) -> None:
         self._silence_turn = True

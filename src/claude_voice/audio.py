@@ -99,6 +99,7 @@ class Microphone:
 
     def __init__(self, device: int | None) -> None:
         self.device = device
+        self._last_frame = time.monotonic()
         self.frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
         self._stream: sd.RawInputStream | None = None
 
@@ -120,7 +121,11 @@ class Microphone:
         name = sd.query_devices(self._stream.device)["name"]
         log.info("microphone: %s", name)
 
+    def seconds_since_frame(self) -> float:
+        return time.monotonic() - self._last_frame
+
     def _put(self, frame: bytes) -> None:
+        self._last_frame = time.monotonic()
         if self.frames.full():
             self.frames.get_nowait()
         self.frames.put_nowait(frame)

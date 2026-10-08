@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast, get_args
@@ -27,6 +28,7 @@ from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SettingSo
 
 from .config import ROOT, ClaudeConfig
 from .rules import Rules
+import contextlib
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +50,10 @@ the intended meaning) and hears your replies through text-to-speech.
   processes yourself. When the user asks to change how you listen, talk, ask
   for approval or behave, call the request_app_change tool with a clear
   description, then tell them briefly that you passed it to the owner.
-- For opening sites and apps, searching Netflix/YouTube/Google, Chrome tabs,
-  full screen, play/pause, volume and timers, use your voice_app tools. They
-  run without asking; raw osascript or open commands need the user's approval.
+- For searching Netflix/YouTube/Google, opening apps, Chrome tabs, full screen,
+  play/pause, volume and timers, use your voice_app tools; they run without
+  asking. Opening a URL, fetching a page and any shell command are confirmed by
+  voice. Never read credentials or keys (~/.ssh, ~/.aws, tokens); that is blocked.
 - Actions that need permission are confirmed by the user's spoken yes or no. If
   they said no, ask what they want instead of retrying; if they didn't answer,
   say so briefly and offer to try again.
@@ -73,21 +76,67 @@ def is_safe_bash(command: str, prefixes: list[str]) -> bool:
     return cmd.split()[0] in prefixes
 
 
+_SPOKEN_PROGRAM = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+_VALUE_OPTIONS = {"-C", "-c", "-R", "--repo", "--git-dir", "--work-tree", "-u", "--user"}
+
+
+def _argv_words(cmd: str) -> list[str]:
+    """The words of a shell command without env assignments, wrappers (env, sudo),
+    options or their values: "env X=1 git -C ~/x push origin" -> git push origin."""
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = cmd.split()
+    while parts and (
+        ("=" in parts[0] and not parts[0].startswith("-")) or parts[0] in ("env", "sudo", "command")
+    ):
+        parts.pop(0)
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part in _VALUE_OPTIONS:
+            i += 2
+            continue
+        if not part.startswith("-"):
+            out.append(Path(part).name if not out else part)
+        i += 1
+    return out
+
+
+def _command_words(cmd: str) -> list[str]:
+    """Program and subcommand, for speaking: "git -C x push origin" -> ["git", "push"]."""
+    return [w for w in _argv_words(cmd) if _SPOKEN_PROGRAM.fullmatch(w)][:2]
+
+
+def _where(path: str) -> str:
+    p = Path(path)
+    return f"{p.name} in {p.parent.name}" if p.parent.name else p.name
+
+
 def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
-    """(short spoken question, fuller description for the web page)."""
+    """(short spoken question, full description for the web page). The page puts
+    the actual command or path first, untruncated, then the agent's description."""
     if name == "Bash":
         cmd = args.get("command", "")
-        what = args.get("description") or cmd
-        return "Run command?", f"run a command: {what[:200]}" + (f" ({cmd[:200]})" if cmd != what else "")
+        words = _command_words(cmd)
+        desc = args.get("description") or ""
+        return (f"Run {' '.join(words)}?" if words else "Run command?"), (
+            f"run: {cmd}" + (f"  ({desc})" if desc else "")
+        )
     if name in ("Edit", "MultiEdit", "NotebookEdit"):
         path = args.get("file_path") or args.get("notebook_path") or "a file"
-        return f"Edit {Path(path).name}?", f"edit {path}"
+        return f"Edit {_where(path)}?", f"edit {path}"
     if name == "Write":
         path = args.get("file_path", "a file")
-        return f"Write {Path(path).name}?", f"write {path}"
-    if name == "WebFetch":
-        host = urlparse(args.get("url", "")).netloc or "the web"
-        return f"Fetch {host}?", f"fetch {args.get('url', '')}"
+        return f"Write {_where(path)}?", f"write {path}"
+    if name in ("WebFetch", "mcp__voice_app__open_url", "mcp__voice_app__new_tab"):
+        url = args.get("url", "")
+        host = urlparse(url).netloc or "the web"
+        verb = "Fetch" if name == "WebFetch" else "Open"
+        return f"{verb} {host}?", f"{verb.lower()} {url}"
     if name.startswith("mcp__"):
         parts = name.split("__")
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
@@ -109,6 +158,70 @@ def _setting_sources(sources: list[str]) -> list[SettingSource]:
     if bad:
         raise ValueError(f"claude.setting_sources entries must be in {allowed}, not {bad}")
     return cast("list[SettingSource]", sources)
+
+
+# Never readable by the voice agent, whatever the user answers.
+SECRET_PATHS = [
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.netrc",
+    "~/.config/gh",
+    "~/.docker/config.json",
+    "~/.kube",
+    "~/Library/Keychains",
+    "~/.claude/.credentials.json",
+    str(ROOT / "state"),
+]
+_FILE_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
+_READ_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "LS")
+# URL-opening voice tools ask (a URL can carry data off the machine); "always" is per site.
+URL_TOOLS = ("mcp__voice_app__open_url", "mcp__voice_app__new_tab")
+
+
+def _canon(path: str, cwd: Path) -> str:
+    """Absolute, resolved, case-folded (macOS paths are case-insensitive)."""
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = cwd / p
+    with contextlib.suppress(OSError):
+        p = p.resolve()
+    return str(p).casefold()
+
+
+def _under(path: str, roots: list[str], cwd: Path) -> bool:
+    c = _canon(path, cwd)
+    return any(c == r or c.startswith(r.rstrip("/") + "/") for r in (_canon(x, cwd) for x in roots))
+
+
+_ASK_PATTERN = re.compile(r"^Bash\((.+?)(?::\*)?\)$")
+
+
+def matches_always_ask(command: str, patterns: list[str]) -> bool:
+    """Does a Bash command match an always-ask rule like "Bash(git push:*)", in any
+    of its usual spellings (with -C/-R options, env, sudo)? Every simple command in
+    a chain is checked ("cd x && git push")."""
+    for piece in re.split(r"&&|\|\||;|\|", command):
+        plain = " ".join(piece.split())
+        words = " ".join(_argv_words(piece))
+        for pat in patterns:
+            m = _ASK_PATTERN.match(pat)
+            if m and (plain.startswith(m.group(1).strip()) or words.startswith(m.group(1).strip())):
+                return True
+    return False
+
+
+def _preview(args: dict[str, Any], limit: int = 200) -> dict[str, Any]:
+    """Tool arguments for the log, without file contents or long strings."""
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        if k in ("content", "new_string", "old_string", "edits", "new_source"):
+            out[k] = f"<{len(str(v))} chars>"
+        elif isinstance(v, str) and len(v) > limit:
+            out[k] = v[:limit] + "…"
+        else:
+            out[k] = v
+    return out
 
 
 class Brain:
@@ -142,17 +255,22 @@ class Brain:
         project = str(ROOT)
         overrides: dict[str, Any] = {
             "permissions": {
-                # The app itself is maintained by its owner session, not by voice.
-                "allow": [*self.tool_names, "WebSearch", "WebFetch"],
-                # "//" = absolute path in Claude Code permission rules ("/x" is relative to the settings file).
+                "allow": [*(t for t in self.tool_names if t not in URL_TOOLS), "WebSearch"],
+                # "//" = absolute path in Claude Code permission rules ("/x" is relative to the
+                # settings file). The app is maintained by its owner session, not by voice;
+                # secrets are never readable; mcp__voice is the desk-session voice tool.
                 "deny": [
-                    f"Edit(/{project}/**)",
-                    f"Write(/{project}/**)",
-                    f"MultiEdit(/{project}/**)",
-                    f"NotebookEdit(/{project}/**)",
+                    *(f"{tool}(/{project}/**)" for tool in _FILE_TOOLS),
+                    *(f"{tool}(/{_canon(p, ROOT)}/**)" for tool in _FILE_TOOLS for p in [project]),
+                    *(
+                        f"Read(/{Path(p).expanduser()}{'/**' if not Path(p).suffix else ''})"
+                        for p in SECRET_PATHS
+                    ),
                     "mcp__voice",
-                ],  # the desk-session voice tool; the room agent already owns the voice
-                "ask": [] if strict else list(self.cfg.always_ask),
+                ],
+                # Ask beats allow, so these always reach the voice prompt even when
+                # ~/.claude settings allow them (verified against the CLI).
+                "ask": ["Bash", "WebFetch", *URL_TOOLS, *self.cfg.always_ask],
             }
         }
         if self.cfg.approval_policy == "settings_no_hooks":
@@ -183,10 +301,9 @@ class Brain:
                     "permissionDecisionReason": reason,
                 }
             }
-        if (
-            name in self.cfg.auto_allow_tools
-            or name in self.tool_names
-            or (name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands))
+        if self._auto_allowed(name, args) or (
+            name not in ("Bash", "WebFetch", *URL_TOOLS)
+            and (name in self.cfg.auto_allow_tools or name in self.tool_names)
         ):
             return {
                 "hookSpecificOutput": {
@@ -208,34 +325,50 @@ class Brain:
             }
         }
 
+    @property
+    def _cwd(self) -> Path:
+        return Path(self.cfg.cwd).expanduser()
+
+    def _auto_allowed(self, name: str, args: dict[str, Any]) -> bool:
+        """Runs without asking: the short list of harmless single commands."""
+        return name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
+
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
         """Calls the voice agent may never make, whatever the user answers."""
+        own_app = "This voice app is maintained by its owner session; use request_app_change instead of changing it."
         if name.startswith("mcp__voice__"):
             return "The voice tool is for other sessions; you already own the voice."
-        if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
-            path = args.get("file_path") or args.get("notebook_path") or ""
-            try:
-                inside = Path(path).expanduser().resolve().is_relative_to(ROOT)
-            except (OSError, ValueError):
-                inside = False
-            if inside:
-                return (
-                    "This voice app is maintained by its owner session; use "
-                    "request_app_change instead of editing it."
-                )
+        path = str(args.get("file_path") or args.get("notebook_path") or args.get("path") or "")
+        if name in _FILE_TOOLS and path and _under(path, [str(ROOT)], self._cwd):
+            return own_app
+        if name in _READ_TOOLS and path and _under(path, SECRET_PATHS, self._cwd):
+            return "Reading credentials and keys is blocked for the voice agent."
+        if name == "Bash":
+            cmd = str(args.get("command", ""))
+            low = cmd.casefold()
+            home = str(Path.home()).casefold()
+            app = str(ROOT).casefold()
+            if app in low or app.replace(home, "~", 1) in low:
+                return own_app
+            for secret in SECRET_PATHS:
+                s = str(Path(secret).expanduser()).casefold()
+                if s in low or s.replace(home, "~", 1) in low:
+                    return "Reading credentials and keys is blocked for the voice agent."
         return None
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
-        if self.rules.matches(name, args):
-            log.info("allowed by saved rule: %s %s", name, args)
+        # "Always ask" commands (git push, PR merge...) can't be skipped by a saved rule.
+        always_ask = name == "Bash" and matches_always_ask(str(args.get("command", "")), self.cfg.always_ask)
+        if not always_ask and self.rules.matches(name, args):
+            log.info("allowed by saved rule: %s %s", name, _preview(args))
             return True
-        log.info("permission request: %s %s", name, args)
+        log.info("permission request: %s %s", name, _preview(args))
         answer = await self.confirm(*describe_tool(name, args))
         if answer == "always":
-            if self.rules.add(name, args) is not None:
+            if not always_ask and self.rules.add(name, args) is not None:
                 self.notify("rules", "Okay, I won't ask about that again.")
             else:
-                self.notify("rules", "Okay, just this once. File edits always ask.")
+                self.notify("rules", "Okay, just this once. That kind of action always asks.")
             return True
         return None if answer is None else bool(answer)
 
@@ -244,6 +377,8 @@ class Brain:
     ) -> PermissionResultAllow | PermissionResultDeny:
         if reason := self._forbidden(name, args):
             return PermissionResultDeny(message=reason)
+        if self._auto_allowed(name, args):
+            return PermissionResultAllow()
         answer = await self._ask(name, args)
         if answer:
             return PermissionResultAllow()
