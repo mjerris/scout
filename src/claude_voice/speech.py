@@ -76,10 +76,11 @@ def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
     name (possibly ""). Otherwise None."""
     raw = text.strip()
     tokens = list(re.finditer(r"[A-Za-z']+", raw))
+    wanted = {n.lower() for n in names}
     seen = 0
     for m in tokens:
         w = m.group().lower()
-        if w in names:
+        if w in wanted:
             return raw[m.end() :].lstrip(" ,.!?:;-")
         if w not in _LEADERS:
             seen += 1
@@ -128,10 +129,19 @@ _AGREEING = re.compile(
 )
 
 
+# Not an answer either way: ask again.
+_UNSURE = re.compile(r"\b(?:not sure|unsure|maybe|i don'?t know|dunno|no idea|hmm+|let me think)\b")
+# Negation flips a yes word: "not okay", "not yes", "never".
+_NEGATION = {"not", "never", "isn't", "aren't", "won't", "shouldn't"}
+
+
 def parse_yes_no(text: str) -> bool | None:
+    """True for yes, False for no, None when unclear (the caller asks again)."""
     w = _AGREEING.sub(" ", " ".join(words(text)))
+    if _UNSURE.search(w):
+        return None
     padded = f" {w} "
-    if any(f" {n} " in padded for n in _NO):
+    if any(f" {n} " in padded for n in _NO) or any(t in _NEGATION for t in w.split()):
         return False
     if any(f" {y} " in padded for y in _YES):
         return True
@@ -139,8 +149,12 @@ def parse_yes_no(text: str) -> bool | None:
 
 
 _WAIT = re.compile(
-    r"[\s,.;:!-]*\b(?:hang on|hold on|wait(?: a (?:sec|second|minute|moment))?|"
-    r"give me a (?:sec|second|minute|moment)|one (?:sec|second|moment)|just a (?:sec|second|moment))"
+    # Unambiguous anywhere at the end ("open Netflix and hang on") ...
+    r"(?:[\s,.;:!-]*\b(?:hang on|give me a (?:sec|second|minute|moment)|one (?:sec|second|moment)|"
+    r"just a (?:sec|second|moment)|wait a (?:sec|second|minute|moment))"
+    # ... but "wait" / "hold on" only on their own or after punctuation, so
+    # "tell them not to wait" and "hold on to it" are ordinary requests.
+    r"|(?:^|[,.;:!?-])\s*(?:wait|hold on))"
     r"[\s,.!?]*$",
     re.I,
 )
@@ -154,10 +168,19 @@ def split_wait(text: str) -> tuple[str, bool]:
     return text[: m.start()].strip(" ,.;:-"), True
 
 
+_ALWAYS_ASK = re.compile(r"\balways (?:ask|check|confirm|tell)\b")
+_ALWAYS_OK = re.compile(r"^(?:always|always allow(?: it| that)?|allow (?:it |that )?always)$")
+
+
 def parse_answer(text: str) -> bool | str | None:
-    """Like parse_yes_no, plus "always" ("yes always", "always allow that")."""
+    """Like parse_yes_no, plus "always" ("yes, always", "always allow that").
+    "Always" never turns an unclear or negative answer into an approval, and
+    "always ask me" means keep asking, not stop asking."""
+    w = " ".join(words(text))
+    if _ALWAYS_ASK.search(w):
+        return parse_yes_no(_ALWAYS_ASK.sub(" ", w))  # "yes, but always ask" is a one-time yes
     answer = parse_yes_no(text)
-    if answer is not False and "always" in words(text):
+    if "always" in w.split() and (answer is True or _ALWAYS_OK.match(w)):
         return "always"
     return answer
 

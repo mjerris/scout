@@ -6,6 +6,7 @@ import asyncio
 import functools
 import logging
 import re
+import threading
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -67,6 +68,7 @@ class Speaker:
         self._tasks: list[asyncio.Task[Any]] = []
         # [start, end, text] per sentence actually played; end is inf while playing.
         self._played: deque[list[Any]] = deque(maxlen=100)
+        self._play_lock = threading.Lock()
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._synth_loop()), asyncio.create_task(self._play_loop())]
@@ -123,8 +125,9 @@ class Speaker:
         self._enqueue(_tone(freqs, self.sr))
 
     def stop(self) -> None:
-        self._gen += 1
-        sd.stop()
+        with self._play_lock:
+            self._gen += 1
+            sd.stop()
 
     async def synth_wav(self, text: str, voice: str | None = None) -> bytes:
         """Synthesize text to WAV bytes without playing it (for the web page)."""
@@ -179,8 +182,11 @@ class Speaker:
         samples, sr = self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
         return samples, sr
 
-    def _play_blocking(self, samples: np.ndarray) -> None:
-        sd.play(samples, self.sr, device=self.device)
+    def _play_blocking(self, samples: np.ndarray, gen: int) -> None:
+        with self._play_lock:  # stop() can't slip in between this check and play()
+            if gen != self._gen:
+                return
+            sd.play(samples, self.sr, device=self.device)
         sd.wait()
 
     async def _play_loop(self) -> None:
@@ -194,7 +200,7 @@ class Speaker:
                     if text:
                         entry = [time.monotonic(), float("inf"), text]
                         self._played.append(entry)
-                    await loop.run_in_executor(self._play_pool, self._play_blocking, samples)
+                    await loop.run_in_executor(self._play_pool, self._play_blocking, samples, gen)
             except Exception:
                 log.exception("playback failed")
             finally:

@@ -329,3 +329,46 @@ def test_hang_on_holds_the_floor() -> None:
 
     taken, owner = run(go())
     assert not taken and owner == "room"
+
+
+def test_talking_over_reply_without_wake_word_is_not_queued() -> None:
+    async def go() -> tuple[str | None, str | None]:
+        r = make()
+        now = time.monotonic()
+        r.spk.played = [(now - 2, now, "Here is the weather for today.")]
+        turn = asyncio.create_task(asyncio.sleep(1))
+        r.a._turn = turn
+        await hear(r, "Here is the weather for today. can you pass the salt", echo=True, started=now - 2)
+        first = r.a._queued
+        await hear(r, "Here is the weather for today. Claude, and tomorrow?", echo=True, started=now - 2)
+        turn.cancel()
+        return first, r.a._queued
+
+    first, second = run(go())
+    assert first is None and second == "and tomorrow"
+
+
+def test_stop_releases_a_hang_on_hold() -> None:
+    async def go() -> tuple[str | None, str]:
+        r = make()
+        r.a._room_command("remind me to, hang on")
+        await r.a.stop()
+        return r.a.floor.owner(), r.a.state
+
+    owner, state = run(go())
+    assert owner is None and state == "idle"
+
+
+def test_quiet_reply_to_session_is_rejected() -> None:
+    async def go() -> dict[str, Any]:
+        r = make()
+        r.a._ref_db = -25.0  # the user's voice level
+        task = asyncio.create_task(r.a.discuss("desk#1", "Deploy?", listen=True, timeout=1))
+        await asyncio.sleep(0.05)
+        r.asr.next = "and now the weather"
+        tv = AudioStats(voiced_ms=1500, level_db=-48, floor_db=-60)  # far quieter than the user
+        now = time.monotonic()
+        await r.a._handle(Utterance(b"\0\0" * 1600, now, False, tv, now + 1.5))
+        return await task
+
+    assert run(go())["status"] == "no_reply"

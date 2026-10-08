@@ -74,7 +74,7 @@ def test_scripts_take_arguments_not_spliced_text() -> None:
         ("always allow that", "always"),
         ("yes", True),
         ("no, not always", False),
-        ("never", None),
+        ("never", False),
     ],
 )
 def test_parse_answer(text: str, answer: bool | str | None) -> None:

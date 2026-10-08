@@ -149,6 +149,7 @@ class Brain:
                     f"Edit(/{project}/**)",
                     f"Write(/{project}/**)",
                     f"MultiEdit(/{project}/**)",
+                    f"NotebookEdit(/{project}/**)",
                     "mcp__voice",
                 ],  # the desk-session voice tool; the room agent already owns the voice
                 "ask": [] if strict else list(self.cfg.always_ask),
