@@ -171,3 +171,14 @@ def test_wait_detection_is_not_fooled(text: str, waiting: bool) -> None:
 
 def test_wake_names_are_case_insensitive() -> None:
     assert strip_wake("Hey Jarvis, lights", ["Claude", "Jarvis"], 3) == "lights"
+
+
+def test_echo_removal_matches_spelled_numbers_to_digits() -> None:
+    # Real case: Whisper wrote our "a hundred" as "100", so our whole question leaked through.
+    spoken = (
+        "That's about a hundred fixes, plus a test file of nearly five hundred real phrases. "
+        "Six hundred fifty tests pass. Approve?"
+    )
+    heard = "That's about 100 fixes, plus a test file of nearly 500 real phrases. 650 tests pass. Approve? Approve."
+    assert strip_own_speech(heard, spoken) == "approve"
+    assert strip_own_speech("I need 5 minutes", "How long?") == "I need 5 minutes"
