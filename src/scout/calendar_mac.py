@@ -22,7 +22,7 @@ _MAX_DAYS = 400
 _MAX_TEXT = 300
 
 
-async def _vcal(*args: str, timeout: float = 15.0, helper: Path | None = None) -> dict[str, Any]:
+async def vcal(*args: str, timeout: float = 15.0, helper: Path | None = None) -> dict[str, Any]:
     exe = helper or VCAL
     if not exe.exists():
         raise ToolError("The calendar helper isn't built; ask the owner to run scripts/build-vcal.sh.")
@@ -43,21 +43,23 @@ async def _vcal(*args: str, timeout: float = 15.0, helper: Path | None = None) -
     return data
 
 
-async def ensure_access(helper: Path | None = None) -> None:
-    """Ask macOS for calendar access the first time (a prompt on the Mac's screen)."""
-    status = (await _vcal("status", helper=helper)).get("status")
+async def ensure_access(helper: Path | None = None, reminders: bool = False) -> None:
+    """Ask macOS for calendar (or reminders) access the first time (a prompt on the Mac's screen)."""
+    flag = ["--reminders"] if reminders else []
+    what, pane = ("Reminders", "Reminders") if reminders else ("Calendar", "Calendars")
+    status = (await vcal("status", *flag, helper=helper)).get("status")
     if status == "full_access":
         return
     if status == "not_determined":
-        res = await _vcal("request", timeout=120, helper=helper)
+        res = await vcal("request", *flag, timeout=120, helper=helper)
         if res.get("granted"):
             return
         raise ToolError(
-            "Calendar access wasn't allowed. A prompt appears on the Mac's screen the first "
-            "time; it can also be turned on in System Settings, Privacy and Security, Calendars."
+            f"{what} access wasn't allowed. A prompt appears on the Mac's screen the first "
+            f"time; it can also be turned on in System Settings, Privacy and Security, {pane}."
         )
     raise ToolError(
-        f"Calendar access is {status}. Turn it on in System Settings, Privacy and Security, Calendars."
+        f"{what} access is {status}. Turn it on in System Settings, Privacy and Security, {pane}."
     )
 
 
@@ -74,11 +76,11 @@ def parse_time(value: Any, what: str) -> dt.datetime:
     return t if t.tzinfo else t.astimezone()  # naive = local
 
 
-def _iso(t: dt.datetime) -> str:
+def iso(t: dt.datetime) -> str:
     return t.isoformat(timespec="seconds")
 
 
-def _text(value: Any, what: str, limit: int = _MAX_TEXT) -> str:
+def text_arg(value: Any, what: str, limit: int = _MAX_TEXT) -> str:
     s = str(value or "").strip()
     if len(s) > limit:
         raise ToolError(f"{what} is too long (max {limit} characters)")
@@ -181,17 +183,17 @@ async def event_data(
     if e - s > dt.timedelta(days=_MAX_DAYS):
         raise ToolError(f"the range can be at most {_MAX_DAYS} days")
     await ensure_access(helper)
-    args = ["events", "--from", _iso(s), "--to", _iso(e), "--limit", "100"]
-    if q := _text(query, "query", 100):
+    args = ["events", "--from", iso(s), "--to", iso(e), "--limit", "100"]
+    if q := text_arg(query, "query", 100):
         args += ["--query", q]
-    if c := _text(calendar, "calendar", 200):
+    if c := text_arg(calendar, "calendar", 200):
         args += ["--calendar", c]
-    return await _vcal(*args, helper=helper)
+    return await vcal(*args, helper=helper)
 
 
 async def calendars(helper: Path | None = None) -> str:
     await ensure_access(helper)
-    cals = (await _vcal("calendars", helper=helper)).get("calendars", [])
+    cals = (await vcal("calendars", helper=helper)).get("calendars", [])
     if not cals:
         return "No calendars on this Mac. Add an account in System Settings, Internet Accounts."
     return "\n".join(
@@ -201,7 +203,7 @@ async def calendars(helper: Path | None = None) -> str:
 
 
 async def create_event(a: dict[str, Any], helper: Path | None = None) -> str:
-    title = _text(a.get("title"), "title", 200)
+    title = text_arg(a.get("title"), "title", 200)
     if not title:
         raise ToolError("title is required")
     all_day = bool(a.get("all_day"))
@@ -216,15 +218,15 @@ async def create_event(a: dict[str, Any], helper: Path | None = None) -> str:
     if end - start > dt.timedelta(days=31):
         raise ToolError("an event can be at most 31 days long")
     await ensure_access(helper)
-    args = ["create", "--title", title, "--start", _iso(start), "--end", _iso(end)]
+    args = ["create", "--title", title, "--start", iso(start), "--end", iso(end)]
     for key, flag, limit in (
         ("calendar", "--calendar", 200),
         ("location", "--location", 200),
         ("notes", "--notes", 2000),
     ):
-        if v := _text(a.get(key), key, limit):
+        if v := text_arg(a.get(key), key, limit):
             args += [flag, v]
     if all_day:
         args.append("--all-day")
-    res = await _vcal(*args, helper=helper)
+    res = await vcal(*args, helper=helper)
     return f"Added {res.get('title', title)} to {res.get('calendar', 'the calendar')}, {_when({**res, 'all_day': False}) if not all_day else start.strftime('%a %b %-d')}."

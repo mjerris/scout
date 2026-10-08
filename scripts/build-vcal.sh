@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the calendar helper (native/vcal) used by the calendar tools.
+# Build the calendar and reminders helper (native/vcal) used by those tools.
 # Output: bin/vcal in Scout's data folder (macOS ties permissions to this exact path). Works from any directory.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,9 +16,9 @@ if ! command -v swiftc >/dev/null; then
 fi
 
 mkdir -p "$OUT"
-# The embedded Info.plist carries the calendar usage text macOS shows in its
+# The embedded Info.plist carries the calendar and reminders usage text macOS shows in its
 # prompt; the signing identifier is what Privacy & Security lists the grant under.
-# requestFullAccessToEvents needs macOS 14.
+# requestFullAccessToEvents/ToReminders need macOS 14.
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name vcal \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$SRC/Info.plist" \
     -o "$OUT/vcal.part" "$SRC/main.swift"

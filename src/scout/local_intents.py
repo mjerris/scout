@@ -1,6 +1,11 @@
 """Tier 0: everyday requests answered by plain code, in well under a second and
-with no tokens: the time and date, timers, volume, play/pause, and what's on the
-calendar today or tomorrow.
+with no tokens: the time and date, timers, volume, play/pause, what's on the
+calendar today or tomorrow, free and busy time ("am I free at 3", "when am I free
+tomorrow"), reminder lists and what's due, and the briefing ("brief me").
+
+Tier 0 only reads. Adding or completing a reminder ("add milk to my shopping
+list") is left to Claude, whose reminder_add / reminder_complete calls are
+confirmed by voice every time; answering it here would skip that question.
 
 Matching is deliberately narrow (whole-request patterns, no guessing): anything
 that doesn't clearly fit goes to Claude as before. Answers are short spoken
@@ -15,7 +20,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, mac
+from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac
+from .freebusy import clock as _clock
+from .freebusy import join
+from .mac import ToolError
 
 _NUMBERS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -44,15 +52,6 @@ def _seconds(n: str, unit: str) -> float:
     return v * 3600 if unit.startswith("h") else v * 60 if unit.startswith("m") else v
 
 
-def _clock(t: dt.datetime) -> str:
-    """'2:37 PM', 'noon', 'midnight', '3 o'clock' style is left to TTS; keep it plain."""
-    if t.hour == 12 and t.minute == 0:
-        return "noon"
-    if t.hour == 0 and t.minute == 0:
-        return "midnight"
-    return t.strftime("%-I:%M %p") if t.minute else t.strftime("%-I %p")
-
-
 def _duration(seconds: float) -> str:
     s = round(seconds)
     h, rem = divmod(s, 3600)
@@ -76,10 +75,13 @@ class Context:
     volume: Callable[..., Awaitable[str]] = mac.volume
     media: Callable[[str], Awaitable[str]] = mac.media
     events: Callable[..., Awaitable[dict[str, Any]]] = calendar_mac.event_data
+    reminders: Callable[..., Awaitable[dict[str, Any]]] = reminders_mac.reminder_data
+    mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
+    hours: Callable[[], freebusy.Hours] = freebusy.work_hours
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
 
 
-Handler = Callable[[re.Match[str], Context], Awaitable[str]]
+Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
 _RULES: list[tuple[re.Pattern[str], Handler]] = []
 
 
@@ -120,7 +122,7 @@ async def _timer(m: re.Match[str], c: Context) -> str:
 @_rule(
     r"(?:set|start) (?:a |an )?" + _NUM + r" " + _UNIT + r" (?:timer|alarm)(?: (?:called|named|for) (.+))?"
 )
-async def _timer2(m: re.Match[str], c: Context) -> str:
+async def _timer2(m: re.Match[str], c: Context) -> str | None:
     return await _timer(m, c)
 
 
@@ -203,6 +205,224 @@ async def _calendar(m: re.Match[str], c: Context) -> str:
         start += dt.timedelta(days=1)
     end = start + dt.timedelta(days=1)
     return speak_events(await c.events(start.isoformat(), end.isoformat()), day)
+
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_DAY = r"(today|tomorrow|(?:on )?(?:this )?(?:" + "|".join(_WEEKDAYS) + r"))"
+_HOURS = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve")
+_MINUTE_WORDS = {"o'clock": 0, "fifteen": 15, "thirty": 30, "forty-five": 45}
+_TIME_RE = (
+    r"(noon|midnight|(?:\d{1,2}|"
+    + "|".join(_HOURS)
+    + r")(?:(?: |:)(?:\d{2}|o'clock|fifteen|thirty|forty-five))?"
+    r"(?: ?(?:am|pm|a m|p m|in the morning|in the afternoon|in the evening|tonight))?)"
+)
+
+
+def _day(word: str | None, now: dt.datetime) -> tuple[dt.date, str]:
+    """(the day, how to say it: "", "today", "tomorrow", "on Thursday")."""
+    if not word:
+        return now.date(), ""
+    w = word.removeprefix("on ").removeprefix("this ")
+    if w == "today":
+        return now.date(), "today"
+    if w == "tomorrow":
+        return now.date() + dt.timedelta(days=1), "tomorrow"
+    ahead = (_WEEKDAYS.index(w) - now.weekday()) % 7
+    return now.date() + dt.timedelta(days=ahead), f"on {w.capitalize()}"
+
+
+def _subject(word: str) -> str:
+    w = word or "today"
+    return w[0].upper() + w[1:]
+
+
+def _first_day(m: re.Match[str]) -> str | None:
+    return next(
+        (
+            g
+            for g in m.groups()
+            if g and g.removeprefix("on ").removeprefix("this ") in (*_WEEKDAYS, "today", "tomorrow")
+        ),
+        None,
+    )
+
+
+def parse_clock(text: str) -> dt.time | None:
+    """A spoken time of day: "3", "3 30 pm", "three thirty", "noon". Without am or pm,
+    1 to 6 is the afternoon."""
+    if text in ("noon", "midnight"):
+        return dt.time(12 if text == "noon" else 0)
+    m = re.fullmatch(r"(\w+)(?:[ :](\d{2}|o'clock|fifteen|thirty|forty-five))?(?: ?(.+))?", text)
+    if not m:
+        return None
+    word, mins, suffix = m.groups()
+    h = int(word) if word.isdigit() else _HOURS.index(word) + 1
+    minute = int(mins) if mins and mins.isdigit() else _MINUTE_WORDS.get(mins or "", 0)
+    if h > 23 or minute > 59:
+        return None
+    pm = suffix in ("pm", "p m", "in the afternoon", "in the evening", "tonight")
+    if suffix and h > 12:
+        return None
+    if pm and h < 12:
+        h += 12
+    elif suffix in ("am", "a m", "in the morning") and h == 12:
+        h = 0
+    elif not suffix and 1 <= h <= 6:
+        h += 12
+    return dt.time(h, minute)
+
+
+async def _day_events(c: Context, day: dt.date) -> list[dict[str, Any]]:
+    data = await c.events(*freebusy.day_range(day, c.now()))
+    events: list[dict[str, Any]] = data.get("events", [])
+    return events
+
+
+@_rule(
+    r"(?:am i|are we) (?:free|available|open) (?:"
+    + _DAY
+    + r" )?(?:at |around )?"
+    + _TIME_RE
+    + r"(?: "
+    + _DAY
+    + r")?"
+)
+async def _free_at(m: re.Match[str], c: Context) -> str | None:
+    when = parse_clock(m.group(2))
+    if when is None:
+        return None
+    now = c.now()
+    day, word = _day(m.group(1) or m.group(3), now)
+    at = dt.datetime.combine(day, when, now.tzinfo)
+    spans = freebusy.timed(await _day_events(c, day))
+    suffix = f" {word}" if word else ""
+    clash = [s for s in spans if s.start < at + dt.timedelta(minutes=30) and s.end > at]
+    if clash:
+        block = freebusy.merge(clash)[0]
+        titles = join([t for s in clash for t in s.titles])
+        return f"No, you have {titles} from {freebusy.span_words(block)}{suffix}."
+    out = f"Yes, you're free at {_clock(at)}{suffix}."
+    later = [s for s in spans if at < s.start < at + dt.timedelta(hours=3)]
+    if later:
+        out += f" {later[0].titles[0]} starts at {_clock(later[0].start)}."
+    return out
+
+
+@_rule(r"(?:when am i free|when(?:'s| is| do i have) (?:my )?(?:some )?free time)(?: " + _DAY + r")?")
+async def _when_free(m: re.Match[str], c: Context) -> str:
+    now = c.now()
+    day, word = _day(m.group(1), now)
+    start, end = c.hours()
+    ws, we = freebusy.window(day, (start, end), now)
+    if ws >= we:
+        return "There's no working time left today."
+    busy = freebusy.merge(freebusy.timed(await _day_events(c, day)))
+    free = freebusy.gaps(busy, ws, we, 15)
+    subject = _subject(word)
+    if not free:
+        return f"{subject} you're booked from {_clock(ws)} to {_clock(we)}."
+    if len(free) == 1 and free[0].start == ws and free[0].end == we:
+        if ws.time() > start:
+            return f"You're free for the rest of the working day, until {_clock(we)}."
+        return f"{subject} you're free all day, from {_clock(ws)} to {_clock(we)}."
+    items = []
+    for g in free[:5]:
+        if g.end == we:
+            items.append(f"after {_clock(g.start)}")
+        elif g.start == ws:
+            items.append(f"until {_clock(g.end)}")
+        else:
+            items.append(freebusy.span_words(g))
+    return f"{subject} you're free {join(items)}."
+
+
+@_rule(r"(?:(?:what|when)(?:'s| is) )?my (?:first|next) free (hour|half hour)(?: " + _DAY + r")?")
+async def _first_free(m: re.Match[str], c: Context) -> str:
+    now = c.now()
+    day, word = _day(m.group(2), now)
+    ws, we = freebusy.window(day, c.hours(), now)
+    what = m.group(1)
+    if ws >= we:
+        return "There's no working time left today."
+    busy = freebusy.merge(freebusy.timed(await _day_events(c, day)))
+    free = freebusy.gaps(busy, ws, we, 30 if what == "half hour" else 60)
+    if not free:
+        return f"You don't have a free {what} {word or 'today'} between {_clock(ws)} and {_clock(we)}."
+    return f"{_subject(word)} your first free {what} starts at {_clock(free[0].start)}; you're free until {_clock(free[0].end)}."
+
+
+@_rule(
+    r"how (?:busy|full|packed) (?:is my (?:day|calendar|schedule)(?: "
+    + _DAY
+    + r")?|am i(?: "
+    + _DAY
+    + r")?|is "
+    + _DAY
+    + r")"
+)
+async def _how_busy(m: re.Match[str], c: Context) -> str:
+    now = c.now()
+    day, word = _day(_first_day(m), now)
+    return freebusy.day_load(await _day_events(c, day), day, c.hours(), now, _subject(word))
+
+
+@_rule(
+    r"(?:brief me|(?:give me |read me )?(?:my |the |a )?(?:morning |daily )?briefing|"
+    r"what(?:'s| does) my day look like|how(?:'s| is| does) my day look(?:ing)?(?: like)?)(?: today)?"
+)
+async def _briefing(m: re.Match[str], c: Context) -> str:
+    return await briefing.build(c.now(), c.events, c.reminders, c.mail, c.hours())
+
+
+@_rule(r"(?:what(?:'s| is) on|read(?: me)?|check) (?:my |the )?((?:[a-z0-9'-]+ ){0,2}?[a-z0-9'-]+) list")
+async def _reminder_list(m: re.Match[str], c: Context) -> str | None:
+    name = m.group(1)
+    if name in ("my", "the", "reading", "mailing", "email", "mail", "contact", "contacts"):
+        return None
+    try:
+        items = (await c.reminders(name)).get("reminders", [])
+    except ToolError as exc:
+        if str(exc).startswith("no reminder list matches"):
+            return f"You don't have a reminder list called {name}."
+        raise
+    if not items:
+        return f"Your {name} list is empty."
+    titles = [r.get("title") or "an untitled item" for r in items[:8]]
+    if len(items) > 8:
+        return f"Your {name} list has {len(items)} things, starting with {join(titles)}."
+    return f"Your {name} list has {join(titles)}."
+
+
+@_rule(
+    r"(?:(?:what are|read(?: me)?|what(?:'s| is)) my reminders(?: (?:for )?" + _DAY + r")?|"
+    r"what reminders do i have(?: " + _DAY + r")?|(?:do i have )?any reminders(?: " + _DAY + r")?|"
+    r"what(?:'s| is) due " + _DAY + r")"
+)
+async def _reminders_due(m: re.Match[str], c: Context) -> str:
+    now = c.now()
+    word = _first_day(m)
+    if not word:
+        items = (await c.reminders(None)).get("reminders", [])
+        if not items:
+            return "You have no open reminders."
+        late = sum(reminders_mac.is_overdue(r, now) for r in items)
+        titles = [r.get("title") or "an untitled reminder" for r in items[:5]]
+        more = f", and {len(items) - 5} more" if len(items) > 5 else ""
+        head = f"You have {len(items)} open reminder{'s' * (len(items) != 1)}" + (
+            f", {late} overdue" if late else ""
+        )
+        return f"{head}: {join(titles) if not more else ', '.join(titles)}{more}."
+    day, spoken = _day(word, now)
+    before = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(0), now.tzinfo)
+    items = (await c.reminders(None, False, before.isoformat())).get("reminders", [])
+    if day == now.date():
+        return briefing.reminders_part(items, now)
+    due = [r for r in items if (t := reminders_mac.due_time(r)) and t.date() == day]
+    if not due:
+        return f"No reminders due {spoken}."
+    titles = [r.get("title") or "an untitled reminder" for r in due[:5]]
+    return f"{_subject(spoken)} you have {len(due)} reminder{'s' * (len(due) != 1)} due: {join(titles)}."
 
 
 _REPEAT = (
