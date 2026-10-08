@@ -24,3 +24,4 @@ models/*.part
 .env.*
 .claude/worktrees/
 native/voiceio/build/
+native/vcal/build/

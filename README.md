@@ -153,6 +153,7 @@ push-to-talk decodes browser recordings with it).
 ```sh
 scripts/fetch-models.sh     # Kokoro voice (~350 MB), Silero VAD, smart-turn; Whisper (~1.6 GB) downloads on first run
 scripts/build-voiceio.sh    # optional: the Apple voice-processing helper (audio.backend = "apple")
+scripts/build-vcal.sh       # optional: calendar access (EventKit helper; see Calendar below)
 cp config.example.toml config.toml   # optional; every key has a default
 scripts/run.sh              # foreground run; allow microphone access when macOS asks
 ```
@@ -210,3 +211,19 @@ input_device` and `output_device`. Other useful knobs in `config.toml`:
 
 Without headphones the mic hears the assistant too. Speech that starts while it
 is talking is ignored, except "Claude, stop".
+
+## Calendar
+
+The assistant reads the Mac's own calendar store, so any account synced to
+this Mac works: add Google (or iCloud, Exchange) in System Settings → Internet
+Accounts with Calendars on. macOS holds the account credentials; the app never
+sees a token.
+
+- `scripts/build-vcal.sh` builds the helper (`native/vcal`, EventKit).
+- The first calendar question shows a macOS "allow calendar access" prompt on
+  the Mac's screen. Allow it once; it's listed afterwards under System Settings →
+  Privacy & Security → Calendars.
+- Reading (`calendar_events`, `calendar_list`) runs without asking. Adding an
+  event (`calendar_create_event`) is confirmed by voice every time ("Add
+  Dentist, Friday October 9, 3:00 PM, to Home?"); "yes, always" doesn't apply.
+  There is no edit or delete.

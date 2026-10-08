@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import re
@@ -51,8 +52,9 @@ the intended meaning) and hears your replies through text-to-speech.
   for approval or behave, call the request_app_change tool with a clear
   description, then tell them briefly that you passed it to the owner.
 - For searching Netflix/YouTube/Google, opening apps, Chrome tabs, full screen,
-  play/pause, volume and timers, use your voice_app tools; they run without
-  asking. Opening a URL, fetching a page and any shell command are confirmed by
+  play/pause, volume, timers and reading the calendar, use your voice_app tools;
+  they run without asking. Adding a calendar event is confirmed by voice; say the
+  day and time back in plain words. Opening a URL, fetching a page and any shell command are confirmed by
   voice. Never read credentials or keys (~/.ssh, ~/.aws, tokens); that is blocked.
 - Actions that need permission are confirmed by the user's spoken yes or no. If
   they said no, ask what they want instead of retrying; if they didn't answer,
@@ -137,11 +139,29 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
         host = urlparse(url).netloc or "the web"
         verb = "Fetch" if name == "WebFetch" else "Open"
         return f"{verb} {host}?", f"{verb.lower()} {url}"
+    if name in CALENDAR_WRITE_TOOLS:
+        return _describe_event(args)
     if name.startswith("mcp__"):
         parts = name.split("__")
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
         return f"Use {tool}?", f"use {tool} from {server}"
     return f"Use {name}?", f"use the {name} tool"
+
+
+def _describe_event(args: dict[str, Any]) -> tuple[str, str]:
+    title = str(args.get("title") or "an event")[:80]
+    cal = str(args.get("calendar") or "your calendar")[:60]
+    try:
+        start = dt.datetime.fromisoformat(str(args.get("start", "")))
+        when = start.strftime("%A %B %-d") + ("" if args.get("all_day") else start.strftime(", %-I:%M %p"))
+    except ValueError:
+        when = str(args.get("start", ""))[:40]
+    detail = ", ".join(
+        f"{k}: {args[k]}"
+        for k in ("title", "start", "end", "all_day", "calendar", "location", "notes")
+        if args.get(k) not in (None, "")
+    )
+    return f"Add {title}, {when}, to {cal}?", f"add calendar event: {detail}"
 
 
 def _permission_mode(mode: str) -> PermissionMode | None:
@@ -177,6 +197,9 @@ _FILE_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 _READ_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "LS")
 # URL-opening voice tools ask (a URL can carry data off the machine); "always" is per site.
 URL_TOOLS = ("mcp__voice_app__open_url", "mcp__voice_app__new_tab")
+# Adding to the user's calendar asks every time; no "always" rule can skip it.
+CALENDAR_WRITE_TOOLS = ("mcp__voice_app__calendar_create_event",)
+ASKING_TOOLS = (*URL_TOOLS, *CALENDAR_WRITE_TOOLS)
 
 
 def _canon(path: str, cwd: Path) -> str:
@@ -255,7 +278,7 @@ class Brain:
         project = str(ROOT)
         overrides: dict[str, Any] = {
             "permissions": {
-                "allow": [*(t for t in self.tool_names if t not in URL_TOOLS), "WebSearch"],
+                "allow": [*(t for t in self.tool_names if t not in ASKING_TOOLS), "WebSearch"],
                 # "//" = absolute path in Claude Code permission rules ("/x" is relative to the
                 # settings file). The app is maintained by its owner session, not by voice;
                 # secrets are never readable; mcp__voice is the desk-session voice tool.
@@ -270,7 +293,7 @@ class Brain:
                 ],
                 # Ask beats allow, so these always reach the voice prompt even when
                 # ~/.claude settings allow them (verified against the CLI).
-                "ask": ["Bash", "WebFetch", *URL_TOOLS, *self.cfg.always_ask],
+                "ask": ["Bash", "WebFetch", *ASKING_TOOLS, *self.cfg.always_ask],
             }
         }
         if self.cfg.approval_policy == "settings_no_hooks":
@@ -302,7 +325,7 @@ class Brain:
                 }
             }
         if self._auto_allowed(name, args) or (
-            name not in ("Bash", "WebFetch", *URL_TOOLS)
+            name not in ("Bash", "WebFetch", *ASKING_TOOLS)
             and (name in self.cfg.auto_allow_tools or name in self.tool_names)
         ):
             return {
@@ -358,7 +381,9 @@ class Brain:
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
         # "Always ask" commands (git push, PR merge...) can't be skipped by a saved rule.
-        always_ask = name == "Bash" and matches_always_ask(str(args.get("command", "")), self.cfg.always_ask)
+        always_ask = name in CALENDAR_WRITE_TOOLS or (
+            name == "Bash" and matches_always_ask(str(args.get("command", "")), self.cfg.always_ask)
+        )
         if not always_ask and self.rules.matches(name, args):
             log.info("allowed by saved rule: %s %s", name, _preview(args))
             return True
