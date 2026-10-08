@@ -792,13 +792,16 @@ class Assistant:
             )
             self.chime("ack")
             async for kind, data in self.brain.ask(await self._with_context(text)):
-                if kind == "text":
-                    self.emit("claude", text=data)
+                if kind in ("speak", "text"):
+                    if kind == "text":
+                        self.emit("claude", text=data)
                     if not self._silence_turn:
                         said = speech.to_speech(data)
                         if said:
                             self._set_state("speaking")
                             self.say(said)
+                elif kind == "spoken":  # its sentences were spoken as they arrived
+                    self.emit("claude", text=data)
                 elif kind == "tool":
                     name, args = data
                     self.emit("tool", name=name, input=_preview(args))

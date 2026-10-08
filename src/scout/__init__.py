@@ -91,6 +91,16 @@ async def _amain(cfg: config_mod.Config) -> None:
 
     assistant = Assistant(cfg, asr, speaker, echo_cancelled=io.name != "plain")
     assistant.echo_stats = io.stats
+
+    async def warm() -> None:
+        try:
+            await assistant.brain.warm()
+        except Exception:
+            logging.getLogger("scout").exception(
+                "warming the Claude session failed; it connects on first use"
+            )
+
+    assistant._spawn(warm())
     speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant) if cfg.web.enabled else None
     seg = _segmenter(cfg)

@@ -25,7 +25,13 @@ from claude_agent_sdk import (
     ToolPermissionContext,
     ToolUseBlock,
 )
-from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SdkPluginConfig, SettingSource
+from claude_agent_sdk.types import (
+    McpSdkServerConfig,
+    PermissionMode,
+    SdkPluginConfig,
+    SettingSource,
+    StreamEvent,
+)
 
 from .config import DATA, ROOT, ClaudeConfig
 from .rules import Rules
@@ -178,6 +184,20 @@ def _describe_event(args: dict[str, Any]) -> tuple[str, str]:
         if args.get(k) not in (None, "")
     )
     return f"Add {title}, {when}, to {cal}?", f"add calendar event: {detail}"
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+(?=[A-Z0-9\"'(])")
+
+
+def split_sentences(text: str, min_chars: int = 24) -> tuple[list[str], str]:
+    """Complete sentences from streamed text, and the unfinished rest. Short pieces
+    ("Okay." "Dr.") wait to be joined with the next so speech doesn't stutter."""
+    out, start = [], 0
+    for m in _SENTENCE_END.finditer(text):
+        if m.start() - start >= min_chars:
+            out.append(text[start : m.start()].strip())
+            start = m.end()
+    return out, text[start:]
 
 
 def room_plugins(mode: str, home: Path | None = None) -> list[SdkPluginConfig]:
@@ -361,6 +381,7 @@ class Brain:
             setting_sources=_setting_sources(self.cfg.setting_sources),
             system_prompt={"type": "preset", "preset": "claude_code", "append": append},
             can_use_tool=self._can_use_tool,
+            include_partial_messages=True,  # stream words, so the first sentence is spoken early
             # Strict policy: the hook gates every tool call, ahead of any allow
             # rules inherited from ~/.claude settings.
             hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=900)]} if strict else None,
@@ -468,20 +489,46 @@ class Brain:
             log.info("Claude session connected")
         return self.client
 
+    async def warm(self) -> None:
+        """Connect ahead of the first request (saves ~0.6 s on it)."""
+        async with self._lock:
+            await self._ensure()
+
     async def ask(self, text: str) -> AsyncIterator[tuple[str, Any]]:
-        """Yields ("text", str), ("tool", (name, input)) and finally ("result", ResultMessage)."""
+        """Yields ("speak", sentence) as each sentence is written, then ("text", str)
+        for a finished message ("spoken", str when its sentences were already
+        yielded), ("tool", (name, input)), and finally ("result", ResultMessage)."""
         async with self._lock:
             client = await self._ensure()
             await client.query(text)
+            pending, streamed = "", False
             async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
+                if isinstance(msg, StreamEvent):
+                    if msg.parent_tool_use_id:
+                        continue
+                    ev = msg.event
+                    if (
+                        ev.get("type") == "content_block_delta"
+                        and ev.get("delta", {}).get("type") == "text_delta"
+                    ):
+                        pending += ev["delta"].get("text", "")
+                        sentences, pending = split_sentences(pending)
+                        for s in sentences:
+                            streamed = True
+                            yield "speak", s
+                    elif ev.get("type") == "content_block_stop" and pending.strip():
+                        streamed = True
+                        yield "speak", pending
+                        pending = ""
+                elif isinstance(msg, AssistantMessage):
                     if msg.parent_tool_use_id:  # subagent chatter
                         continue
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text.strip():
-                            yield "text", block.text
+                            yield ("spoken" if streamed else "text"), block.text
                         elif isinstance(block, ToolUseBlock):
                             yield "tool", (block.name, block.input)
+                    pending, streamed = "", False
                 elif isinstance(msg, ResultMessage):
                     self.session_id = msg.session_id
                     yield "result", msg

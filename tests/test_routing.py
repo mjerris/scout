@@ -723,3 +723,50 @@ def test_unknown_shared_tool_is_refused() -> None:
         return await make().a.run_shared_tool("proj#42", "Bash", {"command": "ls"})
 
     assert run(go())["status"] == "error"
+
+
+# --- speaking while Claude writes ---------------------------------------------------------------
+
+
+def test_sentences_are_split_as_they_stream() -> None:
+    from scout.brain import split_sentences
+
+    done, rest = split_sentences("You're out of office all day, through Sunday. The only other thing on")
+    assert done == ["You're out of office all day, through Sunday."] and rest == "The only other thing on"
+    done, rest = split_sentences("Okay. Dr. Smith moved your appointment to Friday at noon. And")
+    assert done == ["Okay. Dr. Smith moved your appointment to Friday at noon."]  # no stutter on short bits
+    assert split_sentences("It's 3 PM") == ([], "It's 3 PM")
+
+
+def test_streamed_sentences_are_spoken_once_and_the_message_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def go() -> tuple[list[str], list[str]]:
+        r = make()
+        r.a.cfg.claude.local_first = False
+
+        async def fake_ask(text: str) -> AsyncIterator[tuple[str, Any]]:
+            yield "speak", "You're out of office all day, through Sunday."
+            yield "speak", "The only other thing is the standup at four."
+            yield (
+                "spoken",
+                "You're out of office all day, through Sunday. The only other thing is the standup at four.",
+            )
+
+        monkeypatch.setattr(r.a.brain, "ask", fake_ask)
+        logged: list[str] = []
+        real_emit = r.a.emit
+
+        def emit(kind: str, **data: Any) -> None:
+            if kind == "claude":
+                logged.append(data["text"])
+            real_emit(kind, **data)
+
+        monkeypatch.setattr(r.a, "emit", emit)
+        await r.a._run_turn("what's on today", speak=True)
+        return r.spk.said, logged
+
+    said, logged = run(go())
+    spoken = [s for s in said if "office" in s or "standup" in s]
+    assert len(spoken) == 2  # each sentence once, not again with the whole message
+    assert len(logged) == 1 and logged[0].startswith("You're out of office")
