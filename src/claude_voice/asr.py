@@ -16,8 +16,11 @@ log = logging.getLogger(__name__)
 
 
 class Transcriber:
-    def __init__(self, model: str, language: str, max_compression_ratio: float = 2.4) -> None:
+    def __init__(
+        self, model: str, language: str, max_compression_ratio: float = 2.4, prompt: str = ""
+    ) -> None:
         self.max_compression_ratio = max_compression_ratio
+        self.prompt = prompt or None  # default initial_prompt for transcribe()
         self.model = model
         self.language = language or None
         # MLX work stays on one thread.
@@ -50,6 +53,7 @@ class Transcriber:
         )
 
     async def transcribe(self, pcm: bytes, prompt: str | None = None) -> Transcript:
+        prompt = prompt if prompt is not None else self.prompt
         audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
         return await asyncio.get_running_loop().run_in_executor(self._pool, self._run, audio, prompt)
 

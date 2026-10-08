@@ -80,6 +80,10 @@ class GateConfig:
 class AsrConfig:
     model: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "en"
+    # Context Whisper sees before each clip. Short clips give it none, and on this
+    # mic it heard "Hey Claude" as "a clog"/"hey cloud" in 2 of 7 tries; with this
+    # prompt, 7 of 7, other clips unchanged, and no invented wake words on noise.
+    prompt: str = "Hey Claude."
 
 
 @dataclass
