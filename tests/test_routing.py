@@ -16,6 +16,7 @@ import claude_voice.assistant as assistant_mod
 from claude_voice.asr import Transcriber
 from claude_voice.assistant import Assistant
 from claude_voice.audio import Utterance
+from claude_voice.audio_io import AudioIO
 from claude_voice.config import Config
 from claude_voice.gate import AudioStats, Transcript
 from claude_voice.pronounce import Pronouncer, parse
@@ -499,3 +500,115 @@ def test_listening_state_times_out() -> None:
         return first, r.a.state
 
     assert run(go()) == ("listening", "idle")
+
+
+class FakeIO:
+    """An AudioIO stand-in: play() finishes after a short delay unless stopped."""
+
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.played: list[float] = []
+        self.stopped = 0
+        self._pending: list[Any] = []
+        self.frames: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def play(self, samples: Any, sample_rate: int) -> Any:
+        from claude_voice.audio_io import PlayHandle
+
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        h = PlayHandle(len(self.played) + 1, len(samples) / sample_rate, fut)
+        self.played.append(h.seconds)
+        self._pending.append(h)
+
+        def finish() -> None:
+            if not fut.done():
+                fut.set_result(True)
+
+        asyncio.get_running_loop().call_later(0.05, finish)
+        return h
+
+    def stop_playback(self) -> None:
+        self.stopped += 1
+        for h in self._pending:
+            if not h.done.done():
+                h.done.set_result(False)
+
+    @property
+    def playing(self) -> bool:
+        return any(not h.done.done() for h in self._pending)
+
+
+def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
+    import numpy as np
+
+    async def go() -> tuple[list[float], int, bool]:
+        io = FakeIO()
+        spk = Speaker.__new__(Speaker)
+        # minimal init of the playback side only
+        spk.io = cast("AudioIO", io)  # implements the parts the playback loop uses
+        spk.sr = 24000
+        spk._audio = asyncio.Queue()
+        spk._gen = 0
+        spk._pending = 0
+        spk._playing = False
+        spk._last_end = 0.0
+        spk._idle = asyncio.Event()
+        spk._idle.set()
+        spk._played = deque(maxlen=10)
+        spk._play_lock = __import__("threading").Lock()
+        spk.consecutive_failures = 0
+        task = asyncio.create_task(spk._play_loop())
+        spk._pending = 1
+        spk._idle.clear()
+        spk._audio.put_nowait((0, np.zeros(2400, np.float32), "hello"))
+        await asyncio.sleep(0.01)
+        spk.stop()
+        await asyncio.sleep(0.01)
+        task.cancel()
+        return io.played, io.stopped, spk._idle.is_set()
+
+    played, stopped, idle = run(go())
+    assert played == [0.1] and stopped == 1 and idle
+
+
+def test_barge_in_stops_a_room_reply_and_opens_a_follow_up() -> None:
+    async def go() -> tuple[int, bool]:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.busy = True  # a reply is playing
+        r.a.on_speech_onset(while_speaking=True)
+        await asyncio.sleep(0.05)
+        return r.spk.stopped, r.a.follow_up_until > time.monotonic()
+
+    stopped, follow_up = run(go())
+    assert stopped >= 1 and follow_up
+
+
+def test_no_barge_in_without_an_echo_canceller() -> None:
+    async def go() -> int:
+        r = make()
+        r.spk.busy = True
+        r.a.on_speech_onset(while_speaking=True)  # plain backend: this is our own echo
+        await asyncio.sleep(0.05)
+        return r.spk.stopped
+
+    assert run(go()) == 0
+
+
+def test_barge_into_a_session_message_becomes_its_reply() -> None:
+    async def go() -> dict[str, Any]:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.idle_delay = 0.3  # a long message is playing
+        task = asyncio.create_task(r.a.discuss("desk#1", "Here are the three options...", timeout=2))
+        await asyncio.sleep(0.05)
+        r.spk.busy = True
+        onset = time.monotonic()
+        r.a.on_speech_onset(while_speaking=True)
+        await asyncio.sleep(0.3)
+        r.spk.busy = False
+        await hear(r, "the second one", started=onset)
+        return await task
+
+    assert run(go()) == {"status": "ok", "text": "the second one"}

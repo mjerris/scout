@@ -59,9 +59,18 @@ class _Listen:
 
 class Assistant:
     def __init__(
-        self, cfg: Config, asr: Transcriber, speaker: Speaker, pronounce: Pronouncer | None = None
+        self,
+        cfg: Config,
+        asr: Transcriber,
+        speaker: Speaker,
+        pronounce: Pronouncer | None = None,
+        echo_cancelled: bool = False,
     ) -> None:
         self.cfg = cfg
+        # With an echo-cancelling voice layer the mic no longer hears our own voice,
+        # so talk-over is real speech (barge-in) and text-based echo stripping is off.
+        self.echo_cancelled = echo_cancelled
+        self._message_barged: float | None = None  # onset of a barge into a session's message
         self.asr = asr
         self.speaker = speaker
         self.pronounce = pronounce or Pronouncer(ROOT / "pronounce.txt")
@@ -262,7 +271,11 @@ class Assistant:
 
         # Echo only if our speech actually overlapped the clip; a reply that merely
         # starts in the echo tail is the user's alone (and may reuse our words).
-        echo = utt.echo and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
+        echo = (
+            not self.echo_cancelled
+            and utt.echo
+            and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
+        )
         if echo:
             # The mic heard the assistant too: "<wake> stop" always counts;
             # otherwise keep only the words that weren't ours.
@@ -570,8 +583,11 @@ class Assistant:
             if not listen:
                 return {"status": "ok", "spoke": bool(message)}
             fut = asyncio.get_running_loop().create_future()
-            lst = self._listen = _Listen(agent, fut, time.monotonic(), [])
-            self.speaker.chime("wake")
+            barged, self._message_barged = self._message_barged, None
+            # If the user talked over the message, what they're saying is the reply.
+            lst = self._listen = _Listen(agent, fut, (barged - 0.2) if barged else time.monotonic(), [])
+            if barged is None:
+                self.speaker.chime("wake")
             deadline = time.monotonic() + timeout
             while True:
                 try:
@@ -601,6 +617,30 @@ class Assistant:
             self._discuss_stop = None
             self.floor.release(agent, hold=hold and not stopped.is_set() and not cancelled)
             self._set_state("thinking" if self.busy else "idle")
+
+    def on_speech_onset(self, while_speaking: bool) -> None:
+        """Called by the mic loop when speech starts. With an echo canceller,
+        speech while we're talking is the user talking over us: stop."""
+        if not (while_speaking and self.echo_cancelled and self.cfg.audio.barge_in):
+            return
+        if not self.speaker.busy or self.mic_muted:
+            return
+        self._spawn(self._barge_in())
+
+    async def _barge_in(self) -> None:
+        onset = time.monotonic()
+        log.info("barge-in: stopping playback")
+        self.emit("barge")
+        if self.state == "agent" and self._listen is None:
+            # A session's message is playing: cut it short and listen for the reply.
+            self._message_barged = onset
+            self.speaker.stop()
+            return
+        heard_in_room = self._out["mini"]
+        await self.stop()
+        if heard_in_room:
+            # What the user is saying now is a follow-up; it needs no wake word.
+            self.follow_up_until = onset + self.cfg.wake.follow_up_seconds
 
     def voice_status(self) -> dict[str, Any]:
         return {

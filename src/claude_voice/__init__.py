@@ -9,12 +9,12 @@ import logging.handlers
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import config as config_mod
 
 if TYPE_CHECKING:
-    from .audio import Microphone
+    from .audio_io import AudioIO
     from .tts import Speaker
 
 
@@ -45,7 +45,8 @@ async def _amain(cfg: config_mod.Config) -> None:
     from . import web
     from .asr import Transcriber
     from .assistant import Assistant
-    from .audio import Microphone, Segmenter, resolve_device, utterances
+    from . import audio_io
+    from .audio import utterances
     from .tts import Speaker
 
     log = logging.getLogger("claude_voice")
@@ -55,12 +56,21 @@ async def _amain(cfg: config_mod.Config) -> None:
         if not cfg.path(p).exists():
             raise SystemExit(f"missing {p}; run scripts/fetch-models.sh")
 
+    events: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+
+    def on_audio_event(kind: str, data: dict[str, Any]) -> None:
+        log.info("voice layer %s: %s", kind, data)
+        events.put_nowait((kind, data))
+
+    io = audio_io.create(cfg.audio.backend, cfg.audio.input_device, cfg.audio.output_device)
+    await io.start(loop, on_audio_event)
+    log.info("voice layer: %s", io.name)
     speaker = Speaker(
         str(cfg.path(cfg.tts.model)),
         str(cfg.path(cfg.tts.voices)),
         cfg.tts.voice,
         cfg.tts.speed,
-        resolve_device(cfg.audio.output_device, "output"),
+        io,
         cfg.audio.echo_tail_ms,
         cfg.tts.chimes,
     )
@@ -68,15 +78,10 @@ async def _amain(cfg: config_mod.Config) -> None:
     asr = Transcriber(cfg.asr.model, cfg.asr.language, cfg.gate.max_compression_ratio)
     await asr.warmup()
 
-    assistant = Assistant(cfg, asr, speaker)
+    assistant = Assistant(cfg, asr, speaker, echo_cancelled=io.name != "plain")
     speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant) if cfg.web.enabled else None
-
-    mic = Microphone(resolve_device(cfg.audio.input_device, "input"))
-    mic.start(loop)
-    seg = Segmenter(
-        cfg.audio.vad_aggressiveness, cfg.audio.silence_ms, cfg.audio.min_speech_ms, cfg.audio.max_utterance_s
-    )
+    seg = _segmenter(cfg)
 
     stop = asyncio.Event()
 
@@ -90,9 +95,11 @@ async def _amain(cfg: config_mod.Config) -> None:
         loop.add_signal_handler(sig, on_signal)
 
     tasks = [
-        asyncio.create_task(utterances(mic, seg, speaker.is_echo, assistant.utterances), name="mic"),
+        asyncio.create_task(
+            utterances(io, seg, speaker.is_echo, assistant.utterances, assistant.on_speech_onset), name="mic"
+        ),
         asyncio.create_task(assistant.run(), name="assistant"),
-        asyncio.create_task(_watch(mic, speaker), name="watchdog"),
+        asyncio.create_task(_watch(io, speaker, events), name="watchdog"),
     ]
     log.info('ready — say "Hey Claude, …"')
     speaker.chime("done")
@@ -108,7 +115,6 @@ async def _amain(cfg: config_mod.Config) -> None:
         )
 
     log.info("shutting down")
-    mic.stop()
     speaker.stop()
     for t in [*tasks, stopper]:
         t.cancel()
@@ -121,21 +127,58 @@ async def _amain(cfg: config_mod.Config) -> None:
             await asyncio.wait_for(runner.cleanup(), 3)
         except Exception:
             log.exception("web shutdown")
+    try:
+        await asyncio.wait_for(io.close(), 3)
+    except Exception:
+        log.exception("voice layer shutdown")
     if failed is not None:
         raise SystemExit(1)
 
 
-async def _watch(mic: Microphone, speaker: Speaker) -> None:
+async def _watch(io: AudioIO, speaker: Speaker, events: asyncio.Queue[tuple[str, dict[str, Any]]]) -> None:
     """Return (ending the app, so launchd restarts it) when the mic stops
-    delivering frames or playback keeps failing, e.g. a device was unplugged."""
+    delivering frames, playback keeps failing, or the voice layer gives up."""
+    log = logging.getLogger("claude_voice")
     while True:
-        await asyncio.sleep(2)
-        if mic.seconds_since_frame() > 10:
-            logging.getLogger("claude_voice").error("no audio from the microphone for 10 s")
+        try:
+            kind, data = await asyncio.wait_for(events.get(), 2)
+            if kind == "failed":
+                log.error("voice layer failed: %s", data)
+                return
+            continue
+        except TimeoutError:
+            pass
+        if io.seconds_since_frame() > 10:
+            log.error("no audio from the microphone for 10 s")
             return
         if speaker.consecutive_failures >= 5:
-            logging.getLogger("claude_voice").error("audio playback failed 5 times in a row")
+            log.error("audio playback failed 5 times in a row")
             return
+
+
+def _segmenter(cfg: config_mod.Config) -> Any:
+    """Smart end-of-turn detection when its models are present, else silence-based."""
+    from .audio import Segmenter
+
+    a = cfg.audio
+    if a.turn_detection == "smart":
+        try:
+            from .turn_models import EndOfTurnSegmenter
+
+            return EndOfTurnSegmenter.from_models(
+                cfg.path("models"),
+                min_pause_ms=a.min_pause_ms,
+                max_pause_ms=a.max_pause_ms,
+                threshold=a.turn_threshold,
+                max_utterance_s=a.max_utterance_s,
+            )
+        except (ImportError, FileNotFoundError, AttributeError) as exc:
+            logging.getLogger("claude_voice").warning(
+                "smart end-of-turn unavailable (%s); using silence-based; run scripts/fetch-models.sh", exc
+            )
+    elif a.turn_detection != "simple":
+        raise ValueError(f"audio.turn_detection must be smart or simple, not {a.turn_detection!r}")
+    return Segmenter(a.vad_aggressiveness, a.silence_ms, a.min_speech_ms, a.max_utterance_s)
 
 
 def main() -> None:
