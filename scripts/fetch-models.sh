@@ -2,6 +2,7 @@
 # Download the model files into Scout's data folder (models/). Whisper downloads itself on first run.
 #   Kokoro TTS (~350 MB), Silero VAD v5 (2 MB, MIT), Pipecat smart-turn v3.2 CPU (8 MB, BSD-2).
 set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"  # config, state, logs, models, helpers
 mkdir -p "$DATA/models"
 cd "$DATA"
@@ -47,4 +48,10 @@ fetch smart-turn-v3.2-cpu.onnx \
   https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx \
   2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f
 
+# Tier 1 local model (claude.local_model): Qwen3 4B Instruct, MLX 4-bit, ~2.3 GB, Apache-2.0.
+# Goes into the shared Hugging Face cache, next to the Whisper model.
+if [ "${SCOUT_SKIP_TIER1:-}" != 1 ]; then
+  UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$ROOT" python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('mlx-community/Qwen3-4B-Instruct-2507-4bit')" >/dev/null
+fi
 echo "models ready"

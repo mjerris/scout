@@ -147,6 +147,19 @@ def format_list(data: dict[str, Any], what: str) -> str:
     return "\n".join(lines)
 
 
+async def message_data(
+    count: Any = 5, unread_only: Any = False, query: Any = None, run: Runner = _jxa
+) -> list[dict[str, Any]]:
+    """Structured inbox messages (newest first) for spoken summaries: id, date, sender,
+    subject, read. With a query: subject or sender matches, from the last SEARCH_DAYS."""
+    n = mac.check_int(count if count is not None else 5, 1, 50, "count")
+    q = _clean(query, "query", 100)
+    days = SEARCH_DAYS if q else RECENT_DAYS
+    data = await _call(run, _LIST, str(n), "true" if unread_only and not q else "false", q, str(days))
+    msgs: list[dict[str, Any]] = data.get("messages", [])
+    return msgs
+
+
 async def recent(count: Any = 10, unread_only: Any = False, run: Runner = _jxa) -> str:
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
     data = await _call(run, _LIST, str(n), "true" if unread_only else "false", "", str(RECENT_DAYS))

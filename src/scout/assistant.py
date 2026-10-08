@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import calendar_mac, gate, local_intents, mail_mac, shared_tools, speech
+from . import calendar_mac, gate, local_intents, mail_mac, shared_tools, speech, tier1
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -88,6 +88,7 @@ class Assistant:
         self.timers = Timers(self._timer_done)
         self._local = local_intents.Context(self.timers)
         self.recent_local: deque[tuple[float, str, str]] = deque(maxlen=10)
+        self.tier1: tier1.LocalModel | None = None  # loaded by start_tier1()
         server, names = build_server(self.timers)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
@@ -714,11 +715,21 @@ class Assistant:
             return False
         try:
             said = await local_intents.answer(text, self._local)
+            tier = 0
+            if said is None and self.tier1 is not None:
+                now = datetime.now().astimezone()
+                decision = await self.tier1.decide(text, now)
+                if decision is not None:
+                    said, tier = await tier1.run(decision, now), 1
+                    self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
         except ToolError as exc:  # e.g. calendar access not allowed yet: say why
             said = f"Sorry, {exc}"
+        except Exception:  # never let the local tiers lose a request: Claude takes it
+            log.exception("local answer failed; asking Claude")
+            return False
         if said is None:
             return False
-        log.info("answered locally: %s -> %s", text, said or "(done)")
+        log.info("answered locally (tier %d): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)"))
         if said:
@@ -726,6 +737,20 @@ class Assistant:
             self.say(said)
         await self.speaker.wait_idle()
         return True
+
+    async def start_tier1(self) -> None:
+        """Load the local model in the background; requests use Claude until it's ready."""
+        name = self.cfg.claude.local_model
+        if not name or not self.cfg.claude.local_first:
+            return
+        model = tier1.LocalModel(name)
+        try:
+            await model.load()
+        except Exception as exc:
+            log.warning("tier 1 model %s unavailable (%s); run scripts/fetch-models.sh", name, exc)
+            return
+        self.tier1 = model
+        log.info("tier 1 ready: %s", name)
 
     async def _with_context(self, text: str) -> str:
         """The request with what Claude would otherwise spend a tool call on."""

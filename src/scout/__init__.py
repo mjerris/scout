@@ -101,6 +101,7 @@ async def _amain(cfg: config_mod.Config) -> None:
             )
 
     assistant._spawn(warm())
+    assistant._spawn(assistant.start_tier1())
     speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant) if cfg.web.enabled else None
     seg = _segmenter(cfg)
