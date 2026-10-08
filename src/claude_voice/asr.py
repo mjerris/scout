@@ -19,6 +19,13 @@ _HALLUCINATIONS = {
 }
 
 
+def _repeats(text: str, times: int = 3) -> bool:
+    """True if one sentence makes up the transcript, repeated `times`+ times."""
+    sentences = [s for s in (re.sub(r"[^a-z ]", "", x.lower()).strip()
+                             for x in re.split(r"[.!?]+", text)) if s]
+    return any(sentences.count(s) >= times for s in set(sentences))
+
+
 class Transcriber:
     def __init__(self, model: str, language: str):
         self.model = model
@@ -44,8 +51,11 @@ class Transcriber:
             s["text"]
             for s in result.get("segments", [])
             if not (s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0)
+            and s.get("compression_ratio", 0) <= 2.4  # runaway repetition loops
         ]
         text = " ".join(p.strip() for p in parts).strip()
+        if _repeats(text):
+            return ""
         norm = self._norm(text)
         # On noise Whisper may also echo its own prompt back.
         if norm in _HALLUCINATIONS or (prompt and norm == self._norm(prompt)):
