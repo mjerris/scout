@@ -7,6 +7,7 @@ import base64
 import hmac
 import json
 import logging
+import os
 import secrets
 import socket
 import uuid
@@ -30,8 +31,9 @@ def load_token() -> str:
         return path.read_text().strip()
     path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(18)
-    path.write_text(token + "\n")
-    path.chmod(0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never readable by others
+    with os.fdopen(fd, "w") as fh:
+        fh.write(token + "\n")
     return token
 
 

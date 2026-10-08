@@ -121,7 +121,7 @@ def check(
 
     if kind in ("followup", "residual") and words < cfg.followup_min_words:
         return f"too short without the wake word ({words} word{'s' if words != 1 else ''})"
-    if kind == "followup":
+    if kind in ("followup", "reply"):
         snr = a.level_db - a.floor_db
         if snr < cfg.followup_min_snr_db:
             return f"too close to background noise ({snr:.0f} dB)"

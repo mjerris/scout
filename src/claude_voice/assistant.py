@@ -285,9 +285,14 @@ class Assistant:
                 and not confirming
                 and not (cmd is not None and speech.is_stop(cmd))
             ):
-                # Spoke over the end of the reply: run it once this turn finishes.
+                # Spoke over the end of the reply: with the wake word, run it once this
+                # turn finishes. Without it we can't tell the user from someone else
+                # in the room (the clip's stats are mixed with our own voice), so drop it.
+                if cmd is None:
+                    self._reject("request", text, "talked over the reply without the wake word")
+                    return
                 self.emit("heard", text=text)
-                self._queued = cmd if cmd is not None else text
+                self._queued = cmd
                 return
 
         checked: dict[str, str | None] = {}
@@ -335,7 +340,7 @@ class Assistant:
         if self._listen is not None and not self._listen.fut.done():
             if started < self._listen.since - 0.5:
                 return "said before the question"
-            if self._reject("reply", text, check("direct")):
+            if self._reject("reply", text, check("reply")):
                 return "gate"
             self.emit("heard", text=text, to=self._listen.agent, **via)
             self._listen_got(text, ended)
@@ -685,6 +690,10 @@ class Assistant:
         if self.busy:
             self._silence_turn = True
             await self.brain.interrupt()
+        elif self.floor.owner() == ROOM:
+            self.floor.release(ROOM)  # a "hang on" or follow-up hold
+        if self.state == "listening":
+            self._set_state("idle")
         self.emit("stopped")
 
     async def reset(self) -> None:

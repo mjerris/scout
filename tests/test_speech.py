@@ -125,3 +125,49 @@ def test_agreeing_phrases_with_no_words(text: str, answer: bool | str) -> None:
     from claude_voice.speech import parse_answer
 
     assert parse_answer(text) == answer
+
+
+@pytest.mark.parametrize(
+    ("text", "answer"),
+    [
+        ("I'm not sure", None),
+        ("that's not okay", False),
+        ("not yes", False),
+        ("never", False),
+        ("maybe", None),
+        ("always ask me first", None),
+        ("yes, but always ask", True),
+        ("always", "always"),
+        ("always allow that", "always"),
+        ("yes always", "always"),
+        ("no, always", False),
+    ],
+)
+def test_answers_are_conservative(text: str, answer: bool | str | None) -> None:
+    from claude_voice.speech import parse_answer
+
+    assert parse_answer(text) == answer
+
+
+@pytest.mark.parametrize(
+    ("text", "waiting"),
+    [
+        ("tell them not to wait", False),
+        ("don't wait", False),
+        ("hold on to that file", False),
+        ("tell them to hold on", False),
+        ("Okay, wait", True),
+        ("wait", True),
+        ("Run the tests. Hold on!", True),
+        ("Open Netflix and hang on", True),
+        ("what about, give me a sec.", True),
+    ],
+)
+def test_wait_detection_is_not_fooled(text: str, waiting: bool) -> None:
+    from claude_voice.speech import split_wait
+
+    assert split_wait(text)[1] is waiting
+
+
+def test_wake_names_are_case_insensitive() -> None:
+    assert strip_wake("Hey Jarvis, lights", ["Claude", "Jarvis"], 3) == "lights"
