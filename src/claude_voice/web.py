@@ -50,7 +50,7 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         bearer = req.headers.get("Authorization", "")
         given = (bearer[7:] if bearer.startswith("Bearer ") else "") or req.query.get("token") \
             or req.cookies.get(_COOKIE, "")
-        return hmac.compare_digest(given, token)
+        return hmac.compare_digest(given.encode(), token.encode())  # bytes: non-ASCII input can't raise
 
     # --- API for the MCP server (and anything else holding the token) -------------
 
@@ -125,8 +125,9 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                 to_mini = output in ("mini", "both")
                 to_me = client_id if output in ("device", "both") else None
                 if kind == "say" and str(m.get("text", "")).strip():
-                    if not assistant.start_turn(m["text"].strip(), speak=to_mini, client=to_me):
-                        await ws.send_json({"type": "error", "text": "Busy with another request; stop it first."})
+                    ignored = await assistant.submit_text(m["text"].strip(), speak=to_mini, client=to_me)
+                    if ignored and ignored not in ("gate",):
+                        await ws.send_json({"type": "error", "text": f"Not sent: {ignored}."})
                 elif kind == "confirm":
                     assistant.answer_confirm("always" if m.get("always") else bool(m.get("approved")))
                 elif kind == "remove_rule":
