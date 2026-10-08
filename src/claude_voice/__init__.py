@@ -11,6 +11,11 @@ import signal
 import sys
 from typing import TYPE_CHECKING, Any
 
+# onnxruntime (Kokoro, Silero, smart-turn) starts a telemetry uploader to Microsoft
+# on import, and its teardown races that thread at exit (intermittent abort, rc 134:
+# "recursive_mutex lock failed"). Opting out must happen before the first import.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
 from . import config as config_mod
 
 if TYPE_CHECKING:
