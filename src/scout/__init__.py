@@ -49,6 +49,7 @@ def _setup_logging(verbose: bool) -> None:
 async def _amain(cfg: config_mod.Config) -> None:
     from . import web
     from .asr import Transcriber
+    from . import messages_mac
     from .assistant import Assistant
     from . import audio_io
     from .audio import utterances
@@ -86,6 +87,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         cfg.tts.chimes,
     )
     speaker.start()
+    messages_mac.HELPER.announce = speaker.speak  # "Got it" once Full Disk Access is on
     asr = Transcriber(cfg.asr.model, cfg.asr.language, cfg.gate.max_compression_ratio, cfg.asr.prompt)
     await asr.warmup()
 

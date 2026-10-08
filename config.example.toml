@@ -77,3 +77,8 @@ port = 8765
 [floor]
 hold_seconds = 10.0       # a session may keep the floor this long between turns
 room_wait_seconds = 15.0  # a "Hey Scout" request waits this long for a session to finish
+
+[messages]
+# Read iMessage and SMS history (read-only) through the scout-messages helper,
+# the only program given Full Disk Access. false = the messages_* tools refuse.
+enabled = true
