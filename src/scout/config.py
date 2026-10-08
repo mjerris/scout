@@ -210,6 +210,13 @@ class FloorConfig:
 
 
 @dataclass
+class MessagesConfig:
+    # The messages_* tools read iMessage and SMS history through the scout-messages
+    # helper (the only program given Full Disk Access). false = the tools refuse.
+    enabled: bool = True
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -219,6 +226,7 @@ class Config:
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     web: WebConfig = field(default_factory=WebConfig)
     floor: FloorConfig = field(default_factory=FloorConfig)
+    messages: MessagesConfig = field(default_factory=MessagesConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to Scout's data folder."""
