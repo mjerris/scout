@@ -154,9 +154,16 @@ push-to-talk decodes browser recordings with it).
 scripts/fetch-models.sh     # Kokoro voice (~350 MB), Silero VAD, smart-turn; Whisper (~1.6 GB) downloads on first run
 scripts/build-voiceio.sh    # optional: the Apple voice-processing helper (audio.backend = "apple")
 scripts/build-vcal.sh       # optional: calendar access (EventKit helper; see Calendar below)
-cp config.example.toml config.toml   # optional; every key has a default
+cp config.example.toml "$HOME/Library/Application Support/Scout/config.toml"   # optional; every key has a default
 scripts/run.sh              # foreground run; allow microphone access when macOS asks
 ```
+
+Scout keeps everything that must survive an update in its data folder,
+`~/Library/Application Support/Scout/` (set `SCOUT_HOME` to move it):
+`config.toml`, `pronounce.txt`, `state/` (saved rules, the web token),
+`logs/`, `models/` and the compiled helpers in `bin/`. The paths below
+(`state/…`, `logs/…`) are inside it. Moving from a claude-voice checkout:
+`scripts/migrate-claude-voice.sh ~/src/claude-voice`.
 
 Claude uses the account the `claude` CLI is logged in with. Run `claude` once
 first if you have never logged in.

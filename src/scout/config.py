@@ -1,13 +1,19 @@
-"""Configuration: defaults, overridden by config.toml in the project root."""
+"""Configuration: defaults, overridden by config.toml in Scout's data folder."""
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]  # the code: the plugin folder, or a checkout
+# Everything that must survive a plugin update: config.toml, state/, logs/, models/
+# and the compiled helpers in bin/ (macOS ties permissions to the exact helper binary).
+DATA = Path(
+    os.environ.get("SCOUT_HOME") or Path.home() / "Library" / "Application Support" / "Scout"
+).expanduser()
 
 
 @dataclass
@@ -183,9 +189,9 @@ class Config:
     floor: FloorConfig = field(default_factory=FloorConfig)
 
     def path(self, p: str) -> Path:
-        """Resolve a config path relative to the project root."""
+        """Resolve a config path relative to Scout's data folder."""
         q = Path(p).expanduser()
-        return q if q.is_absolute() else ROOT / q
+        return q if q.is_absolute() else DATA / q
 
 
 def _coerce(key: str, val: Any, cur: Any) -> Any:
@@ -233,7 +239,7 @@ def _merge(obj: Any, data: dict[str, Any], where: str) -> None:
 
 def load(path: Path | None = None) -> Config:
     cfg = Config()
-    path = path or ROOT / "config.toml"
+    path = path or DATA / "config.toml"
     if path.exists():
         with path.open("rb") as fh:
             _merge(cfg, tomllib.load(fh), "")

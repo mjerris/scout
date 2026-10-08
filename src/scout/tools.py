@@ -16,12 +16,12 @@ from claude_agent_sdk.types import McpSdkServerConfig
 
 from . import mac
 from .shared_tools import SHARED
-from .config import ROOT
+from .config import DATA
 
 log = logging.getLogger(__name__)
 
 SERVER = "voice_app"
-REQUESTS_FILE = ROOT / "state" / "change-requests.jsonl"
+REQUESTS_FILE = DATA / "state" / "change-requests.jsonl"
 
 
 def _ok(text: str) -> dict[str, Any]:

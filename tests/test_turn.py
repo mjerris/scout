@@ -1,6 +1,6 @@
 """End-of-turn models (Silero VAD, smart-turn) and the EndOfTurnSegmenter.
 
-Model tests look for the files in $SCOUT_MODELS, then the repo's models/
+Model tests look for the files in $SCOUT_MODELS, then Scout's real data folder, then the repo's models/
 (scripts/fetch-models.sh), and skip when they are absent. Speech comes from the
 Kokoro TTS model, so those tests also need kokoro-v1.0.onnx + voices-v1.0.bin.
 """
@@ -30,7 +30,8 @@ FRAME = 480
 
 
 def _model(name: str) -> Path | None:
-    dirs = [Path(d) for d in [os.environ.get("SCOUT_MODELS", "")] if d] + [ROOT / "models"]
+    real = Path.home() / "Library" / "Application Support" / "Scout" / "models"  # tests sandbox SCOUT_HOME
+    dirs = [Path(d) for d in [os.environ.get("SCOUT_MODELS", "")] if d] + [real, ROOT / "models"]
     for d in dirs:
         if (d / name).is_file():
             return d / name

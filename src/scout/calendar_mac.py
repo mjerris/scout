@@ -14,10 +14,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config import ROOT
+from .config import DATA
 from .mac import ToolError
 
-VCAL = ROOT / "native" / "vcal" / "build" / "vcal"
+VCAL = DATA / "bin" / "vcal"  # scripts/build-vcal.sh
 _MAX_DAYS = 400
 _MAX_TEXT = 300
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the macOS voice-processing helper (native/voiceio) used by audio.backend = "apple".
-# Output: native/voiceio/build/voiceio. Works from any directory.
+# Output: bin/voiceio in Scout's data folder (macOS ties permissions to this exact path). Works from any directory.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/voiceio/Sources"
-OUT="$ROOT/native/voiceio/build"
+OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "voiceio needs macOS" >&2

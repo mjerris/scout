@@ -27,12 +27,13 @@ from typing import Any
 
 import numpy as np
 
+from .config import DATA
 from .audio_io import EventHandler, FrameAssembler, PlayHandle
 
 log = logging.getLogger(__name__)
 
 HELPER_DIR = Path(__file__).resolve().parents[2] / "native" / "voiceio"
-HELPER_BIN = HELPER_DIR / "build" / "voiceio"
+HELPER_BIN = DATA / "bin" / "voiceio"  # scripts/build-voiceio.sh
 
 CONFIG, PLAY, STOP, QUIT = b"C", b"P", b"S", b"Q"
 MIC, DONE, EVENT = b"M", b"D", b"E"
