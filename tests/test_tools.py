@@ -153,3 +153,22 @@ def test_forbidden_calls(tmp_path: Path) -> None:
     assert b._forbidden("mcp__voice__discuss", {})
     assert b._forbidden("Edit", {"file_path": str(tmp_path / "notes.txt")}) is None
     assert b._forbidden("Bash", {"command": "ls"}) is None
+
+
+def test_bad_permission_mode_fails_at_startup(tmp_path: Path) -> None:
+    from claude_voice.brain import Brain
+    from claude_voice.config import ClaudeConfig
+
+    async def never(spoken: str, detail: str) -> bool | None:
+        return None
+
+    server, names = build_server(Timers(lambda label: None))
+    with pytest.raises(ValueError, match="permission_mode"):
+        Brain(
+            ClaudeConfig(permission_mode="acceptedits"),
+            never,
+            server,
+            names,
+            Rules(tmp_path / "r.json"),
+            lambda k, t: None,
+        )

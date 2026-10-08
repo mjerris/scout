@@ -207,6 +207,8 @@ class Assistant:
             return
         folder = ROOT / "state" / "utterances"
         folder.mkdir(parents=True, exist_ok=True)
+        if not self._saved:  # first save this run: pick up what earlier runs left
+            self._saved.extend(sorted(p.with_suffix("") for p in folder.glob("*.wav")))
         stem = folder / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         with wave.open(str(stem.with_suffix(".wav")), "wb") as w:
             w.setnchannels(1)
@@ -298,7 +300,7 @@ class Assistant:
 
         if not echo and cmd is not None and not confirming and not listening and check("wake") is None:
             self._ref_db = a.level_db if self._ref_db is None else 0.7 * self._ref_db + 0.3 * a.level_db
-        await self._route(text, cmd, started, check, direct=False)
+        await self._route(text, cmd, started, check, direct=False, ended=utt.ended or None)
 
     async def _route(
         self,
@@ -309,6 +311,7 @@ class Assistant:
         direct: bool,
         speak: bool = True,
         client: str | None = None,
+        ended: float | None = None,
     ) -> str | None:
         """Where a heard utterance goes. Shared by the mic and web push-to-talk.
         `check(kind)` returns a gate rejection reason (None = passes); `direct`
@@ -335,7 +338,7 @@ class Assistant:
             if self._reject("reply", text, check("direct")):
                 return "gate"
             self.emit("heard", text=text, to=self._listen.agent, **via)
-            self._listen_got(text)
+            self._listen_got(text, ended)
             return None
 
         # Another session has the floor (it's mid-sentence or between turns).
@@ -400,6 +403,8 @@ class Assistant:
                 self.speaker.chime("wake")
             self._set_state("listening")
             self.follow_up_until = time.monotonic() + self.cfg.wake.wait_seconds
+            if self.floor.try_acquire(ROOM):  # hold the floor so no session cuts in meanwhile
+                self.floor.release(ROOM, hold=True, ttl=self.cfg.wake.wait_seconds)
             return
         if self._held_words:
             if time.monotonic() <= self._held_until:
@@ -453,7 +458,7 @@ class Assistant:
 
     # --- Claude sessions talking through the MCP server ------------------------------------
 
-    def _listen_got(self, text: str) -> None:
+    def _listen_got(self, text: str, ended: float | None = None) -> None:
         lst = self._listen
         if lst is None:
             return
@@ -462,7 +467,9 @@ class Assistant:
             if body:
                 lst.parts.append(body)
             self.speaker.chime("wake")
-            lst.since = time.monotonic()
+            # Speech after the "hang on" clip ended counts, even if it began while
+            # that clip was still being transcribed.
+            lst.since = ended if ended is not None else time.monotonic()
             lst.extend = True
             return
         if speech.is_stop(text):
@@ -682,11 +689,12 @@ class Assistant:
 
     async def reset(self) -> None:
         await self.stop()
-        if self._turn is not None:
+        turn = self._turn
+        if turn is not None and not turn.done():
             try:
-                await asyncio.wait_for(asyncio.shield(self._turn), 15)
+                await asyncio.wait_for(asyncio.shield(turn), 15)
             except Exception:
-                self._turn.cancel()
+                turn.cancel()
         await self.brain.reset()
         self.emit("reset")
         self.speaker.speak("Okay, starting a new conversation.")

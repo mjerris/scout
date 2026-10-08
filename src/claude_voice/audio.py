@@ -83,7 +83,12 @@ async def decode_to_pcm(data: bytes) -> bytes:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await asyncio.wait_for(proc.communicate(data), 30)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(data), 30)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise ValueError("decoding the recording timed out") from None
     if proc.returncode != 0:
         raise ValueError(f"could not decode audio: {err.decode(errors='replace')[:200]}")
     return out

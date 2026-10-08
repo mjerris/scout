@@ -121,8 +121,15 @@ def is_reset(cmd: str) -> bool:
     return " ".join(w) in RESET_PHRASES
 
 
+# Phrases that contain a "no" word but agree: "sure, no problem", "yes, don't ask again".
+_AGREEING = re.compile(
+    r"\b(?:no (?:problem|worries|prob)|don'?t (?:ask|bother asking)(?: me)?(?: again| anymore)?|"
+    r"don'?t need to ask|no need to ask)\b"
+)
+
+
 def parse_yes_no(text: str) -> bool | None:
-    w = " ".join(words(text))
+    w = _AGREEING.sub(" ", " ".join(words(text)))
     padded = f" {w} "
     if any(f" {n} " in padded for n in _NO):
         return False

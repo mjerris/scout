@@ -300,3 +300,32 @@ def test_timer_does_not_take_the_rooms_name() -> None:
 
     early, later = run(go())
     assert early == [] and later == ["Your tea timer is done."]
+
+
+def test_reset_after_a_cancelled_turn_still_resets(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> list[int]:
+        r = make()
+        resets: list[int] = []
+
+        async def fake_brain_reset() -> None:
+            resets.append(1)
+
+        monkeypatch.setattr(r.a.brain, "reset", fake_brain_reset)
+        turn = asyncio.create_task(asyncio.sleep(10))
+        r.a._turn = turn
+        turn.cancel()
+        await asyncio.sleep(0)
+        await r.a.reset()
+        return resets
+
+    assert run(go()) == [1]
+
+
+def test_hang_on_holds_the_floor() -> None:
+    async def go() -> tuple[bool, str | None]:
+        r = make()
+        r.a._room_command("remind me to, hang on")
+        return r.a.floor.try_acquire("desk#1"), r.a.floor.owner()
+
+    taken, owner = run(go())
+    assert not taken and owner == "room"

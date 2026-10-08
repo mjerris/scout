@@ -16,7 +16,8 @@ log = logging.getLogger(__name__)
 
 
 class Transcriber:
-    def __init__(self, model: str, language: str) -> None:
+    def __init__(self, model: str, language: str, max_compression_ratio: float = 2.4) -> None:
+        self.max_compression_ratio = max_compression_ratio
         self.model = model
         self.language = language or None
         # MLX work stays on one thread.
@@ -33,7 +34,11 @@ class Transcriber:
             verbose=None,
         )
         # Segments that are runaway repetition loops are dropped outright.
-        segs = [s for s in result.get("segments", []) if s.get("compression_ratio", 0) <= 2.4]
+        segs = [
+            s
+            for s in result.get("segments", [])
+            if s.get("compression_ratio", 0) <= self.max_compression_ratio
+        ]
         text = gate.clean(" ".join(s["text"].strip() for s in segs))
         if not segs or not text:
             return Transcript("")
