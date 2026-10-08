@@ -10,7 +10,9 @@ brain.ALWAYS_ASK_TOOLS; other sessions: Assistant.run_shared_tool), and a
 "yes, always" never applies to them.
 
 Outputs are neutral, readable facts with exact values (ISO times, message ids);
-how to say them out loud is the mail-calendar skill's and the room prompt's job."""
+how to say them out loud is the mail-calendar skill's and the room prompt's job.
+Whoever calls, it's Claude: what the reads return (email summaries or text,
+calendar notes) is decided by the privacy mode (privacy.py)."""
 
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, mail_mac
+from . import calendar_mac, mail_mac, privacy
 
 
 @dataclass(frozen=True)
@@ -47,9 +49,12 @@ SHARED: tuple[SharedTool, ...] = (
         "Read events from the Mac's calendars (Google, iCloud and others synced to this Mac). "
         "start/end are ISO 8601 local times or dates, e.g. 2026-10-08 or 2026-10-08T15:00; "
         "default is today. Optional query filters by title, location or notes; optional "
-        "calendar limits to one calendar by name.",
+        "calendar limits to one calendar by name. Event notes and attendees are included only "
+        "if the user's privacy mode allows.",
         _obj({"start": _STR, "end": _STR, "query": _STR, "calendar": _STR}),
-        lambda a: calendar_mac.events(a.get("start"), a.get("end"), a.get("query"), a.get("calendar")),
+        lambda a: privacy.current().calendar_events(
+            a.get("start"), a.get("end"), a.get("query"), a.get("calendar")
+        ),
     ),
     SharedTool(
         "calendar_list",
@@ -81,21 +86,33 @@ SHARED: tuple[SharedTool, ...] = (
     SharedTool(
         "mail_recent",
         "List the newest messages in Mail's inbox (all accounts, last 30 days, newest first): "
-        "id, received time, sender, subject. count 1-50 (default 10); unread_only=true for unread only.",
+        "id, received time, sender, subject, and (privacy mode permitting) a one-line gist "
+        "written by Scout's local model. count 1-50 (default 10); unread_only=true for unread only.",
         _obj({"count": _INT, "unread_only": _BOOL}),
-        lambda a: mail_mac.recent(a.get("count"), a.get("unread_only", False)),
+        lambda a: privacy.current().mail_list(a.get("count"), a.get("unread_only", False)),
     ),
     SharedTool(
         "mail_search",
-        "Find recent inbox messages whose subject or sender contains query (last 180 days, newest first).",
+        "Find recent inbox messages whose subject or sender contains query (last 180 days, newest "
+        "first); same fields as mail_recent.",
         _obj({"query": _STR, "count": _INT}, ["query"]),
-        lambda a: mail_mac.search(a.get("query"), a.get("count")),
+        lambda a: privacy.current().mail_list(a.get("count"), False, a.get("query") or ""),
     ),
     SharedTool(
         "mail_read",
-        "Read one inbox message by its id (from mail_recent or mail_search).",
+        "Read one inbox message by its id (from mail_recent or mail_search): sender, recipients, "
+        "subject and, privacy mode permitting, a few-sentence summary by Scout's local model "
+        "(the full text stays on the Mac). Enough to answer what an email says.",
         _obj({"id": _INT}, ["id"]),
-        lambda a: mail_mac.read(a.get("id")),
+        lambda a: privacy.current().mail_read(a.get("id")),
+    ),
+    SharedTool(
+        "mail_read_full",
+        "The exact text of one inbox message by id. Use only when the task needs its exact "
+        "wording (quoting it in a reply, copying a detail the summary left out); mail_read "
+        "answers what it says. Refused in strict privacy mode.",
+        _obj({"id": _INT}, ["id"]),
+        lambda a: privacy.current().mail_read_full(a.get("id")),
     ),
     SharedTool(
         "mail_draft",
