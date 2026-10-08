@@ -117,3 +117,11 @@ def test_assistant_uses_tier1_between_tier0_and_claude(monkeypatch: pytest.Monke
     handled, not_handled, said = asyncio.run(go())
     assert handled and not not_handled
     assert said == ["The latest from Sam is about Lunch on Friday."]
+
+
+def test_next_event_skips_ones_already_over_today() -> None:
+    early = {"title": "Team MARS Standup", "all_day": False, "start": "2026-10-08T04:00:00-04:00"}
+    later = {"title": "Team MARS Standup", "all_day": False, "start": "2026-10-09T04:00:00-04:00"}
+    assert tier1.speak_calendar({"events": [early, later]}, {"query": "standup"}, NOW) == (
+        "Your next Team MARS Standup is tomorrow at 4 AM."  # heard live: it said "today at 4 AM" at 4 PM
+    )

@@ -770,3 +770,64 @@ def test_streamed_sentences_are_spoken_once_and_the_message_is_logged(
     spoken = [s for s in said if "office" in s or "standup" in s]
     assert len(spoken) == 2  # each sentence once, not again with the whole message
     assert len(logged) == 1 and logged[0].startswith("You're out of office")
+
+
+# --- what other sessions said aloud: context, relaying, "say that again" -----------------------
+
+
+def test_room_knows_what_sessions_said_and_can_relay_a_reply() -> None:
+    async def go() -> tuple[str, str, dict[str, Any]]:
+        r = make()
+        await r.a.discuss(agent="claude-voice#4242", message="Want me to merge the branch?", listen=False)
+        context = await r.a._with_context("yes go ahead")
+        note = r.a.relay("claude-voice", "yes go ahead")  # the room passes it on, by session name
+        later = await r.a.discuss(agent="claude-voice#4242", message="Merging now.", listen=False)
+        return context, note, later
+
+    context, note, later = run(go())
+    assert "session claude-voice#4242, it did not wait for a reply] Want me to merge the branch?" in context
+    assert "pass_to_session" in context
+    assert note.startswith("Passed to claude-voice")
+    assert later["relayed"] == ["yes go ahead"]
+
+
+def test_relay_to_an_unknown_session_says_who_is_known() -> None:
+    async def go() -> str:
+        r = make()
+        await r.a.discuss(agent="proj#1", message="Done.", listen=False)
+        return r.a.relay("other", "hi")
+
+    assert "proj#1" in run(go())
+
+
+def test_a_session_message_opens_a_short_reply_window() -> None:
+    async def go() -> bool:
+        r = make()
+        await r.a.discuss(agent="proj#1", message="Should I push?", listen=False)
+        return r.a.follow_up_until > time.monotonic()
+
+    assert run(go())
+
+
+def test_say_that_again_repeats_whoever_spoke_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def go() -> list[str]:
+        r = make()
+
+        async def no_claude(text: str) -> Any:
+            raise AssertionError("a repeat is answered locally")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(r.a.brain, "ask", no_claude)
+        await r.a.discuss(agent="claude-voice#4242", message="Scout now has a local model.", listen=False)
+        r.spk.said.clear()
+        await r.a._answer_locally("I didn't catch that, can you say it again?")
+        return r.spk.said
+
+    assert run(go()) == ["claude-voice said: Scout now has a local model."]
+
+
+def test_mcp_result_shows_replies_relayed_through_the_room() -> None:
+    from scout.mcp_server import describe
+
+    out = describe({"status": "ok", "spoke": True, "relayed": ["yes go ahead"]}, wait_for_response=False)
+    assert out == '(spoken)\nThe user also answered you earlier, through the room (relayed): "yes go ahead"'

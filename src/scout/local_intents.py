@@ -76,6 +76,7 @@ class Context:
     volume: Callable[..., Awaitable[str]] = mac.volume
     media: Callable[[str], Awaitable[str]] = mac.media
     events: Callable[..., Awaitable[dict[str, Any]]] = calendar_mac.event_data
+    last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str]]
@@ -202,6 +203,26 @@ async def _calendar(m: re.Match[str], c: Context) -> str:
         start += dt.timedelta(days=1)
     end = start + dt.timedelta(days=1)
     return speak_events(await c.events(start.isoformat(), end.isoformat()), day)
+
+
+_REPEAT = (
+    r"(?:(?:sorry |what |huh |pardon )*(?:i )?(?:didn't|did not|couldn't|could not) (?:catch|hear|get) (?:that|it|you)"
+    r"(?: (?:can|could) you (?:say|repeat) (?:it|that)(?: again)?)?|(?:say|repeat) (?:that|it)(?: again)?|"
+    r"what did you say|come again|pardon|what was that)"
+)
+
+
+def is_repeat(text: str) -> bool:
+    return bool(re.match(r"^" + _POLITE + _REPEAT + _TAIL + r"$", _clean(text)))
+
+
+@_rule(_REPEAT)
+async def _repeat(m: re.Match[str], c: Context) -> str:
+    last = c.last_spoken()
+    if not last:
+        return "I haven't said anything yet."
+    who, text = last
+    return text if who == "Scout" else f"{who.split('#')[0]} said: {text}"
 
 
 async def answer(text: str, ctx: Context) -> str | None:

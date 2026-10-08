@@ -212,6 +212,8 @@ def _when(start: str, all_day: bool, now: dt.datetime) -> str:
 def speak_calendar(data: dict[str, Any], args: dict[str, Any], now: dt.datetime) -> str:
     events = data.get("events", [])
     if q := args.get("query"):
+        # "when's my next standup": skip ones that have already started today
+        events = [e for e in events if e.get("all_day") or dt.datetime.fromisoformat(e["start"]) >= now]
         if not events:
             return f"I don't see {q} on your calendar in that time."
         e = events[0]
