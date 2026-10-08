@@ -117,23 +117,20 @@ class FrameAssembler:
 
 
 def create(backend: str, input_device: str = "", output_device: str = "") -> AudioIO:
-    """Pick a backend: "auto" means apple on macOS when the helper is built,
-    else webrtc when livekit is installed, else plain."""
-    import sys
+    """Pick a backend. "auto" means webrtc when livekit is installed, else plain.
 
+    WebRTC is the default on macOS too: measured on the Mac mini (OBSBOT mic,
+    built-in speakers) it removed 27.7 dB of the assistant's own voice and left
+    Whisper 2% of its words, against 15 dB / 6% for Apple voice processing
+    (with its AGC off; with AGC on, 1 dB / 27%), which also adds ~100 ms of
+    capture latency. "apple" stays available for comparison and other rooms."""
     if backend == "auto":
-        if sys.platform == "darwin":
-            from .audio_apple import helper_available
+        try:
+            import livekit.rtc  # noqa: F401
 
-            if helper_available():
-                backend = "apple"
-        if backend == "auto":
-            try:
-                import livekit.rtc  # noqa: F401
-
-                backend = "webrtc"
-            except ImportError:
-                backend = "plain"
+            backend = "webrtc"
+        except ImportError:
+            backend = "plain"
     if backend == "apple":
         from .audio_apple import AppleAudioIO
 
