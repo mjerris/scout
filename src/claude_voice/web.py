@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
@@ -13,6 +14,7 @@ from importlib import resources
 from aiohttp import WSMsgType, web
 
 from .assistant import Assistant
+from .audio import decode_to_pcm
 from .config import ROOT, WebConfig
 
 log = logging.getLogger(__name__)
@@ -44,8 +46,42 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
     page = resources.files(__package__).joinpath("web.html").read_text()
 
     def authed(req: web.Request) -> bool:
-        given = req.query.get("token") or req.cookies.get(_COOKIE, "")
+        bearer = req.headers.get("Authorization", "")
+        given = (bearer[7:] if bearer.startswith("Bearer ") else "") or req.query.get("token") \
+            or req.cookies.get(_COOKIE, "")
         return hmac.compare_digest(given, token)
+
+    # --- API for the MCP server (and anything else holding the token) -------------
+
+    async def api_discuss(req: web.Request) -> web.StreamResponse:
+        if not authed(req):
+            raise web.HTTPUnauthorized()
+        try:
+            b = await req.json()
+            result = await assistant.discuss(
+                agent=str(b.get("agent") or "session"),
+                message=b.get("message"),
+                listen=bool(b.get("wait_for_response", True)),
+                timeout=min(float(b.get("listen_timeout", 30)), 300.0),
+                hold=bool(b.get("hold_floor", False)),
+                voice=b.get("voice") or None,
+                wait_for_floor=min(float(b.get("wait_for_floor", 0)), 300.0),
+            )
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"status": "error", "error": str(exc)}, status=400)
+        return web.json_response(result)
+
+    async def api_status(req: web.Request) -> web.StreamResponse:
+        if not authed(req):
+            raise web.HTTPUnauthorized()
+        return web.json_response(assistant.voice_status())
+
+    async def api_release(req: web.Request) -> web.StreamResponse:
+        if not authed(req):
+            raise web.HTTPUnauthorized()
+        b = await req.json()
+        assistant.floor.release(str(b.get("agent") or ""))
+        return web.json_response(assistant.floor.status())
 
     async def index(req: web.Request) -> web.StreamResponse:
         if not authed(req):
@@ -57,15 +93,29 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
     async def ws_handler(req: web.Request) -> web.StreamResponse:
         if not authed(req):
             raise web.HTTPUnauthorized()
-        ws = web.WebSocketResponse(heartbeat=30)
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=30 * 1024 * 1024)
         await ws.prepare(req)
         q = assistant.subscribe()
+        play_here = False  # this page wants reply audio too
         await ws.send_json({"type": "hello", "history": list(assistant.history),
                             "rules": assistant.rules.listing(), **assistant.snapshot()})
 
+        async def send_audio(text: str) -> None:
+            try:
+                wav = await assistant.speaker.synth_wav(text)
+                await ws.send_json({"type": "audio_reply", "data": base64.b64encode(wav).decode()})
+            except Exception:
+                log.exception("could not send reply audio")
+
         async def pump():
             while True:
-                await ws.send_json(await q.get())
+                ev = await q.get()
+                await ws.send_json(ev)
+                if play_here and ev["type"] in ("claude", "agent_said"):
+                    from .speech import to_speech
+                    said = to_speech(ev.get("text", ""))
+                    if said:
+                        asyncio.create_task(send_audio(said))
 
         pump_task = asyncio.create_task(pump())
         try:
@@ -90,13 +140,28 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                     assistant.set_mic_muted(bool(m.get("value")))
                 elif kind == "reset":
                     asyncio.create_task(assistant.reset())
+                elif kind == "play_here":
+                    play_here = bool(m.get("value"))
+                elif kind == "audio":
+                    try:
+                        clip = base64.b64decode(m.get("data", ""))
+                        if len(clip) > 20_000_000:
+                            raise ValueError("clip too long")
+                        pcm = await decode_to_pcm(clip)
+                        result = await assistant.submit_audio(pcm, speak=bool(m.get("speak", True)))
+                        await ws.send_json({"type": "ptt_result", **result})
+                    except Exception as exc:
+                        log.exception("push-to-talk failed")
+                        await ws.send_json({"type": "error", "text": f"Couldn't use that recording: {exc}"})
         finally:
             pump_task.cancel()
             assistant.unsubscribe(q)
         return ws
 
-    app = web.Application()
-    app.add_routes([web.get("/", index), web.get("/ws", ws_handler)])
+    app = web.Application(client_max_size=30 * 1024 * 1024)
+    app.add_routes([web.get("/", index), web.get("/ws", ws_handler),
+                    web.post("/api/discuss", api_discuss), web.get("/api/status", api_status),
+                    web.post("/api/release", api_release)])
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.TCPSite(runner, cfg.host, cfg.port).start()

@@ -1,0 +1,26 @@
+# Built-in pronunciation rules. Add your own in pronounce.txt (project root).
+# DIRECTION  pattern  replacement  # description
+
+# --- how things are said -------------------------------------------------------
+TTS  '\.toml\b'  ' dot toml'          # config.toml -> "config dot toml"
+TTS  '\.py\b'  ' dot pie'             # brain.py
+TTS  '\.md\b'  ' dot M D'             # README.md
+TTS  '\.json\b'  ' dot jason'         # config.json
+TTS  '\.sh\b'  ' dot S H'             # run.sh
+TTS  '\bSignalWire\b'  'Signal Wire'
+TTS  '\bmacOS\b'  'mac O S'
+TTS  '\bCLI\b'  'C L I'
+TTS  '\bMCP\b'  'M C P'
+TTS  '\bASR\b'  'A S R'
+TTS  '\bTTS\b'  'T T S'
+TTS  '\bVAD\b'  'vad'
+TTS  '\bJSONL?\b'  'jason'
+TTS  '\bgh\b'  'G H'
+TTS  '\bPR\b'  'P R'
+TTS  '\bURL\b'  'U R L'
+TTS  '~/'  'home slash '
+
+# --- common mishearings ---------------------------------------------------------
+STT  '\b(?:Claud|Clawed|Klaud|Clod)\b'  'Claude'
+STT  '\bsignal wire\b'  'SignalWire'
+STT  '\bcloud code\b'  'Claude Code'

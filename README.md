@@ -49,6 +49,14 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   that site (for page fetches), or that tool (for other MCP tools). File edits
   and writes always ask. Saved rules are in `state/voice_allow.json` and can
   be removed from the web page.
+- **"Hang on":** end with "hang on", "wait" or "give me a sec" and it keeps
+  listening (20 s) and joins what you say next onto the request.
+- **Working sounds:** a soft tick every few seconds while tools run and nothing
+  is being said, so a quiet stretch doesn't sound like a hang.
+- **Pronunciation:** regex rules fix how words are spoken ("config.toml" →
+  "config dot toml") and common mishearings ("clawed" → "Claude"). Built-in
+  defaults are in `src/claude_voice/pronounce_default.txt`; add your own in
+  `pronounce.txt` in the project root (`TTS|STT  pattern  replacement`).
 - **Changing the app by voice:** the voice agent can't edit this project. When
   you ask it to change how it listens, talks or asks, it calls its
   `request_app_change` tool, which appends to `state/change-requests.jsonl`
@@ -59,6 +67,40 @@ speakers ← Kokoro TTS (ONNX) ← markdown → speech ←───────�
   a live transcript and lets you type requests, approve or deny actions, stop,
   mute the mic and reset the session. The token lives in `state/web_token`;
   delete that file to rotate it.
+
+## Voice for your other Claude Code sessions (MCP)
+
+The app also runs an MCP server, so any Claude Code session (at your desk,
+in a terminal) can talk out loud through the same mic, voice and filtering:
+
+```sh
+claude mcp add --scope user voice -- uv run --project ~/src/claude-voice python -m claude_voice.mcp_server
+```
+
+- `discuss(message, wait_for_response=True, listen_timeout=30, hold_floor=False,
+  wait_for_floor=15, voice="")` speaks `message` and returns what you say back.
+  No wake word is needed, and the reply passes the same local gate as
+  everything else.
+- `voice_status()` shows who has the floor and which voices are available.
+
+**The floor (conch):** one speaker at a time. The room assistant and each
+session take the floor for an exchange; `hold_floor` keeps it for a few
+seconds so a back-and-forth isn't interrupted, and others queue in order. A
+"Hey Claude" request waits up to 15 s for a session to finish. "Claude, stop"
+always works. The web page shows who has the floor.
+
+## Phone and other devices (Tailscale)
+
+```sh
+scripts/tailscale.sh enable     # https://<this-mac>.<tailnet>.ts.net, tailnet-only
+scripts/tailscale.sh disable | status
+```
+
+Over HTTPS the web page can use the device's microphone: **Hold to talk**
+sends a clip through the same gate (no wake word needed), and **play here**
+plays replies on that device. Install Tailscale on your phone, sign in to the
+same tailnet, and open the printed link. The first time, Tailscale asks you
+to enable Serve for the tailnet.
 
 ## Setup
 
@@ -89,6 +131,11 @@ scripts/launchd.sh status | restart | uninstall
 Logs: `logs/claude-voice.log` (plus `logs/launchd.*.log` under launchd). Each
 heard line includes the stats the gate used, e.g. `[conf -0.31, no-speech 0.01,
 2.4 words/s, 24 dB over noise]`.
+
+Everything said and heard is also written to
+`logs/transcript-YYYY-MM-DD.jsonl`, one event per line. Set
+`audio.save_utterances = 50` to keep the last 50 clips (wav + transcript +
+stats) in `state/utterances/` for tuning; off by default.
 
 Tests: `uv run pytest`.
 

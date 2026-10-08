@@ -46,6 +46,31 @@ class Utterance:
     stats: AudioStats
 
 
+def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
+    """Voiced duration, voiced level and noise floor of a 16 kHz int16 clip."""
+    vad = webrtcvad.Vad(aggressiveness)
+    n = FRAME_SAMPLES * 2
+    voiced, quiet = [], []
+    for i in range(0, len(pcm) - n + 1, n):
+        f = pcm[i:i + n]
+        (voiced if vad.is_speech(f, SAMPLE_RATE) else quiet).append(frame_db(f))
+    level = 10 * np.log10(np.mean([10 ** (d / 10) for d in voiced]) + 1e-12) if voiced else -100.0
+    floor = float(np.percentile(quiet, 20)) if quiet else level - 30
+    return AudioStats(len(voiced) * FRAME_MS, float(level), floor)
+
+
+async def decode_to_pcm(data: bytes) -> bytes:
+    """Any audio container (webm/opus, mp4/aac, wav...) to 16 kHz mono int16 via ffmpeg."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+        "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(proc.communicate(data), 30)
+    if proc.returncode != 0:
+        raise ValueError(f"could not decode audio: {err.decode(errors='replace')[:200]}")
+    return out
+
+
 class Microphone:
     """Pushes 30 ms int16 frames from the input device onto an asyncio queue."""
 

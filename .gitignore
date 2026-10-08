@@ -17,3 +17,4 @@ logs/
 config.toml
 .tmp/
 .DS_Store
+pronounce.txt

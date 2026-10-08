@@ -54,6 +54,7 @@ async def _amain(cfg: config_mod.Config) -> None:
     await asr.warmup()
 
     assistant = Assistant(cfg, asr, speaker)
+    speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant) if cfg.web.enabled else None
 
     mic = Microphone(resolve_device(cfg.audio.input_device, "input"))
