@@ -85,7 +85,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         cfg.tts.chimes,
     )
     speaker.start()
-    asr = Transcriber(cfg.asr.model, cfg.asr.language, cfg.gate.max_compression_ratio)
+    asr = Transcriber(cfg.asr.model, cfg.asr.language, cfg.gate.max_compression_ratio, cfg.asr.prompt)
     await asr.warmup()
 
     assistant = Assistant(cfg, asr, speaker, echo_cancelled=io.name != "plain")

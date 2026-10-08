@@ -42,6 +42,7 @@ followup_max_drop_db = 12.0   # ...and not this much quieter than your last "Hey
 [asr]
 model = "mlx-community/whisper-large-v3-turbo"  # smaller/faster: mlx-community/whisper-small-mlx
 language = "en"
+prompt = "Hey Claude."  # context for short clips; helps Whisper spell the wake word
 
 [tts]
 model = "models/kokoro-v1.0.onnx"
