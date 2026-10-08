@@ -27,7 +27,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SettingSource
 
-from .config import ROOT, ClaudeConfig
+from .config import DATA, ROOT, ClaudeConfig
 from .rules import Rules
 import contextlib
 
@@ -46,7 +46,8 @@ the intended meaning) and hears your replies through text-to-speech.
 - When you produce code or documents, write them to files and briefly say where,
   rather than reading them aloud.
 - This voice front-end (wake word, speech recognition, text-to-speech, spoken
-  approval prompts, web page, config.toml) is the scout app at {root}.
+  approval prompts, web page, config.toml) is the Scout app: code at {root},
+  config and state at {data}.
   Another Claude session owns that project. Never edit it, its config or its
   processes yourself. When the user asks to change how you listen, talk, ask
   for approval or behave, call the request_app_change tool with a clear
@@ -205,7 +206,7 @@ SECRET_PATHS = [
     "~/.kube",
     "~/Library/Keychains",
     "~/.claude/.credentials.json",
-    str(ROOT / "state"),
+    str(DATA / "state"),
 ]
 _FILE_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 _READ_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "LS")
@@ -287,13 +288,13 @@ class Brain:
         self._options()  # validates permission_mode, setting_sources and approval_policy now
 
     def _options(self) -> ClaudeAgentOptions:
-        append = VOICE_PROMPT.format(root=ROOT) + (
+        append = VOICE_PROMPT.format(root=ROOT, data=DATA) + (
             "\n" + self.cfg.extra_system_prompt if self.cfg.extra_system_prompt else ""
         )
         strict = self.cfg.approval_policy == "strict"
         if self.cfg.approval_policy not in ("strict", "settings", "settings_no_hooks"):
             raise ValueError(f"unknown approval_policy {self.cfg.approval_policy!r}")
-        project = str(ROOT)
+        own = [str(ROOT), str(DATA)]  # the code and its config/state: maintained by the owner
         overrides: dict[str, Any] = {
             "permissions": {
                 "allow": [*(t for t in self.tool_names if t not in ASKING_TOOLS), "WebSearch"],
@@ -301,8 +302,8 @@ class Brain:
                 # settings file). The app is maintained by its owner session, not by voice;
                 # secrets are never readable; mcp__scout is the desk-session voice tool.
                 "deny": [
-                    *(f"{tool}(/{project}/**)" for tool in _FILE_TOOLS),
-                    *(f"{tool}(/{_canon(p, ROOT)}/**)" for tool in _FILE_TOOLS for p in [project]),
+                    *(f"{tool}(/{p}/**)" for tool in _FILE_TOOLS for p in own),
+                    *(f"{tool}(/{_canon(p, ROOT)}/**)" for tool in _FILE_TOOLS for p in own),
                     *(
                         f"Read(/{Path(p).expanduser()}{'/**' if not Path(p).suffix else ''})"
                         for p in SECRET_PATHS
@@ -380,7 +381,7 @@ class Brain:
         if name.startswith("mcp__scout__"):
             return "The voice tool is for other sessions; you already own the voice."
         path = str(args.get("file_path") or args.get("notebook_path") or args.get("path") or "")
-        if name in _FILE_TOOLS and path and _under(path, [str(ROOT)], self._cwd):
+        if name in _FILE_TOOLS and path and _under(path, [str(ROOT), str(DATA)], self._cwd):
             return own_app
         if name in _READ_TOOLS and path and _under(path, SECRET_PATHS, self._cwd):
             return "Reading credentials and keys is blocked for the voice agent."
@@ -388,9 +389,9 @@ class Brain:
             cmd = str(args.get("command", ""))
             low = cmd.casefold()
             home = str(Path.home()).casefold()
-            app = str(ROOT).casefold()
-            if app in low or app.replace(home, "~", 1) in low:
-                return own_app
+            for app in (str(ROOT).casefold(), str(DATA).casefold()):
+                if app in low or app.replace(home, "~", 1) in low:
+                    return own_app
             for secret in SECRET_PATHS:
                 s = str(Path(secret).expanduser()).casefold()
                 if s in low or s.replace(home, "~", 1) in low:

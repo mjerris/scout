@@ -27,11 +27,11 @@ from urllib.parse import urlsplit
 from aiohttp import WSCloseCode, WSMsgType, web
 
 from .audio import SAMPLE_RATE, decode_to_pcm
-from .config import ROOT, WebConfig
+from .config import DATA, WebConfig
 
 log = logging.getLogger(__name__)
 _COOKIE = "cv_token"
-TOKEN_PATH = ROOT / "state" / "web_token"
+TOKEN_PATH = DATA / "state" / "web_token"
 _MIN_TOKEN_LEN = 16  # shorter (or empty) token files are replaced, never accepted
 
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")

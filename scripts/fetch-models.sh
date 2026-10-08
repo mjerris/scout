@@ -1,9 +1,10 @@
 #!/bin/sh
-# Download the model files into models/. Whisper downloads itself on first run.
+# Download the model files into Scout's data folder (models/). Whisper downloads itself on first run.
 #   Kokoro TTS (~350 MB), Silero VAD v5 (2 MB, MIT), Pipecat smart-turn v3.2 CPU (8 MB, BSD-2).
 set -eu
-cd "$(dirname "$0")/.."
-mkdir -p models
+DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"  # config, state, logs, models, helpers
+mkdir -p "$DATA/models"
+cd "$DATA"
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then

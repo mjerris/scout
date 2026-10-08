@@ -20,7 +20,7 @@ from . import gate, shared_tools, speech
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
-from .config import ROOT, Config
+from .config import DATA, Config
 from .floor import Floor
 from .mac import ToolError
 from .pronounce import Pronouncer
@@ -36,9 +36,9 @@ def _transcript_log() -> logging.Logger:
     """logs/transcript.jsonl, one event per line, rotated at midnight (kept 30 days)."""
     tx = logging.getLogger("scout.transcript")
     if not tx.handlers:
-        (ROOT / "logs").mkdir(exist_ok=True)
+        (DATA / "logs").mkdir(parents=True, exist_ok=True)
         h = logging.handlers.TimedRotatingFileHandler(
-            ROOT / "logs" / "transcript.jsonl", when="midnight", backupCount=30, encoding="utf-8"
+            DATA / "logs" / "transcript.jsonl", when="midnight", backupCount=30, encoding="utf-8"
         )
         h.setFormatter(logging.Formatter("%(message)s"))
         tx.addHandler(h)
@@ -74,9 +74,9 @@ class Assistant:
         self._message_barged: float | None = None  # onset of a barge into a session's message
         self.asr = asr
         self.speaker = speaker
-        self.pronounce = pronounce or Pronouncer(ROOT / "pronounce.txt")
+        self.pronounce = pronounce or Pronouncer(DATA / "pronounce.txt")
         self.floor = Floor(cfg.floor.hold_seconds)
-        self.rules = Rules(ROOT / "state" / "voice_allow.json")
+        self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
         server, names = build_server(self.timers)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
@@ -222,7 +222,7 @@ class Assistant:
         keep = self.cfg.audio.save_utterances
         if keep <= 0:
             return
-        folder = ROOT / "state" / "utterances"
+        folder = DATA / "state" / "utterances"
         folder.mkdir(parents=True, exist_ok=True)
         if not self._saved:  # first save this run: pick up what earlier runs left
             self._saved.extend(sorted(p.with_suffix("") for p in folder.glob("*.wav")))

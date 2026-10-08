@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Build the calendar helper (native/vcal) used by the calendar tools.
-# Output: native/vcal/build/vcal. Works from any directory.
-# After the first build, run `native/vcal/build/vcal request` once and allow access.
+# Output: bin/vcal in Scout's data folder (macOS ties permissions to this exact path). Works from any directory.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/vcal"
-OUT="$SRC/build"
+OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "vcal needs macOS" >&2

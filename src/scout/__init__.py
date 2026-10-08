@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 def _setup_logging(verbose: bool) -> None:
-    logs = config_mod.ROOT / "logs"
+    logs = config_mod.DATA / "logs"
     logs.mkdir(exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     root = logging.getLogger()
