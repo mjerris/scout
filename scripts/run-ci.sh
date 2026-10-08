@@ -16,11 +16,13 @@ fmt_gate() {
     uv run --frozen ruff format --check "${PATHS[@]}"
 }
 
+types_gate() { uv run --frozen mypy; }  # strict; config in pyproject.toml
+
 test_gate() { uv run --frozen pytest -q tests; }
 
 results=()
 failed=0
-for gate in LINT FMT TEST; do
+for gate in LINT FMT TYPES TEST; do
     echo "==> $gate"
     fn="$(echo "$gate" | tr '[:upper:]' '[:lower:]')_gate"
     if "$fn"; then results+=("$gate PASS"); else results+=("$gate FAIL"); failed=1; fi

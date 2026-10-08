@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class Rule:
     direction: str
-    pattern: re.Pattern
+    pattern: re.Pattern[str]
     replacement: str
 
 
@@ -46,7 +46,7 @@ def parse(text: str, source: str = "") -> list[Rule]:
 
 
 class Pronouncer:
-    def __init__(self, user_file: Path | None = None):
+    def __init__(self, user_file: Path | None = None) -> None:
         default = resources.files(__package__).joinpath("pronounce_default.txt").read_text()
         self.rules = parse(default, "default")
         if user_file and user_file.exists():

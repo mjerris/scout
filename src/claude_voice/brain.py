@@ -7,7 +7,8 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, cast, get_args
 from urllib.parse import urlparse
 
 from claude_agent_sdk import (
@@ -22,8 +23,7 @@ from claude_agent_sdk import (
     ToolPermissionContext,
     ToolUseBlock,
 )
-
-from pathlib import Path
+from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SettingSource
 
 from .config import ROOT, ClaudeConfig
 from .rules import Rules
@@ -95,16 +95,32 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
     return f"Use {name}?", f"use the {name} tool"
 
 
+def _permission_mode(mode: str) -> PermissionMode | None:
+    if not mode:
+        return None
+    if mode not in get_args(PermissionMode):
+        raise ValueError(f"claude.permission_mode must be one of {get_args(PermissionMode)}, not {mode!r}")
+    return cast("PermissionMode", mode)
+
+
+def _setting_sources(sources: list[str]) -> list[SettingSource]:
+    allowed = get_args(SettingSource)
+    bad = [s for s in sources if s not in allowed]
+    if bad:
+        raise ValueError(f"claude.setting_sources entries must be in {allowed}, not {bad}")
+    return cast("list[SettingSource]", sources)
+
+
 class Brain:
     def __init__(
         self,
         cfg: ClaudeConfig,
         confirm: Confirm,
-        tool_server,
+        tool_server: McpSdkServerConfig,
         tool_names: list[str],
         rules: Rules,
         notify: Callable[[str, str], None],
-    ):
+    ) -> None:
         self.cfg = cfg
         self.confirm = confirm
         self.tool_server = tool_server
@@ -146,8 +162,8 @@ class Brain:
             mcp_servers={"voice_app": self.tool_server},
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
-            permission_mode=self.cfg.permission_mode or None,  # "" = settings' defaultMode
-            setting_sources=self.cfg.setting_sources,
+            permission_mode=_permission_mode(self.cfg.permission_mode),  # "" = settings' defaultMode
+            setting_sources=_setting_sources(self.cfg.setting_sources),
             system_prompt={"type": "preset", "preset": "claude_code", "append": append},
             can_use_tool=self._can_use_tool,
             # Strict policy: the hook gates every tool call, ahead of any allow
@@ -155,7 +171,7 @@ class Brain:
             hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=900)]} if strict else None,
         )
 
-    async def _pre_tool_use(self, hook_input, tool_use_id, context):
+    async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
         name, args = hook_input["tool_name"], hook_input["tool_input"]
         if reason := self._forbidden(name, args):
             return {
@@ -219,9 +235,11 @@ class Brain:
             else:
                 self.notify("rules", "Okay, just this once. File edits always ask.")
             return True
-        return answer
+        return None if answer is None else bool(answer)
 
-    async def _can_use_tool(self, name: str, args: dict[str, Any], ctx: ToolPermissionContext):
+    async def _can_use_tool(
+        self, name: str, args: dict[str, Any], ctx: ToolPermissionContext
+    ) -> PermissionResultAllow | PermissionResultDeny:
         if reason := self._forbidden(name, args):
             return PermissionResultDeny(message=reason)
         answer = await self._ask(name, args)

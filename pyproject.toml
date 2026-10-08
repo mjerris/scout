@@ -26,6 +26,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.0",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]
@@ -47,3 +48,13 @@ select = ["E4", "E7", "E9", "F", "B", "S", "C4", "PERF", "SIM", "PTH", "RET", "R
 [tool.ruff.lint.per-file-ignores]
 # Tests assert by definition.
 "tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+# These four ship no type information (no stubs, no py.typed); everything else is checked.
+[[tool.mypy.overrides]]
+module = ["sounddevice", "soundfile", "webrtcvad", "mlx_whisper"]
+ignore_missing_imports = true

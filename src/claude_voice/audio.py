@@ -6,7 +6,9 @@ import asyncio
 import collections
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -35,7 +37,7 @@ def resolve_device(spec: str, kind: str) -> int | None:
 
 def frame_db(frame: bytes) -> float:
     s = np.frombuffer(frame, np.int16).astype(np.float32)
-    return 10 * np.log10(float(np.mean(s * s)) / 32768.0**2 + 1e-12)
+    return float(10 * np.log10(float(np.mean(s * s)) / 32768.0**2 + 1e-12))
 
 
 @dataclass
@@ -51,7 +53,8 @@ def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
     """Voiced duration, voiced level and noise floor of a 16 kHz int16 clip."""
     vad = webrtcvad.Vad(aggressiveness)
     n = FRAME_SAMPLES * 2
-    voiced, quiet = [], []
+    voiced: list[float] = []
+    quiet: list[float] = []
     for i in range(0, len(pcm) - n + 1, n):
         f = pcm[i : i + n]
         (voiced if vad.is_speech(f, SAMPLE_RATE) else quiet).append(frame_db(f))
@@ -89,13 +92,13 @@ async def decode_to_pcm(data: bytes) -> bytes:
 class Microphone:
     """Pushes 30 ms int16 frames from the input device onto an asyncio queue."""
 
-    def __init__(self, device: int | None):
+    def __init__(self, device: int | None) -> None:
         self.device = device
         self.frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
         self._stream: sd.RawInputStream | None = None
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
-        def callback(indata, frames, time_info, status):
+        def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
             if status:
                 log.debug("input status: %s", status)
             loop.call_soon_threadsafe(self._put, bytes(indata))
@@ -126,12 +129,13 @@ class Microphone:
 class Segmenter:
     """Groups frames into utterances: speech onset → trailing silence."""
 
-    def __init__(self, aggressiveness: int, silence_ms: int, min_speech_ms: int, max_s: float):
+    def __init__(self, aggressiveness: int, silence_ms: int, min_speech_ms: int, max_s: float) -> None:
         self.vad = webrtcvad.Vad(aggressiveness)
         self.silence_frames = silence_ms // FRAME_MS
         self.min_speech_frames = min_speech_ms // FRAME_MS
         self.max_frames = int(max_s * 1000 / FRAME_MS)
-        self.ring: collections.deque[tuple[bytes, bool]] = collections.deque(maxlen=10)
+        self.ring_len = 10  # frames that must be mostly speech to start an utterance
+        self.ring: collections.deque[tuple[bytes, bool]] = collections.deque(maxlen=self.ring_len)
         self.reset()
 
     def reset(self) -> None:
@@ -152,7 +156,7 @@ class Segmenter:
         speech = self.vad.is_speech(frame, SAMPLE_RATE)
         if not self.triggered:
             self.ring.append((frame, speech))
-            if sum(s for _, s in self.ring) >= 0.7 * self.ring.maxlen:
+            if sum(s for _, s in self.ring) >= 0.7 * self.ring_len:
                 self.triggered = True
                 self.buf = [f for f, _ in self.ring]
                 self.voiced = sum(s for _, s in self.ring)
@@ -177,7 +181,9 @@ class Segmenter:
         return None
 
 
-async def utterances(mic: Microphone, seg: Segmenter, is_echo, out: asyncio.Queue[Utterance]):
+async def utterances(
+    mic: Microphone, seg: Segmenter, is_echo: Callable[[], bool], out: asyncio.Queue[Utterance]
+) -> None:
     """Consume mic frames forever, emitting Utterances. is_echo() reports TTS activity."""
     started, echo = 0.0, False
     silent_since = time.monotonic()

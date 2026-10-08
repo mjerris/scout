@@ -21,11 +21,11 @@ W = WakeConfig()
         ("A conversation with an assistant named Claude.", None),
     ],
 )
-def test_strip_wake(heard, cmd):
+def test_strip_wake(heard: str, cmd: str | None) -> None:
     assert strip_wake(heard, W.names, W.max_position) == cmd
 
 
-def test_stop_and_reset():
+def test_stop_and_reset() -> None:
     assert is_stop("stop") and is_stop("Stomp") and is_stop("never mind")
     assert not is_stop("stop the build after the tests finish please")
     assert is_reset("new conversation") and not is_reset(
@@ -44,7 +44,7 @@ def test_stop_and_reset():
         ("hmm what?", None),
     ],
 )
-def test_yes_no(text, answer):
+def test_yes_no(text: str, answer: bool | None) -> None:
     assert parse_yes_no(text) is answer
 
 
@@ -61,11 +61,11 @@ def test_yes_no(text, answer):
         ("I ran it and it printed hello.", "I ran it, and it printed hello.", ""),
     ],
 )
-def test_strip_own_speech(heard, spoken, rest):
+def test_strip_own_speech(heard: str, spoken: str, rest: str) -> None:
     assert strip_own_speech(heard, spoken) == rest
 
 
-def test_to_speech_flattens_markdown():
+def test_to_speech_flattens_markdown() -> None:
     out = to_speech(
         "## Result\n**Done!** Here's `foo`:\n```py\nprint(1)\n```\n- one\n- two\nSee [docs](https://x.y)"
     )
@@ -87,7 +87,7 @@ def test_to_speech_flattens_markdown():
         ("make it quieter", False),
     ],
 )
-def test_is_stop_whole_utterance(text, stop):
+def test_is_stop_whole_utterance(text: str, stop: bool) -> None:
     assert is_stop(text) is stop
 
 
@@ -102,10 +102,10 @@ def test_is_stop_whole_utterance(text, stop):
         ("tell me about the new conversation feature", False),
     ],
 )
-def test_is_reset_whole_utterance(text, reset):
+def test_is_reset_whole_utterance(text: str, reset: bool) -> None:
     assert is_reset(text) is reset
 
 
-def test_strip_own_speech_keeps_words_before_our_speech():
+def test_strip_own_speech_keeps_words_before_our_speech() -> None:
     heard = "Claude what's the weather your timer is done"
     assert strip_own_speech(heard, "Your timer is done.") == "claude what's the weather"

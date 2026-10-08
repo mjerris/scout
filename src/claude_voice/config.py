@@ -5,6 +5,7 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -164,7 +165,7 @@ class Config:
         return q if q.is_absolute() else ROOT / q
 
 
-def _merge(obj, data: dict, where: str) -> None:
+def _merge(obj: Any, data: dict[str, Any], where: str) -> None:
     for f in fields(obj):
         if f.name not in data:
             continue

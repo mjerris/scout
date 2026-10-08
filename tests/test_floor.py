@@ -1,6 +1,9 @@
 """The floor (one speaker at a time), "hang on", and pronunciation rules."""
 
 import asyncio
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any, TypeVar
 
 import pytest
 
@@ -8,12 +11,14 @@ from claude_voice.floor import Floor
 from claude_voice.pronounce import Pronouncer, parse
 from claude_voice.speech import split_wait
 
+T = TypeVar("T")
 
-def run(coro):
+
+def run[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
 
-def test_one_holder_at_a_time():
+def test_one_holder_at_a_time() -> None:
     f = Floor()
     assert f.try_acquire("room")
     assert not f.try_acquire("desk#1")
@@ -21,15 +26,15 @@ def test_one_holder_at_a_time():
     assert f.try_acquire("desk#1")
 
 
-def test_release_by_non_holder_is_ignored():
+def test_release_by_non_holder_is_ignored() -> None:
     f = Floor()
     f.try_acquire("room")
     f.release("desk#1")
     assert f.owner() == "room"
 
 
-def test_hold_keeps_floor_then_lapses():
-    async def go():
+def test_hold_keeps_floor_then_lapses() -> None:
+    async def go() -> tuple[bool, bool, bool]:
         f = Floor()
         f.try_acquire("desk#1")
         f.release("desk#1", hold=True, ttl=0.3)
@@ -42,13 +47,13 @@ def test_hold_keeps_floor_then_lapses():
     assert run(go()) == (True, True, True)
 
 
-def test_waiters_get_floor_in_order():
-    async def go():
+def test_waiters_get_floor_in_order() -> None:
+    async def go() -> list[str]:
         f = Floor()
         f.try_acquire("room")
-        order = []
+        order: list[str] = []
 
-        async def want(agent):
+        async def want(agent: str) -> None:
             if await f.acquire(agent, wait=2):
                 order.append(agent)
                 await asyncio.sleep(0.05)
@@ -64,8 +69,8 @@ def test_waiters_get_floor_in_order():
     assert run(go()) == ["a", "b"]
 
 
-def test_wait_times_out():
-    async def go():
+def test_wait_times_out() -> None:
+    async def go() -> tuple[bool, list[str]]:
         f = Floor()
         f.try_acquire("room")
         return await f.acquire("desk#1", wait=0.3), f.status()["queue"]
@@ -84,17 +89,17 @@ def test_wait_times_out():
         ("hold on to that file", "hold on to that file", False),
     ],
 )
-def test_split_wait(text, rest, waiting):
+def test_split_wait(text: str, rest: str, waiting: bool) -> None:
     assert split_wait(text) == (rest, waiting)
 
 
-def test_pronounce_defaults():
+def test_pronounce_defaults() -> None:
     p = Pronouncer()
     assert p.tts("edit config.toml") == "edit config dot toml"
     assert p.stt("hey clawed, open signal wire") == "hey Claude, open SignalWire"
 
 
-def test_pronounce_user_rules(tmp_path):
+def test_pronounce_user_rules(tmp_path: Path) -> None:
     f = tmp_path / "pronounce.txt"
     f.write_text("TTS  '\\bTali\\b'  'Tar-lee'  # dog\nbogus line\nSTT '\\b3M\\b' 'three M'\n")
     p = Pronouncer(f)
@@ -103,7 +108,7 @@ def test_pronounce_user_rules(tmp_path):
     assert len(parse("TTS (unclosed x")) == 0
 
 
-def test_same_agent_cannot_hold_two_exchanges():
+def test_same_agent_cannot_hold_two_exchanges() -> None:
     f = Floor()
     assert f.try_acquire("desk#1")
     assert not f.try_acquire("desk#1")  # a parallel second call waits
@@ -111,10 +116,10 @@ def test_same_agent_cannot_hold_two_exchanges():
     assert f.try_acquire("desk#1")  # but it can re-take its own hold
 
 
-def test_web_hosts_never_all_interfaces(monkeypatch):
+def test_web_hosts_never_all_interfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     from claude_voice import web
 
-    async def no_tailscale():
+    async def no_tailscale() -> None:
         return None
 
     monkeypatch.setattr(web, "_lan_ip", lambda: "10.0.0.5")

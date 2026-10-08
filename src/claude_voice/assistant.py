@@ -10,8 +10,10 @@ import logging.handlers
 import time
 import wave
 from collections import deque
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import gate, speech
@@ -49,14 +51,16 @@ class _Listen:
     """A Claude session (via MCP) waiting for the user's spoken reply."""
 
     agent: str
-    fut: asyncio.Future
+    fut: asyncio.Future[Any]
     since: float  # only speech that starts after this counts
     parts: list[str]
     extend: bool = False  # "hang on" asked for more time
 
 
 class Assistant:
-    def __init__(self, cfg: Config, asr: Transcriber, speaker: Speaker, pronounce: Pronouncer | None = None):
+    def __init__(
+        self, cfg: Config, asr: Transcriber, speaker: Speaker, pronounce: Pronouncer | None = None
+    ) -> None:
         self.cfg = cfg
         self.asr = asr
         self.speaker = speaker
@@ -70,13 +74,13 @@ class Assistant:
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
         self.mic_muted = False
         self.follow_up_until = 0.0
-        self._turn: asyncio.Task | None = None
+        self._turn: asyncio.Task[Any] | None = None
         self._silence_turn = False  # set by stop(): drain the turn without speaking
         self._queued: str | None = None  # follow-up spoken over the end of a reply
         self._held_words: list[str] = []  # words before a "hang on"
         self._held_until = 0.0  # ...kept only while the wait window is open
         self._ref_db: float | None = None  # your voice level on accepted wake requests
-        self._confirm_fut: asyncio.Future | None = None
+        self._confirm_fut: asyncio.Future[Any] | None = None
         self._confirm_lock = asyncio.Lock()  # parallel tool calls ask one at a time
         self._confirm_gen = 0  # bumped by stop(): queued questions are dropped, not asked
         self._confirm_started = 0.0
@@ -84,11 +88,11 @@ class Assistant:
         self._discuss_stop: asyncio.Event | None = None  # set by stop() during a discuss call
         # Where the current room turn's speech goes: the mini's speakers and/or
         # the web page (by client id) that asked.
-        self._out: dict = {"mini": True, "client": None}
-        self.history: deque[dict] = deque(maxlen=300)
-        self._listeners: set[asyncio.Queue[dict]] = set()
-        self._saved: deque = deque()
-        self._bg: set[asyncio.Task] = set()  # keeps fire-and-forget tasks alive until done
+        self._out: dict[str, Any] = {"mini": True, "client": None}
+        self.history: deque[dict[str, Any]] = deque(maxlen=300)
+        self._listeners: set[asyncio.Queue[dict[str, Any]]] = set()
+        self._saved: deque[Path] = deque()
+        self._bg: set[asyncio.Task[Any]] = set()  # keeps fire-and-forget tasks alive until done
 
     # --- events: web page, transcript file ------------------------------------------
 
@@ -100,21 +104,21 @@ class Assistant:
         for q in list(self._listeners):
             q.put_nowait(ev)
 
-    def _write_transcript(self, ev: dict) -> None:
+    def _write_transcript(self, ev: dict[str, Any]) -> None:
         _transcript_log().info(json.dumps(ev, default=str))
 
-    def _spawn(self, coro) -> asyncio.Task:
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         self._bg.add(task)
         task.add_done_callback(self._bg.discard)
         return task
 
-    def subscribe(self) -> asyncio.Queue[dict]:
-        q: asyncio.Queue[dict] = asyncio.Queue()
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._listeners.add(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue[dict]) -> None:
+    def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
         self._listeners.discard(q)
 
     def _timer_done(self, label: str) -> None:
@@ -160,7 +164,7 @@ class Assistant:
         self.rules.remove(index)
         self.emit("rules", rules=self.rules.listing())
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "mic_muted": self.mic_muted,
@@ -301,16 +305,19 @@ class Assistant:
         text: str,
         cmd: str | None,
         started: float,
-        check,
+        check: Callable[[str], str | None],
         direct: bool,
         speak: bool = True,
         client: str | None = None,
     ) -> str | None:
-        reply = lambda msg: self._reply(msg, speak, client)  # noqa: E731
         """Where a heard utterance goes. Shared by the mic and web push-to-talk.
         `check(kind)` returns a gate rejection reason (None = passes); `direct`
         means the user addressed us explicitly (push-to-talk), no wake word needed.
         Returns a reason when the utterance was ignored."""
+
+        def reply(msg: str) -> None:
+            self._reply(msg, speak, client)
+
         confirming = self._confirm_fut is not None and not self._confirm_fut.done()
         via = {"via": "web"} if direct else {}
 
@@ -351,7 +358,7 @@ class Assistant:
                 self._confirm_started = float("inf")
                 reply("Sorry, was that a yes or a no?")
                 self._spawn(self._reopen_confirm())
-            else:
+            elif self._confirm_fut is not None:
                 self._confirm_fut.set_result(answer)
             return None
 
@@ -428,7 +435,7 @@ class Assistant:
             text, cmd, time.monotonic(), lambda kind: None, direct=True, speak=speak, client=client
         )
 
-    async def submit_audio(self, pcm: bytes, speak: bool = True, client: str | None = None) -> dict:
+    async def submit_audio(self, pcm: bytes, speak: bool = True, client: str | None = None) -> dict[str, Any]:
         """A clip recorded on the web page: no wake word needed, same gate and routing."""
         t = await self.asr.transcribe(pcm)
         t.text = self.pronounce.stt(t.text)
@@ -448,6 +455,8 @@ class Assistant:
 
     def _listen_got(self, text: str) -> None:
         lst = self._listen
+        if lst is None:
+            return
         body, waiting = speech.split_wait(text)
         if waiting:
             if body:
@@ -472,7 +481,7 @@ class Assistant:
         hold: bool = False,
         voice: str | None = None,
         wait_for_floor: float = 0.0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Speak `message` for a Claude session and (optionally) return the
         user's spoken reply, filtered by the same gate as the room assistant."""
         agent = (agent or "session").strip()[:40] or "session"
@@ -521,7 +530,7 @@ class Assistant:
             self.floor.release(agent, hold=hold and not stopped.is_set())
             self._set_state(prev_state if prev_state != "agent" else "idle")
 
-    def voice_status(self) -> dict:
+    def voice_status(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "mic_muted": self.mic_muted,
@@ -630,7 +639,7 @@ class Assistant:
         if self._silence_turn:  # the turn was stopped; don't ask about its tools
             return False
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[Any] = loop.create_future()
         self._confirm_started = float("inf")  # no speech counts until the question has been asked
         self._confirm_fut = fut
         self.emit("confirm", text=description)
@@ -688,7 +697,7 @@ class Assistant:
         self.answer_confirm(False)
         if self._listen is not None and not self._listen.fut.done():
             self._listen.fut.set_result("stop")
-        if self.busy:
+        if self._turn is not None and not self._turn.done():
             await self.brain.interrupt()
             self._turn.cancel()
         await self.brain.close()
@@ -698,5 +707,5 @@ class Assistant:
         self.emit("state", **self.snapshot())
 
 
-def _preview(args: dict) -> dict:
+def _preview(args: dict[str, Any]) -> dict[str, Any]:
     return {k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v) for k, v in args.items()}

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 class Transcriber:
-    def __init__(self, model: str, language: str):
+    def __init__(self, model: str, language: str) -> None:
         self.model = model
         self.language = language or None
         # MLX work stays on one thread.
