@@ -171,3 +171,95 @@ def test_speaker_overlap_math():
     s._played = deque([[10.0, 12.0, "a"], [13.0, 14.0, "b"]])
     assert s.overlap(11.0, 13.5) == pytest.approx(1.5)
     assert s.overlap(14.5, 16.0) == 0.0
+
+
+def test_stop_while_waiting_for_floor_cancels_the_turn():
+    async def go():
+        a = make()
+        asked = []
+
+        async def fake_ask(text):
+            asked.append(text)
+            yield "result", None
+        a.brain.ask = fake_ask
+        a.floor.try_acquire("desk#1")
+        a.start_turn("delete the build folder")
+        await asyncio.sleep(0.05)
+        await a.stop()
+        a.floor.release("desk#1")
+        await asyncio.sleep(0.8)
+        return asked, a.floor.owner()
+    asked, owner = run(go())
+    assert asked == [] and owner is None
+
+
+def test_busy_reply_goes_to_whoever_spoke():
+    async def go():
+        a = make()
+        a._turn = asyncio.create_task(asyncio.sleep(1))  # a web client's turn is running
+        a._out = {"mini": False, "client": "phone"}
+        events = a.subscribe()
+        await hear(a, "Claude, what time is it")  # someone in the room, via the mic
+        a._turn.cancel()
+        says = []
+        while not events.empty():
+            ev = events.get_nowait()
+            if ev["type"] == "say":
+                says.append(ev)
+        return a.speaker.said, says
+    said, says = run(go())
+    assert said == ["I'm still working on the last request. Say stop to cancel it."] and says == []
+
+
+def test_typed_stop_and_reset_are_handled_not_sent_to_claude():
+    async def go():
+        a = make()
+        sent = []
+        a.start_turn = lambda text, speak=True, client=None: sent.append(text) or True
+        resets = []
+
+        async def fake_reset():
+            resets.append(1)
+        a.reset = fake_reset
+        await a.submit_text("new conversation", speak=False, client="phone")
+        await asyncio.sleep(0.01)
+        await a.submit_text("what's the weather", speak=False, client="phone")
+        return sent, resets
+    sent, resets = run(go())
+    assert resets == [1] and sent == ["what's the weather"]
+
+
+def test_typed_reply_reaches_a_listening_session():
+    async def go():
+        a = make()
+        task = asyncio.create_task(a.discuss("desk#1", "Deploy?", listen=True, timeout=3))
+        await asyncio.sleep(0.05)
+        await a.submit_text("yes, go ahead", speak=False, client="phone")
+        return await task
+    assert run(go()) == {"status": "ok", "text": "yes, go ahead"}
+
+
+def test_bare_stop_while_listening_releases_the_floor_hold():
+    async def go():
+        a = make()
+        task = asyncio.create_task(a.discuss("desk#1", "Deploy?", listen=True, timeout=3, hold=True))
+        await asyncio.sleep(0.05)
+        await hear(a, "stop", started=time.monotonic())
+        r = await task
+        return r, a.floor.owner()
+    r, owner = run(go())
+    assert r["status"] == "stopped" and owner is None
+
+
+def test_timer_does_not_take_the_rooms_name():
+    async def go():
+        a = make()
+        a.floor.try_acquire("room")
+        a.floor.release("room", hold=True, ttl=0.3)  # room's follow-up hold
+        a._timer_done("tea")
+        await asyncio.sleep(0.1)
+        early = list(a.speaker.said)
+        await asyncio.sleep(0.8)
+        return early, a.speaker.said
+    early, later = run(go())
+    assert early == [] and later == ["Your tea timer is done."]
