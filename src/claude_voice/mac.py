@@ -265,6 +265,8 @@ _SET_MUTED = 'on run argv\nset volume output muted ((item 1 of argv) is "true")\
 
 async def get_volume() -> tuple[int, bool]:
     level, muted = (await osascript(_GET_VOLUME)).split(",")
+    if not level.strip().isdigit():  # e.g. "missing value" on HDMI outputs
+        raise ToolError("this audio output doesn't report a volume level")
     return int(level), muted.strip() == "true"
 
 
@@ -272,12 +274,13 @@ async def volume(level: int | None = None, change: int | None = None, mute: bool
     if mute is not None:
         await osascript(_SET_MUTED, "true" if mute else "false")
         return "Muted." if mute else "Unmuted."
-    current, _ = await get_volume()
     if level is not None:
         target = check_int(level, 0, 100, "level")
     elif change is not None:
+        current, _ = await get_volume()
         target = max(0, min(100, current + check_int(change, -100, 100, "change")))
     else:
-        return f"Volume is {current}."
+        current, muted = await get_volume()
+        return f"Volume is {current}" + (" (muted)." if muted else ".")
     await osascript(_SET_VOLUME, str(target))
     return f"Volume set to {target}."

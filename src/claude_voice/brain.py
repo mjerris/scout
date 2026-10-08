@@ -24,6 +24,8 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from pathlib import Path
+
 from .config import ROOT, ClaudeConfig
 from .rules import Rules, rule_for
 
@@ -142,6 +144,10 @@ class Brain:
 
     async def _pre_tool_use(self, hook_input, tool_use_id, context):
         name, args = hook_input["tool_name"], hook_input["tool_input"]
+        if reason := self._forbidden(name, args):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "permissionDecision": "deny",
+                                           "permissionDecisionReason": reason}}
         if name in self.cfg.auto_allow_tools or name in self.tool_names or (
             name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
         ):
@@ -153,6 +159,21 @@ class Brain:
             "permissionDecisionReason": "approved by voice" if answer
             else _NO_ANSWER if answer is None else _DENIED,
         }}
+
+    def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
+        """Calls the voice agent may never make, whatever the user answers."""
+        if name.startswith("mcp__voice__"):
+            return "The voice tool is for other sessions; you already own the voice."
+        if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+            path = args.get("file_path") or args.get("notebook_path") or ""
+            try:
+                inside = Path(os.path.expanduser(path)).resolve().is_relative_to(ROOT)
+            except (OSError, ValueError):
+                inside = False
+            if inside:
+                return ("This voice app is maintained by its owner session; use "
+                        "request_app_change instead of editing it.")
+        return None
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
         if self.rules.matches(name, args):
@@ -169,6 +190,8 @@ class Brain:
         return answer
 
     async def _can_use_tool(self, name: str, args: dict[str, Any], ctx: ToolPermissionContext):
+        if reason := self._forbidden(name, args):
+            return PermissionResultDeny(message=reason)
         answer = await self._ask(name, args)
         if answer:
             return PermissionResultAllow()

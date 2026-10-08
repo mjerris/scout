@@ -38,9 +38,16 @@ def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
     return None
 
 
+_STOP_FILLER = {"please", "now", "it", "that", "that's", "thats", "ok", "okay", "claude", "just",
+                "right", "talking", "a", "the"}
+
+
 def is_stop(cmd: str) -> bool:
-    w = " ".join(words(cmd))
-    return w in STOP_WORDS or (len(w.split()) <= 3 and any(s in w for s in STOP_WORDS))
+    """True only when the whole utterance is a stop phrase, give or take filler
+    ("stop", "stop talking", "that's enough", "never mind please"). "Cancel the
+    timer" or "no, cancel it" are requests/answers, not stops."""
+    w = [x for x in words(cmd) if x not in _STOP_FILLER]
+    return bool(w) and " ".join(w) in STOP_WORDS
 
 
 def is_reset(cmd: str) -> bool:
