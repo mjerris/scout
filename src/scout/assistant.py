@@ -86,10 +86,16 @@ class Assistant:
         self.floor = Floor(cfg.floor.hold_seconds)
         self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
-        self._local = local_intents.Context(self.timers)
+        self._local = local_intents.Context(self.timers, last_spoken=lambda: self.last_spoken)
         self.recent_local: deque[tuple[float, str, str]] = deque(maxlen=10)
         self.tier1: tier1.LocalModel | None = None  # loaded by start_tier1()
-        server, names = build_server(self.timers)
+        # What Claude sessions said out loud (time, session, text, waited for a reply),
+        # so the room knows who the user might be answering; and replies the room passed
+        # on, delivered with that session's next discuss call.
+        self.session_said: deque[tuple[float, str, str, bool]] = deque(maxlen=20)
+        self.session_inbox: dict[str, list[tuple[float, str]]] = {}
+        self.last_spoken: tuple[str, str] | None = None  # (who, text) for "say that again"
+        server, names = build_server(self.timers, self.relay)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
@@ -596,14 +602,25 @@ class Assistant:
         cancelled = False
         try:
             self._set_state("agent")
+            relayed = self.take_relayed(agent)
+
+            def result(**d: Any) -> dict[str, Any]:
+                return {**d, "relayed": relayed} if relayed else d
+
             if message:
                 self.emit("agent_said", agent=agent, text=message)
+                self.session_said.append((time.time(), agent, message, listen))
+                self.last_spoken = (agent, message)
                 self.speaker.speak(speech.to_speech(message), voice=voice)
                 await self.speaker.wait_idle()
             if stopped.is_set():
-                return {"status": "stopped", "text": ""}
+                return result(status="stopped", text="")
             if not listen:
-                return {"status": "ok", "spoke": bool(message)}
+                if message:
+                    # Not waiting for an answer, but the user may give one: listen briefly
+                    # without the wake word; the room hears it with this message in context.
+                    self.follow_up_until = time.monotonic() + self.cfg.wake.follow_up_seconds
+                return result(status="ok", spoke=bool(message))
             fut = asyncio.get_running_loop().create_future()
             barged, self._message_barged = self._message_barged, None
             # If the user talked over the message, what they're saying is the reply.
@@ -624,10 +641,10 @@ class Assistant:
                     text = " ".join(parts).strip() if parts else None
                     break
             if text is None:
-                return {"status": "no_reply", "text": ""}
+                return result(status="no_reply", text="")
             if speech.is_stop(text):
-                return {"status": "stopped", "text": text}
-            return {"status": "ok", "text": text}
+                return result(status="stopped", text=text)
+            return result(status="ok", text=text)
         except asyncio.CancelledError:
             # The session gave up (Esc, exit, HTTP timeout): stop its speech too.
             cancelled = True
@@ -715,7 +732,9 @@ class Assistant:
             return False
         try:
             said = await local_intents.answer(text, self._local)
-            tier = 0
+            tier: int | None = 0
+            if said is not None and local_intents.is_repeat(text):
+                tier = None  # repeating isn't a new answer
             if said is None and self.tier1 is not None:
                 now = datetime.now().astimezone()
                 decision = await self.tier1.decide(text, now)
@@ -735,8 +754,26 @@ class Assistant:
         if said:
             self._set_state("speaking")
             self.say(said)
+            if tier is not None:
+                self.last_spoken = ("Scout", said)
         await self.speaker.wait_idle()
         return True
+
+    def relay(self, session: str, text: str) -> str:
+        """The room passes the user's words to a Claude session that spoke to them."""
+        known = {a for _, a, _, _ in self.session_said}
+        target = session if session in known else next((a for a in known if a.split("#")[0] == session), None)
+        if target is None:
+            return f"No session called {session!r} has spoken recently: " + (
+                ", ".join(sorted(known)) or "none"
+            )
+        self.session_inbox.setdefault(target, []).append((time.time(), text))
+        log.info("relayed to %s: %s", target, text)
+        return f"Passed to {target.split('#')[0]}; it gets it with its next voice call."
+
+    def take_relayed(self, agent: str) -> list[str]:
+        """Messages the room passed on for this session (cleared once delivered)."""
+        return [t for _, t in self.session_inbox.pop(agent, [])]
 
     async def start_tier1(self) -> None:
         """Load the local model in the background; requests use Claude until it's ready."""
@@ -763,6 +800,17 @@ class Assistant:
         recent = [(q, a) for ts, q, a in self.recent_local if time.time() - ts < 600]
         if recent:
             lines.append("Just answered locally: " + " | ".join(f"{q!r} -> {a!r}" for q, a in recent[-3:]))
+        said = [s for s in self.session_said if time.time() - s[0] < 600]
+        if said:
+            lines.append(
+                "Other Claude sessions said this aloud recently; the user may be answering or asking about "
+                "one of them. If they're replying to a session, pass it on with pass_to_session and say so "
+                "briefly; if they want it repeated, repeat it:"
+            )
+            for ts, agent, msg, waited in said[-4:]:
+                when = datetime.fromtimestamp(ts).strftime("%-I:%M %p")
+                note = "it waited for a reply" if waited else "it did not wait for a reply"
+                lines.append(f"  [{when}, session {agent}, {note}] {msg}")
         low = text.lower()
         try:
             if _CALENDARISH.search(low):
@@ -825,8 +873,11 @@ class Assistant:
                         if said:
                             self._set_state("speaking")
                             self.say(said)
+                    if kind == "text":
+                        self.last_spoken = ("Scout", data)
                 elif kind == "spoken":  # its sentences were spoken as they arrived
                     self.emit("claude", text=data)
+                    self.last_spoken = ("Scout", data)
                 elif kind == "tool":
                     name, args = data
                     self.emit("tool", name=name, input=_preview(args))

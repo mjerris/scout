@@ -140,6 +140,16 @@ def call_timeout(message: str, listen_timeout: float, wait_for_floor: float, lis
 
 
 def describe(r: dict[str, Any], wait_for_response: bool) -> str:
+    relayed = [m for m in r.get("relayed") or [] if isinstance(m, str) and m.strip()]
+    text = _describe(r, wait_for_response)
+    if relayed:
+        text += "\nThe user also answered you earlier, through the room (relayed): " + " | ".join(
+            f'"{m}"' for m in relayed
+        )
+    return text
+
+
+def _describe(r: dict[str, Any], wait_for_response: bool) -> str:
     status = r.get("status")
     if status == "ok":
         if not wait_for_response:

@@ -88,7 +88,9 @@ def _human(seconds: float) -> str:
     return " ".join(parts) or "0 seconds"
 
 
-def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
+def build_server(
+    timers: Timers, relay: Callable[[str, str], str] = lambda s, t: "relaying isn't available"
+) -> tuple[McpSdkServerConfig, list[str]]:
     def wrap(
         fn: Callable[[dict[str, Any]], Awaitable[str]],
     ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
@@ -170,6 +172,12 @@ def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
         tool("cancel_timer", "Cancel timers by label or number, or 'all'.", {"which": str})(
             wrap(lambda a: _async(_cancelled(timers.cancel(a.get("which", "")))))
         ),
+        tool(
+            "pass_to_session",
+            "Pass the user's words to another Claude session that spoke to them out loud (session "
+            "names are in the request context). Use it when the user is answering that session.",
+            {"session": str, "message": str},
+        )(wrap(lambda a: _async(relay(str(a.get("session", "")), str(a.get("message", "")))))),
         tool(
             "request_app_change",
             "Send a requested change to this voice app (how it listens, talks, asks for "
