@@ -330,8 +330,9 @@ Settings → Internet Accounts with Mail on, or in Mail itself). The app drives
 Mail with JavaScript for Automation; the first use shows a "control Mail"
 prompt on the Mac's screen (System Settings → Privacy & Security → Automation).
 
-- Reading (`mail_recent`, `mail_search`, `mail_read`) and drafting
-  (`mail_draft`: opens a draft in Mail, sends nothing) run without asking.
+- Reading (`mail_recent`, `mail_search`, `mail_read`, `mail_read_full`) and
+  drafting (`mail_draft`: opens a draft in Mail, sends nothing) run without
+  asking. What the reads give Claude depends on the privacy mode (below).
 - Sending (`mail_send`) is confirmed by voice every time ("Send email to
   sam@example.com, subject Lunch?"), with the full message on the web page;
   "yes, always" doesn't apply. No attachments, forwarding or deleting.
@@ -374,3 +375,37 @@ do. Drag `scout-messages` into the list (or click +, press Cmd-Shift-G and paste
 `~/Library/Application Support/Scout/bin/scout-messages`), turn it on, and
 Scout says "Got it" a few seconds later. To take it back, turn it off or remove
 it in the same list.
+
+## Privacy: what Claude sees
+
+Scout keeps your private data on the Mac where a local model can do the job.
+Email is summarized by the tier 1 model (`claude.local_model`) on this Mac, and
+`privacy.mode` in config.toml (enforced in code, `src/scout/privacy.py`) decides
+what reaches Claude, for the room and every other session alike:
+
+| | `strict` | `balanced` (default) | `open` |
+|---|---|---|---|
+| Email listings | sender, subject | sender, subject, one-line local summary | sender, subject |
+| One email (`mail_read`) | sender, recipients, subject | same, plus a few-sentence local summary | full text |
+| Exact text (`mail_read_full`) | refused | full text (for quoting in a reply) | full text |
+| Calendar | titles, times, places | titles, times, places | plus notes and attendees |
+| Memories | none | the ones that bear on the request | the ones that bear on the request |
+| Local answers from private data | withheld | shared | shared |
+
+In strict mode Claude says plainly when a task needs more. Asked directly, Scout
+itself always answers locally: "what did the Rover email say" and "summarize my
+unread mail" are read and summarized on the Mac and spoken, without Claude.
+
+Emails that address an AI, try to give instructions, or are password or prize
+lures are caught in code before the model sees them and described as "looks
+like a scam or a manipulation attempt" (small models relay injected claims as
+fact). Other summaries are attributed to the sender ("Pat asks you to...").
+
+## Memory
+
+Tell Scout things to keep: "remember that my dentist is Dr. Lee", "note that
+Pat is my manager". Ask "who's my dentist", "what do you know about Pat", "what
+do you remember", or "forget my dentist". Plain code answers these, and the
+facts live in `state/memory.json` in Scout's data folder. Claude sees a memory
+only when it shares words with the request (and not in strict mode); the room
+agent can also `remember`, `forget` and `recall`.

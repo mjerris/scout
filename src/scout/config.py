@@ -185,7 +185,8 @@ class ClaudeConfig:
     # itself, read-only, and hands everything else to Claude. "" turns it off.
     # Download it with scripts/fetch-models.sh (Qwen3 4B, 2.3 GB): it was the only
     # candidate that handled all 13 test lookups with none of 23 "needs Claude"
-    # requests kept (scripts/bench_tier1.py), deciding in a median 0.7 s.
+    # requests kept (scripts/bench_tier1.py), deciding in a median 0.7 s. It also
+    # writes the email summaries Claude gets instead of email (privacy.mode).
     local_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     # Prefix each request with context (date and time, running timers, recent local
     # answers) and, for calendar or mail questions, the data itself, so Claude can
@@ -231,6 +232,21 @@ class MessagesConfig:
 
 
 @dataclass
+class PrivacyConfig:
+    # What of your private data Claude sees (src/scout/privacy.py):
+    # "strict": no email text (not even summaries of it), calendar notes or memories;
+    #   Claude sees senders, subjects and event titles and times, and says when that
+    #   isn't enough. Scout itself still summarizes mail aloud with the local model.
+    # "balanced": summaries written by the local model instead of email text (Claude
+    #   asks for the full text, with mail_read_full, only when a task needs the exact
+    #   words); event titles and times without notes or attendees; only memories
+    #   that bear on the request.
+    # "open": everything, as the tools return it.
+    # Summaries need the local model (claude.local_model).
+    mode: str = "balanced"
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -243,6 +259,7 @@ class Config:
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to Scout's data folder."""

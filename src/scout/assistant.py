@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import briefing, calendar_mac, gate, local_intents, mail_mac, shared_tools, speech, tier1
+from . import briefing, gate, local_intents, memory, privacy, shared_tools, speech, tier1
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -87,7 +87,11 @@ class Assistant:
         self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
         self._local = local_intents.Context(self.timers, last_spoken=lambda: self.last_spoken)
-        self.recent_local: deque[tuple[float, str, str]] = deque(maxlen=10)
+        # (time, request, answer, from private data): private ones reach Claude only if
+        # the privacy mode allows.
+        self.recent_local: deque[tuple[float, str, str, bool]] = deque(maxlen=10)
+        self.privacy = privacy.configure(cfg.privacy.mode)
+        self.memory = memory.Memory(DATA / "state" / "memory.json")
         self.tier1: tier1.LocalModel | None = None  # loaded by start_tier1()
         # What Claude sessions said out loud (time, session, text, waited for a reply),
         # so the room knows who the user might be answering; and replies the room passed
@@ -95,7 +99,7 @@ class Assistant:
         self.session_said: deque[tuple[float, str, str, bool]] = deque(maxlen=20)
         self.session_inbox: dict[str, list[tuple[float, str]]] = {}
         self.last_spoken: tuple[str, str] | None = None  # (who, text) for "say that again"
-        server, names = build_server(self.timers, self.relay)
+        server, names = build_server(self.timers, self.relay, self.memory)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
@@ -749,13 +753,18 @@ class Assistant:
         try:
             said = await local_intents.answer(text, self._local)
             tier: int | None = 0
+            private = False  # worked out from private data (a memory, an email's text)
             if said is not None and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
+            if said is None:
+                said = memory.answer(text, self.memory)
+                private = said is not None
             if said is None and self.tier1 is not None:
                 now = datetime.now().astimezone()
                 decision = await self.tier1.decide(text, now)
                 if decision is not None:
-                    said, tier = await tier1.run(decision, now), 1
+                    said, tier = await tier1.run(decision, now, self.privacy.summaries), 1
+                    private = decision["tool"] == "mail_summarize"
                     self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
         except ToolError as exc:  # e.g. calendar access not allowed yet: say why
             said = f"Sorry, {exc}"
@@ -766,7 +775,7 @@ class Assistant:
             return False
         log.info("answered locally (tier %d): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
-        self.recent_local.append((time.time(), text, said or "(done)"))
+        self.recent_local.append((time.time(), text, said or "(done)", private))
         if said:
             self._set_state("speaking")
             self.say(said)
@@ -794,7 +803,8 @@ class Assistant:
     async def start_tier1(self) -> None:
         """Load the local model in the background; requests use Claude until it's ready."""
         name = self.cfg.claude.local_model
-        if not name or not self.cfg.claude.local_first:
+        # Wanted for tier 1, and for the email summaries Claude gets instead of email.
+        if not name or not (self.cfg.claude.local_first or self.privacy.mode == "balanced"):
             return
         model = tier1.LocalModel(name)
         try:
@@ -803,6 +813,7 @@ class Assistant:
             log.warning("tier 1 model %s unavailable (%s); run scripts/fetch-models.sh", name, exc)
             return
         self.tier1 = model
+        self.privacy.summaries.model = model
         log.info("tier 1 ready: %s", name)
 
     async def _with_context(self, text: str) -> str:
@@ -813,9 +824,15 @@ class Assistant:
         lines = [f"Now: {now.strftime('%A, %B %-d, %Y, %-I:%M %p %Z')}."]
         if timers := self.timers.listing():
             lines.append("Timers running: " + "; ".join(timers) + ".")
-        recent = [(q, a) for ts, q, a in self.recent_local if time.time() - ts < 600]
+        recent = [
+            f"{q!r} -> {a!r}"
+            if self.privacy.shares_private_text or not private
+            else "(a request answered from private data; withheld in strict privacy mode)"
+            for ts, q, a, private in self.recent_local
+            if time.time() - ts < 600
+        ]
         if recent:
-            lines.append("Just answered locally: " + " | ".join(f"{q!r} -> {a!r}" for q, a in recent[-3:]))
+            lines.append("Just answered locally: " + " | ".join(recent[-3:]))
         said = [s for s in self.session_said if time.time() - s[0] < 600]
         if said:
             lines.append(
@@ -827,11 +844,14 @@ class Assistant:
                 when = datetime.fromtimestamp(ts).strftime("%-I:%M %p")
                 note = "it waited for a reply" if waited else "it did not wait for a reply"
                 lines.append(f"  [{when}, session {agent}, {note}] {msg}")
+        if facts := self.privacy.memories(self.memory, text):
+            lines.append("The user told Scout (memories that may bear on this request):")
+            lines += [f"  - {f}" for f in facts]
         low = text.lower()
         try:
             if _CALENDARISH.search(low):
                 start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                listing = await calendar_mac.events(
+                listing = await self.privacy.calendar_events(
                     start.isoformat(), (start + timedelta(days=2)).isoformat()
                 )
                 lines.append(
@@ -839,7 +859,8 @@ class Assistant:
                     + listing
                 )
             if _MAILISH.search(low):
-                lines.append("Newest email (fetched just now):\n" + await mail_mac.recent(5))
+                listing = await self.privacy.mail_list(5, budget_s=privacy.PREFETCH_BUDGET_S)
+                lines.append("Newest email (fetched just now):\n" + listing)
         except ToolError as exc:
             log.info("context prefetch skipped: %s", exc)
         return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
