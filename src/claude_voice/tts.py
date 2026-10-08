@@ -14,10 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import sounddevice as sd
 from kokoro_onnx import Kokoro
 
 if TYPE_CHECKING:
+    from .audio_io import AudioIO
     from .pronounce import Pronouncer
 
 # A queued item: (text to synthesize, voice, original wording) or a ready-made tone.
@@ -44,14 +44,15 @@ class Speaker:
         voices: str,
         voice: str,
         speed: float,
-        device: int | None,
+        io: AudioIO,
         echo_tail_ms: int,
         chimes: bool,
         pronounce: Pronouncer | None = None,
     ) -> None:
         self.kokoro = Kokoro(model, voices)
         self.pronounce = pronounce
-        self.voice, self.speed, self.device = voice, speed, device
+        self.voice, self.speed = voice, speed
+        self.io = io  # the voice layer: one engine for mic and speakers
         self.echo_tail = echo_tail_ms / 1000
         self.chimes = chimes
         self.sr = 24000
@@ -64,7 +65,6 @@ class Speaker:
         self._idle = asyncio.Event()
         self._idle.set()
         self._synth_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
-        self._play_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="play")
         self._tasks: list[asyncio.Task[Any]] = []
         # [start, end, text] per sentence actually played; end is inf while playing.
         self._played: deque[list[Any]] = deque(maxlen=100)
@@ -130,7 +130,7 @@ class Speaker:
     def stop(self) -> None:
         with self._play_lock:
             self._gen += 1
-            sd.stop()
+            self.io.stop_playback()
 
     async def synth_wav(self, text: str, voice: str | None = None) -> bytes:
         """Synthesize text to WAV bytes without playing it (for the web page)."""
@@ -185,15 +185,7 @@ class Speaker:
         samples, sr = self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
         return samples, sr
 
-    def _play_blocking(self, samples: np.ndarray, gen: int) -> None:
-        with self._play_lock:  # stop() can't slip in between this check and play()
-            if gen != self._gen:
-                return
-            sd.play(samples, self.sr, device=self.device)
-        sd.wait()
-
     async def _play_loop(self) -> None:
-        loop = asyncio.get_running_loop()
         while True:
             gen, samples, text = await self._audio.get()
             entry = None
@@ -203,7 +195,10 @@ class Speaker:
                     if text:
                         entry = [time.monotonic(), float("inf"), text]
                         self._played.append(entry)
-                    await loop.run_in_executor(self._play_pool, self._play_blocking, samples, gen)
+                    with self._play_lock:  # stop() can't slip in between the check and play()
+                        handle = self.io.play(samples, self.sr) if gen == self._gen else None
+                    if handle is not None:
+                        await handle.done
                     self.consecutive_failures = 0
             except Exception:
                 self.consecutive_failures += 1

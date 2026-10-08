@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 from typing import Any
 
 import numpy as np
@@ -191,10 +192,27 @@ class Segmenter:
         return None
 
 
+class _Frames(Protocol):
+    frames: asyncio.Queue[bytes]
+
+
+class _Segmenter(Protocol):
+    triggered: bool
+    last_voiced_ms: int
+    last_level_db: float
+
+    def feed(self, frame: bytes) -> bytes | bool | None: ...
+
+
 async def utterances(
-    mic: Microphone, seg: Segmenter, is_echo: Callable[[], bool], out: asyncio.Queue[Utterance]
+    mic: _Frames,
+    seg: _Segmenter,
+    is_echo: Callable[[], bool],
+    out: asyncio.Queue[Utterance],
+    on_onset: Callable[[bool], None] | None = None,
 ) -> None:
-    """Consume mic frames forever, emitting Utterances. is_echo() reports TTS activity."""
+    """Consume mic frames forever, emitting Utterances. is_echo() reports TTS
+    activity; on_onset(while_speaking) fires when speech starts (barge-in)."""
     started, echo = 0.0, False
     silent_since = time.monotonic()
     warned = False
@@ -227,6 +245,8 @@ async def utterances(
         if res is True:
             started, echo = time.monotonic(), is_echo()
             onset_floor = floor_db if floor_db is not None else -60.0
+            if on_onset is not None:
+                on_onset(echo)
         elif isinstance(res, bytes):
             stats = AudioStats(seg.last_voiced_ms, seg.last_level_db, onset_floor)
             await out.put(Utterance(res, started, echo, stats, time.monotonic()))

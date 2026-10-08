@@ -36,6 +36,17 @@ class AudioConfig:
     min_speech_ms: int = 300
     max_utterance_s: float = 30.0
     echo_tail_ms: int = 400  # ignore speech starting this soon after TTS stops
+    # The voice layer: "auto" (Apple voice processing on macOS when the helper is
+    # built, else WebRTC), "apple", "webrtc", or "plain" (no echo cancellation).
+    backend: str = "auto"
+    # Talking over the assistant stops it (needs an echo-cancelling backend).
+    barge_in: bool = True
+    # End of turn: "smart" (Silero VAD + smart-turn model; falls back to "simple"
+    # when the models aren't downloaded) or "simple" (silence_ms of quiet).
+    turn_detection: str = "smart"
+    min_pause_ms: int = 250  # smart: ask the turn model after this much quiet
+    max_pause_ms: int = 1500  # smart: end the turn after this much quiet regardless
+    turn_threshold: float = 0.5  # smart: "finished" probability that ends the turn
     # Keep the last N utterances (wav + json with transcript and stats) in
     # state/utterances/ for tuning. 0 = off. Audio stays on this machine.
     save_utterances: int = 0
