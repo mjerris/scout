@@ -42,6 +42,11 @@ class AudioConfig:
     backend: str = "auto"
     # Talking over the assistant stops it (needs an echo-cancelling backend).
     barge_in: bool = True
+    # WebRTC noise suppression on the mic. Off by default: it learns steady room
+    # noise and removes that band from speech too (measured on the Mac mini: a
+    # 3.5-4 kHz fan tone made it cut 8-11 dB there, and Whisper started hearing
+    # "Claude" as "cloud"/"clog"). Whisper handles background noise well.
+    noise_suppression: bool = False
     # End of turn: "smart" (Silero VAD + smart-turn model; falls back to "simple"
     # when the models aren't downloaded) or "simple" (silence_ms of quiet).
     turn_detection: str = "smart"
