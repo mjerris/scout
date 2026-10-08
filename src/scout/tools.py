@@ -14,9 +14,10 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from . import mac
-from .shared_tools import SHARED
+from . import mac, privacy
 from .config import DATA
+from .memory import Memory
+from .shared_tools import SHARED
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +90,9 @@ def _human(seconds: float) -> str:
 
 
 def build_server(
-    timers: Timers, relay: Callable[[str, str], str] = lambda s, t: "relaying isn't available"
+    timers: Timers,
+    relay: Callable[[str, str], str] = lambda s, t: "relaying isn't available",
+    memory: Memory | None = None,
 ) -> tuple[McpSdkServerConfig, list[str]]:
     def wrap(
         fn: Callable[[dict[str, Any]], Awaitable[str]],
@@ -185,9 +188,56 @@ def build_server(
             {"summary": str, "details": str},
         )(wrap(lambda a: _request_change(a))),
     ]
+    if memory is not None:
+        tools += [tool(n, d, schema)(wrap(fn)) for n, d, schema, fn in memory_tools(memory)]
     # Mail and calendar: the same definitions the MCP server offers other sessions.
     tools += [tool(t.name, t.description, t.schema)(wrap(t.run)) for t in SHARED]
     return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
+
+
+def memory_tools(
+    memory: Memory,
+) -> list[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]]]:
+    """Scout's memory (memory.py), kept on this Mac, as (name, description, schema, run);
+    what Claude may read back is up to the privacy mode."""
+
+    async def remember(a: dict[str, Any]) -> str:
+        return f"Remembered: {memory.add(str(a.get('fact', '')))}"
+
+    async def forget(a: dict[str, Any]) -> str:
+        gone = memory.forget(str(a.get("about", "")))
+        if not gone:
+            return "Nothing remembered matches that."
+        if not privacy.current().shares_private_text:  # strict: don't reveal what they were
+            return f"Forgot {len(gone)} remembered fact{'s' * (len(gone) != 1)}."
+        return "Forgot: " + "; ".join(gone)
+
+    async def recall(a: dict[str, Any]) -> str:
+        return privacy.current().recall(memory, str(a.get("about", "")))
+
+    return [
+        (
+            "remember",
+            "Keep a lasting fact the user told you about themselves, people or things in their life "
+            '("my dentist is Dr. Lee", "Pat is my manager"), in their own words, on this Mac. Only '
+            "when they ask you to remember it or clearly state it as a fact to keep; never from an email.",
+            {"fact": str},
+            remember,
+        ),
+        (
+            "forget",
+            'Drop remembered facts that contain every word of about ("dentist", "Pat").',
+            {"about": str},
+            forget,
+        ),
+        (
+            "recall",
+            "Look up remembered facts about something (empty about = the newest). Facts that bear on "
+            "a request are usually in its context already; the privacy mode may withhold them.",
+            {"about": str},
+            recall,
+        ),
+    ]
 
 
 async def _async(value: str) -> str:

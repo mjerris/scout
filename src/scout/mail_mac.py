@@ -75,6 +75,27 @@ function run(argv) {
 }
 """
 
+# Several messages by id in one pass over the inboxes (for local summaries).
+_READ_MANY = r"""
+function run(argv) {
+  const want = new Set(argv[0].split(",").map(x => parseInt(x))), limit = parseInt(argv[1]);
+  const Mail = Application("Mail");
+  const out = [];
+  for (const mb of Mail.inbox.mailboxes()) {
+    if (want.size === 0) break;
+    for (const id of mb.messages.id()) {
+      if (!want.has(id)) continue;
+      want.delete(id);
+      const m = mb.messages.byId(id);
+      const content = m.content() || "";
+      out.push({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
+        body: content.slice(0, limit), truncated: content.length > limit});
+    }
+  }
+  return JSON.stringify({messages: out, missing: Array.from(want)});
+}
+"""
+
 _COMPOSE = r"""
 function run(argv) {
   const [mode, to, cc, subject, body] = argv;
@@ -133,7 +154,8 @@ def _short_date(iso: str) -> str:
     return t.strftime("%a %b %-d")
 
 
-def format_list(data: dict[str, Any], what: str) -> str:
+def format_list(data: dict[str, Any], what: str, notes: dict[int, str] | None = None) -> str:
+    """The listing for Claude; `notes` adds a line under a message (its local summary)."""
     msgs = data.get("messages", [])
     if not msgs:
         return f"No {what}."
@@ -144,7 +166,20 @@ def format_list(data: dict[str, Any], what: str) -> str:
             f"id {m['id']}: {flag}{_short_date(m.get('date', ''))}, from {m.get('sender', '')}: "
             f"{m.get('subject') or '(no subject)'} (received {m.get('date', '')})"
         )
+        if notes and (note := notes.get(m["id"])):
+            lines.append(f"  {note}")
     return "\n".join(lines)
+
+
+async def listing(
+    count: Any = 10, unread_only: Any = False, query: Any = None, run: Runner = _jxa
+) -> dict[str, Any]:
+    """Inbox messages, newest first: {"messages": [{id, date, sender, subject, read}], ...}.
+    With a query: subject or sender matches from the last SEARCH_DAYS, read or not."""
+    n = mac.check_int(count if count is not None else 10, 1, 50, "count")
+    q = _clean(query, "query", 100)
+    days = SEARCH_DAYS if q else RECENT_DAYS
+    return await _call(run, _LIST, str(n), "true" if unread_only and not q else "false", q, str(days))
 
 
 async def message_data(
@@ -152,40 +187,66 @@ async def message_data(
 ) -> list[dict[str, Any]]:
     """Structured inbox messages (newest first) for spoken summaries: id, date, sender,
     subject, read. With a query: subject or sender matches, from the last SEARCH_DAYS."""
-    n = mac.check_int(count if count is not None else 5, 1, 50, "count")
-    q = _clean(query, "query", 100)
-    days = SEARCH_DAYS if q else RECENT_DAYS
-    data = await _call(run, _LIST, str(n), "true" if unread_only and not q else "false", q, str(days))
+    data = await listing(count if count is not None else 5, unread_only, query, run)
     msgs: list[dict[str, Any]] = data.get("messages", [])
     return msgs
 
 
 async def recent(count: Any = 10, unread_only: Any = False, run: Runner = _jxa) -> str:
-    n = mac.check_int(count if count is not None else 10, 1, 50, "count")
-    data = await _call(run, _LIST, str(n), "true" if unread_only else "false", "", str(RECENT_DAYS))
+    data = await listing(count, unread_only, None, run)
     return format_list(data, "unread messages in the inbox" if unread_only else "messages in the inbox")
 
 
-async def search(query: Any, count: Any = 10, run: Runner = _jxa) -> str:
+def search_query(query: Any) -> str:
     q = _clean(query, "query", 100)
     if not q:
         raise ToolError("query is required")
-    n = mac.check_int(count if count is not None else 10, 1, 50, "count")
-    data = await _call(run, _LIST, str(n), "false", q, str(SEARCH_DAYS))
-    return format_list(data, f"recent inbox messages matching {q!r}")
+    return q
 
 
-async def read(message_id: Any, run: Runner = _jxa) -> str:
-    mid = mac.check_int(message_id, 1, 2**31 - 1, "id")
-    m = await _call(run, _READ, str(mid), str(_MAX_BODY))
+async def search(query: Any, count: Any = 10, run: Runner = _jxa) -> str:
+    q = search_query(query)
+    return format_list(await listing(count, False, q, run), f"recent inbox messages matching {q!r}")
+
+
+def _check_id(value: Any) -> int:
+    return mac.check_int(value, 1, 2**31 - 1, "id")
+
+
+async def message(message_id: Any, run: Runner = _jxa) -> dict[str, Any]:
+    """One inbox message with its text: id, date, sender, subject, to, cc, body, truncated."""
+    return await _call(run, _READ, str(_check_id(message_id)), str(_MAX_BODY))
+
+
+async def bodies(ids: list[int], run: Runner = _jxa) -> dict[int, dict[str, Any]]:
+    """Several messages with their text, by id, in one call to Mail. Missing ids are left out."""
+    if not ids:
+        return {}
+    if len(ids) > 50:
+        raise ToolError("at most 50 messages at a time")
+    wanted = [_check_id(i) for i in ids]
+    data = await _call(run, _READ_MANY, ",".join(map(str, wanted)), str(_MAX_BODY))
+    return {int(m["id"]): m for m in data.get("messages", []) if m.get("id") in wanted}
+
+
+def header(m: dict[str, Any]) -> str:
+    """Subject, sender, time and recipients of a message (no text)."""
     head = (
         f"From {m.get('sender', '')}, {_short_date(m.get('date', ''))} (received {m.get('date', '')}), "
         f"to {', '.join(m.get('to', []))}"
     )
     if m.get("cc"):
         head += f", cc {', '.join(m['cc'])}"
+    return f"Subject: {m.get('subject', '')}\n{head}"
+
+
+def format_message(m: dict[str, Any]) -> str:
     body = m.get("body", "") + ("\n[message continues; truncated]" if m.get("truncated") else "")
-    return f"{_UNTRUSTED}\nSubject: {m.get('subject', '')}\n{head}\n\n{body}"
+    return f"{_UNTRUSTED}\n{header(m)}\n\n{body}"
+
+
+async def read(message_id: Any, run: Runner = _jxa) -> str:
+    return format_message(await message(message_id, run))
 
 
 def _clean(value: Any, what: str, limit: int) -> str:
