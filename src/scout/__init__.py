@@ -161,7 +161,13 @@ async def _watch(io: AudioIO, speaker: Speaker, events: asyncio.Queue[tuple[str,
         except TimeoutError:
             pass
         if io.seconds_since_frame() > 10:
-            log.error("no audio from the microphone for 10 s")
+            st = io.stats()
+            why = st.get("last_error") or "no error reported"
+            log.error(
+                "no audio from the microphone for 10 s (%s; callback errors: %s)",
+                why,
+                st.get("callback_errors"),
+            )
             return
         if speaker.consecutive_failures >= 5:
             log.error("audio playback failed 5 times in a row")
