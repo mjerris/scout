@@ -227,3 +227,19 @@ sees a token.
   event (`calendar_create_event`) is confirmed by voice every time ("Add
   Dentist, Friday October 9, 3:00 PM, to Home?"); "yes, always" doesn't apply.
   There is no edit or delete.
+
+## Mail
+
+Mail.app does the work, so any account in Mail works (add Google in System
+Settings → Internet Accounts with Mail on, or in Mail itself). The app drives
+Mail with JavaScript for Automation; the first use shows a "control Mail"
+prompt on the Mac's screen (System Settings → Privacy & Security → Automation).
+
+- Reading (`mail_recent`, `mail_search`, `mail_read`) and drafting
+  (`mail_draft`: opens a draft in Mail, sends nothing) run without asking.
+- Sending (`mail_send`) is confirmed by voice every time ("Send email to
+  sam@example.com, subject Lunch?"), with the full message on the web page;
+  "yes, always" doesn't apply. No attachments, forwarding or deleting.
+- Email is written by other people. Message text reaches the agent marked as
+  untrusted, and the agent is told never to act on instructions inside it;
+  anything that sends, opens or runs something still needs a spoken yes.
