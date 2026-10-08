@@ -168,6 +168,37 @@ Scout keeps everything that must survive an update in its data folder,
 Claude uses the account the `claude` CLI is logged in with. Run `claude` once
 first if you have never logged in.
 
+## Install as a Claude Code plugin
+
+Scout is one plugin: the background app, its MCP server (voice, mail, calendar)
+and its skills. Installing it is all the setup there is.
+
+```sh
+gh auth login && gh auth setup-git          # once: lets Claude Code fetch the private repo
+claude plugin marketplace add mjerris/scout
+claude plugin install scout@scout
+```
+
+The next Claude session's start runs the plugin's SessionStart hook
+(`scripts/ensure-running.sh`). When Scout isn't installed, or this plugin version
+isn't the one running, it runs `scripts/install.sh` in the background: it links the
+version into the data folder, syncs the Python environment, fetches the models,
+builds the native helpers when their source changed, and installs and starts the
+`com.local.scout` login item. After that the hook returns in milliseconds, and the
+app runs whether or not any Claude session is open. `/scout:status` shows progress
+(the first setup takes a few minutes); `claude plugin update scout` brings a new
+version, which the next session start switches to.
+
+- Desk sessions get Scout's tools as `mcp__plugin_scout_scout__*` (discuss,
+  voice_status, mail, calendar). The room assistant has its own in-process
+  copies and loads Scout's skills plus every plugin enabled in
+  `~/.claude/settings.json` (`claude.plugins`); their tools ask by voice unless
+  pre-approved.
+- `/scout:uninstall` stops the app and removes the login item, keeping the data
+  folder unless asked to purge; then `claude plugin uninstall scout`.
+- Working from a checkout instead: `claude plugin marketplace add ~/src/scout`
+  loads the plugin in place, and `scripts/install.sh` installs from it by hand.
+
 ## Always on
 
 ```sh

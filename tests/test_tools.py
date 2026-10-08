@@ -291,3 +291,77 @@ def test_shared_tools_are_offered_alike_to_the_room_and_other_sessions() -> None
         assert set(theirs.get("properties", {})) == set(t.schema["properties"]), t.name
         assert set(theirs.get("required") or []) == set(t.schema.get("required", [])), t.name
         assert offered[t.name].description == t.description
+
+
+def test_room_loads_scout_and_the_users_enabled_plugins(tmp_path: Path) -> None:
+    import json
+
+    from scout.brain import room_plugins
+    from scout.config import ROOT
+
+    claude = tmp_path / ".claude"
+    (claude / "plugins").mkdir(parents=True)
+    on, off = tmp_path / "gmail", tmp_path / "other"
+    on.mkdir()
+    off.mkdir()
+    (claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "enabledPlugins": {
+                    "gmail@official": True,
+                    "other@x": False,
+                    "scout@scout": True,
+                    "gone@x": True,
+                }
+            }
+        )
+    )
+
+    def entry(p: Path) -> list[dict[str, str]]:
+        return [{"scope": "user", "installPath": str(p)}]
+
+    (claude / "plugins" / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "gmail@official": entry(on),
+                    "other@x": entry(off),
+                    "scout@scout": entry(tmp_path),
+                    "gone@x": entry(tmp_path / "deleted"),
+                }
+            }
+        )
+    )
+    paths = [p["path"] for p in room_plugins("enabled", home=tmp_path)]
+    assert paths == [str(ROOT), str(on)]  # Scout from its own folder; disabled and missing ones left out
+    assert [p["path"] for p in room_plugins("scout", home=tmp_path)] == [str(ROOT)]
+    assert room_plugins("none") == []
+    with pytest.raises(ValueError, match=r"claude\.plugins"):
+        room_plugins("all")
+
+
+def test_room_never_uses_scouts_desk_tools_in_either_name_form(tmp_path: Path) -> None:
+    import json
+
+    b = _brain(tmp_path)
+    for name in ("mcp__plugin_scout_scout__discuss", "mcp__scout__mail_send"):
+        assert b._forbidden(name, {}), name
+    deny = json.loads(b._options().settings)["permissions"]["deny"]
+    assert "mcp__plugin_scout_scout" in deny and "mcp__scout" in deny
+
+
+def test_plugin_files_point_at_real_scripts() -> None:
+    import json
+
+    from scout.config import ROOT
+
+    assert json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["name"] == "scout"
+    market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+    assert [p["name"] for p in market["plugins"]] == ["scout"]
+    mcp = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["scout"]["command"]
+    hook = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0][
+        "command"
+    ]
+    for cmd in (mcp, hook):
+        script = ROOT / cmd.replace('"', "").replace("${CLAUDE_PLUGIN_ROOT}/", "")
+        assert script.is_file() and os.access(script, os.X_OK), cmd

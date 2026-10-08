@@ -25,7 +25,7 @@ from claude_agent_sdk import (
     ToolPermissionContext,
     ToolUseBlock,
 )
-from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SettingSource
+from claude_agent_sdk.types import McpSdkServerConfig, PermissionMode, SdkPluginConfig, SettingSource
 
 from .config import DATA, ROOT, ClaudeConfig
 from .rules import Rules
@@ -179,6 +179,34 @@ def _describe_event(args: dict[str, Any]) -> tuple[str, str]:
     return f"Add {title}, {when}, to {cal}?", f"add calendar event: {detail}"
 
 
+def room_plugins(mode: str, home: Path | None = None) -> list[SdkPluginConfig]:
+    """Plugins for the room agent: Scout itself (its skills) and, for "enabled", every
+    plugin turned on in ~/.claude/settings.json, at the path it's installed at."""
+    if mode not in ("enabled", "scout", "none"):
+        raise ValueError(f"claude.plugins must be enabled, scout or none, not {mode!r}")
+    if mode == "none":
+        return []
+    paths = [ROOT]
+    if mode == "enabled":
+        base = (home or Path.home()) / ".claude"
+        try:
+            enabled = json.loads((base / "settings.json").read_text()).get("enabledPlugins") or {}
+            installed = (
+                json.loads((base / "plugins" / "installed_plugins.json").read_text()).get("plugins") or {}
+            )
+        except (OSError, ValueError):
+            enabled, installed = {}, {}
+        for key, on in enabled.items():
+            if not on or key.split("@", 1)[0] == "scout":  # Scout is already in, from its own folder
+                continue
+            for entry in installed.get(key) or []:
+                path = Path(str(entry.get("installPath", "")))
+                if entry.get("scope") == "user" and path.is_dir():
+                    paths.append(path)
+                    break
+    return [{"type": "local", "path": str(p)} for p in paths]
+
+
 def _permission_mode(mode: str) -> PermissionMode | None:
     if not mode:
         return None
@@ -208,6 +236,8 @@ SECRET_PATHS = [
     "~/.claude/.credentials.json",
     str(DATA / "state"),
 ]
+# Scout's MCP server, by its plugin name and its plain `claude mcp add` name.
+DESK_SERVERS = ("mcp__plugin_scout_scout", "mcp__scout")
 _FILE_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 _READ_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "LS")
 # URL-opening voice tools ask (a URL can carry data off the machine); "always" is per site.
@@ -300,7 +330,8 @@ class Brain:
                 "allow": [*(t for t in self.tool_names if t not in ASKING_TOOLS), "WebSearch"],
                 # "//" = absolute path in Claude Code permission rules ("/x" is relative to the
                 # settings file). The app is maintained by its owner session, not by voice;
-                # secrets are never readable; mcp__scout is the desk-session voice tool.
+                # secrets are never readable; Scout's MCP server (as a plugin or a plain
+                # server) is the desk sessions' way in, not the room's.
                 "deny": [
                     *(f"{tool}(/{p}/**)" for tool in _FILE_TOOLS for p in own),
                     *(f"{tool}(/{_canon(p, ROOT)}/**)" for tool in _FILE_TOOLS for p in own),
@@ -308,7 +339,7 @@ class Brain:
                         f"Read(/{Path(p).expanduser()}{'/**' if not Path(p).suffix else ''})"
                         for p in SECRET_PATHS
                     ),
-                    "mcp__scout",
+                    *DESK_SERVERS,
                 ],
                 # Ask beats allow, so these always reach the voice prompt even when
                 # ~/.claude settings allow them (verified against the CLI).
@@ -320,7 +351,8 @@ class Brain:
         return ClaudeAgentOptions(
             cwd=str(Path(self.cfg.cwd).expanduser()),
             settings=json.dumps(overrides),
-            env={"SCOUT_ROOM": "1"},  # our own MCP voice tool refuses to run inside the room agent
+            env={"SCOUT_ROOM": "1"},  # Scout's MCP server and plugin hook stand down inside the room agent
+            plugins=room_plugins(self.cfg.plugins),
             mcp_servers={"voice_app": self.tool_server},
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
@@ -378,7 +410,7 @@ class Brain:
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
         """Calls the voice agent may never make, whatever the user answers."""
         own_app = "This voice app is maintained by its owner session; use request_app_change instead of changing it."
-        if name.startswith("mcp__scout__"):
+        if name.startswith(tuple(f"{s}__" for s in DESK_SERVERS)):
             return "The voice tool is for other sessions; you already own the voice."
         path = str(args.get("file_path") or args.get("notebook_path") or args.get("path") or "")
         if name in _FILE_TOOLS and path and _under(path, [str(ROOT), str(DATA)], self._cwd):
