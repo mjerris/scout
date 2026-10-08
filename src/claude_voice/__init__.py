@@ -167,20 +167,22 @@ def _segmenter(cfg: config_mod.Config) -> Any:
 
     a = cfg.audio
     if a.turn_detection == "smart":
-        try:
-            from .turn_models import EndOfTurnSegmenter
+        from .turn_models import SILERO_MODEL, SMART_TURN_MODEL, EndOfTurnSegmenter, SileroVAD, SmartTurn
 
-            return EndOfTurnSegmenter.from_models(
-                cfg.path("models"),
+        vad, turn = cfg.path(SILERO_MODEL), cfg.path(SMART_TURN_MODEL)
+        if vad.exists() and turn.exists():
+            return EndOfTurnSegmenter(
+                SileroVAD(vad),
+                SmartTurn(turn),
+                min_speech_ms=a.min_speech_ms,
+                max_utterance_s=a.max_utterance_s,
                 min_pause_ms=a.min_pause_ms,
                 max_pause_ms=a.max_pause_ms,
-                threshold=a.turn_threshold,
-                max_utterance_s=a.max_utterance_s,
+                turn_threshold=a.turn_threshold,
             )
-        except (ImportError, FileNotFoundError, AttributeError) as exc:
-            logging.getLogger("claude_voice").warning(
-                "smart end-of-turn unavailable (%s); using silence-based; run scripts/fetch-models.sh", exc
-            )
+        logging.getLogger("claude_voice").warning(
+            "smart end-of-turn models missing; using silence-based detection (run scripts/fetch-models.sh)"
+        )
     elif a.turn_detection != "simple":
         raise ValueError(f"audio.turn_detection must be smart or simple, not {a.turn_detection!r}")
     return Segmenter(a.vad_aggressiveness, a.silence_ms, a.min_speech_ms, a.max_utterance_s)

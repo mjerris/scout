@@ -13,6 +13,7 @@ dependencies = [
     "livekit>=1.1.20",
     "mlx-whisper>=0.4.3",
     "numpy>=2.5.3",
+    "onnxruntime>=1.30.0",
     "sounddevice>=0.5.6",
     "soundfile>=0.14.0",
     "webrtcvad-wheels>=2.0.14.post1",
@@ -55,7 +56,7 @@ python_version = "3.12"
 strict = true
 files = ["src", "tests"]
 
-# These four ship no type information (no stubs, no py.typed); everything else is checked.
+# These ship no type information (no stubs, no py.typed); everything else is checked.
 [[tool.mypy.overrides]]
-module = ["sounddevice", "soundfile", "webrtcvad", "mlx_whisper"]
+module = ["sounddevice", "soundfile", "webrtcvad", "mlx_whisper", "onnxruntime"]
 ignore_missing_imports = true
