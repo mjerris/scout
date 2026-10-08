@@ -19,7 +19,11 @@ def tone_frames(seconds, freq=220.0, amp=8000):
     t = np.arange(FRAME_SAMPLES) / 16000
     out = []
     for i in range(n):
-        x = amp * np.sin(2 * np.pi * freq * (t + i * FRAME_SAMPLES / 16000)) * (1 + 0.5 * np.sin(2 * np.pi * 3 * t))
+        x = (
+            amp
+            * np.sin(2 * np.pi * freq * (t + i * FRAME_SAMPLES / 16000))
+            * (1 + 0.5 * np.sin(2 * np.pi * 3 * t))
+        )
         out.append(x.astype(np.int16).tobytes())
     return out
 
@@ -35,6 +39,7 @@ def collect(frames, is_echo):
         await asyncio.sleep(0.3)
         task.cancel()
         return [out.get_nowait() for _ in range(out.qsize())]
+
     return asyncio.run(go())
 
 

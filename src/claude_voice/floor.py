@@ -9,6 +9,7 @@ forth isn't interrupted, and others queue in FIFO order.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 
@@ -58,10 +59,8 @@ class Floor:
                 if self.try_acquire(agent):
                     return True
                 # Wake on release, or poll so lapsing holds are noticed.
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(asyncio.shield(fut), min(0.5, deadline - time.monotonic()))
-                except TimeoutError:
-                    pass
                 if fut.done():
                     fut = asyncio.get_running_loop().create_future()
                     self._replace_waiter(agent, fut)
@@ -93,6 +92,8 @@ class Floor:
         return {
             "holder": owner,
             "speaking": bool(owner and self.active),
-            "held_for_s": round(max(0.0, self.held_until - time.monotonic()), 1) if owner and not self.active else 0,
+            "held_for_s": round(max(0.0, self.held_until - time.monotonic()), 1)
+            if owner and not self.active
+            else 0,
             "queue": [a for a, _ in self._waiters],
         }

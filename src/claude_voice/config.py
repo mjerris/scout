@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -42,11 +41,16 @@ class AudioConfig:
 @dataclass
 class GateConfig:
     """Local checks every transcript passes before it can reach Claude."""
+
     min_logprob: float = -1.0  # Whisper confidence floor with the wake word
     min_logprob_followup: float = -0.9  # stricter floor without it
     max_no_speech_prob: float = 0.6
     max_compression_ratio: float = 2.4
     max_words_per_second: float = 6.0  # of VAD-voiced speech
+    # A clip of at least coverage_min_seconds with fewer words per second than this
+    # was mostly not transcribed (often our own voice mixed in); drop it.
+    min_words_per_second: float = 0.5
+    coverage_min_seconds: float = 4.0
     followup_min_words: int = 2
     followup_min_snr_db: float = 10.0  # above the room's noise floor
     followup_max_drop_db: float = 12.0  # quieter than your last wake request by more = someone else
@@ -83,27 +87,57 @@ class ClaudeConfig:
     # hook that answers "allow" would otherwise skip every prompt).
     approval_policy: str = "strict"
     # Under the settings policies, always ask out loud for these (permission rules).
-    always_ask: list[str] = field(default_factory=lambda: [
-        "Bash(git push:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)",
-    ])
+    always_ask: list[str] = field(
+        default_factory=lambda: [
+            "Bash(git push:*)",
+            "Bash(gh pr merge:*)",
+            "Bash(gh pr create:*)",
+        ]
+    )
     # Show the voice session in Remote Control under this name ("" = off).
     remote_control: str = ""
     # Tools that run without asking under the strict policy.
-    auto_allow_tools: list[str] = field(default_factory=lambda: [
-        "Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent",
-        "BashOutput", "NotebookRead", "WebFetch",
-    ])
+    auto_allow_tools: list[str] = field(
+        default_factory=lambda: [
+            "Read",
+            "Glob",
+            "Grep",
+            "LS",
+            "WebSearch",
+            "TodoWrite",
+            "ToolSearch",
+            "Task",
+            "Agent",
+            "BashOutput",
+            "NotebookRead",
+            "WebFetch",
+        ]
+    )
     # Programs allowed as a single plain Bash command (no pipes, chaining or redirects).
-    auto_allow_commands: list[str] = field(default_factory=lambda: [
-        "date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers",
-    ])
+    auto_allow_commands: list[str] = field(
+        default_factory=lambda: [
+            "date",
+            "cal",
+            "uptime",
+            "whoami",
+            "pwd",
+            "ls",
+            "df",
+            "du",
+            "which",
+            "sw_vers",
+        ]
+    )
     extra_system_prompt: str = ""
 
 
 @dataclass
 class WebConfig:
     enabled: bool = True
-    host: str = "0.0.0.0"
+    # Addresses to listen on: "localhost" (which Tailscale HTTPS forwards to), "lan"
+    # (this Mac's home-network address), "tailscale" (its tailnet address), or
+    # literal IPs. Never all interfaces.
+    hosts: list[str] = field(default_factory=lambda: ["localhost", "lan", "tailscale"])
     port: int = 8765
 
 
@@ -126,7 +160,7 @@ class Config:
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to the project root."""
-        q = Path(os.path.expanduser(p))
+        q = Path(p).expanduser()
         return q if q.is_absolute() else ROOT / q
 
 
@@ -148,6 +182,6 @@ def load(path: Path | None = None) -> Config:
     cfg = Config()
     path = path or ROOT / "config.toml"
     if path.exists():
-        with open(path, "rb") as fh:
+        with path.open("rb") as fh:
             _merge(cfg, tomllib.load(fh), "")
     return cfg

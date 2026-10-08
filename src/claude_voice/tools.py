@@ -56,8 +56,11 @@ class Timers:
 
     def cancel(self, which: str) -> list[str]:
         which = (which or "").strip().lower()
-        hits = [tid for tid, (label, _, _) in self.active.items()
-                if which in ("all", "") or which == str(tid) or which in label.lower()]
+        hits = [
+            tid
+            for tid, (label, _, _) in self.active.items()
+            if which in ("all", "") or which == str(tid) or which in label.lower()
+        ]
         names = []
         for tid in hits:
             label, _, task = self.active.pop(tid)
@@ -67,12 +70,14 @@ class Timers:
 
     def listing(self) -> list[str]:
         now = time.monotonic()
-        return [f"{label}: {_human(due - now)} left" for label, due, _ in
-                sorted(self.active.values(), key=lambda v: v[1])]
+        return [
+            f"{label}: {_human(due - now)} left"
+            for label, due, _ in sorted(self.active.values(), key=lambda v: v[1])
+        ]
 
 
 def _human(seconds: float) -> str:
-    s = max(0, int(round(seconds)))
+    s = max(0, round(seconds))
     h, rem = divmod(s, 3600)
     m, s = divmod(rem, 60)
     parts = [f"{h} hour{'s' * (h != 1)}"] * bool(h) + [f"{m} minute{'s' * (m != 1)}"] * bool(m)
@@ -91,53 +96,82 @@ def build_server(timers: Timers):
             except Exception as exc:  # unexpected: surface it, don't crash the session
                 log.exception("tool failed")
                 return _err(f"failed: {exc}")
+
         return handler
 
     tools = [
         tool("open_url", "Open an http(s) URL in the default browser.", {"url": str})(
-            wrap(lambda a: mac.open_url(a["url"]))),
-        tool("search_site",
-             "Search a site in the browser. site: " + ", ".join(mac.SEARCH_SITES) + ".",
-             {"site": str, "query": str})(
-            wrap(lambda a: mac.search_site(a["site"], a["query"]))),
+            wrap(lambda a: mac.open_url(a["url"]))
+        ),
+        tool(
+            "search_site",
+            "Search a site in the browser. site: " + ", ".join(mac.SEARCH_SITES) + ".",
+            {"site": str, "query": str},
+        )(wrap(lambda a: mac.search_site(a["site"], a["query"]))),
         tool("open_app", "Open (or bring to front) an installed Mac app by name.", {"name": str})(
-            wrap(lambda a: mac.open_app(a["name"]))),
-        tool("frontmost_app", "Name of the app currently in front.", {})(
-            wrap(lambda a: mac.frontmost_app())),
-        tool("running_apps", "Names of the apps currently open.", {})(
-            wrap(lambda a: mac.running_apps())),
+            wrap(lambda a: mac.open_app(a["name"]))
+        ),
+        tool("frontmost_app", "Name of the app currently in front.", {})(wrap(lambda a: mac.frontmost_app())),
+        tool("running_apps", "Names of the apps currently open.", {})(wrap(lambda a: mac.running_apps())),
         tool("list_tabs", "List Google Chrome windows and tabs (title and site).", {})(
-            wrap(lambda a: mac.list_tabs())),
-        tool("switch_tab", "Bring a Google Chrome tab to the front (numbers from list_tabs).",
-             {"window": int, "tab": int})(
-            wrap(lambda a: mac.switch_tab(a["window"], a["tab"]))),
+            wrap(lambda a: mac.list_tabs())
+        ),
+        tool(
+            "switch_tab",
+            "Bring a Google Chrome tab to the front (numbers from list_tabs).",
+            {"window": int, "tab": int},
+        )(wrap(lambda a: mac.switch_tab(a["window"], a["tab"]))),
         tool("new_tab", "Open an http(s) URL in a new Google Chrome tab.", {"url": str})(
-            wrap(lambda a: mac.new_tab(a["url"]))),
-        tool("fullscreen", "Put the front window into (on=true) or out of (on=false) full screen.",
-             {"on": bool})(
-            wrap(lambda a: mac.fullscreen(bool(a["on"])))),
-        tool("media", "Control playback: action is play_pause, next or previous. Uses Spotify or "
-             "Music if running, otherwise play_pause toggles a video in the front browser.",
-             {"action": str})(
-            wrap(lambda a: mac.media(a["action"]))),
-        tool("volume", "Get or set the Mac's output volume. Give level (0-100), or change "
-             "(e.g. -10 or 10), or mute (true/false); give none of them to read the volume.",
-             {"type": "object", "properties": {
-                 "level": {"type": "integer"}, "change": {"type": "integer"}, "mute": {"type": "boolean"}}})(
-            wrap(lambda a: mac.volume(a.get("level"), a.get("change"), a.get("mute")))),
-        tool("set_timer", "Start a timer; when it ends the assistant announces it out loud.",
-             {"type": "object", "properties": {
-                 "minutes": {"type": "number"}, "seconds": {"type": "number"}, "label": {"type": "string"}}})(
-            wrap(lambda a: _set_timer(timers, a))),
+            wrap(lambda a: mac.new_tab(a["url"]))
+        ),
+        tool(
+            "fullscreen",
+            "Put the front window into (on=true) or out of (on=false) full screen.",
+            {"on": bool},
+        )(wrap(lambda a: mac.fullscreen(bool(a["on"])))),
+        tool(
+            "media",
+            "Control playback: action is play_pause, next or previous. Uses Spotify or "
+            "Music if running, otherwise play_pause toggles a video in the front browser.",
+            {"action": str},
+        )(wrap(lambda a: mac.media(a["action"]))),
+        tool(
+            "volume",
+            "Get or set the Mac's output volume. Give level (0-100), or change "
+            "(e.g. -10 or 10), or mute (true/false); give none of them to read the volume.",
+            {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer"},
+                    "change": {"type": "integer"},
+                    "mute": {"type": "boolean"},
+                },
+            },
+        )(wrap(lambda a: mac.volume(a.get("level"), a.get("change"), a.get("mute")))),
+        tool(
+            "set_timer",
+            "Start a timer; when it ends the assistant announces it out loud.",
+            {
+                "type": "object",
+                "properties": {
+                    "minutes": {"type": "number"},
+                    "seconds": {"type": "number"},
+                    "label": {"type": "string"},
+                },
+            },
+        )(wrap(lambda a: _set_timer(timers, a))),
         tool("list_timers", "List running timers and the time left on each.", {})(
-            wrap(lambda a: _async("\n".join(timers.listing()) or "No timers running."))),
+            wrap(lambda a: _async("\n".join(timers.listing()) or "No timers running."))
+        ),
         tool("cancel_timer", "Cancel timers by label or number, or 'all'.", {"which": str})(
-            wrap(lambda a: _async(_cancelled(timers.cancel(a.get("which", "")))))),
-        tool("request_app_change",
-             "Send a requested change to this voice app (how it listens, talks, asks for "
-             "approval, its config) to the Claude session that maintains it.",
-             {"summary": str, "details": str})(
-            wrap(lambda a: _request_change(a))),
+            wrap(lambda a: _async(_cancelled(timers.cancel(a.get("which", "")))))
+        ),
+        tool(
+            "request_app_change",
+            "Send a requested change to this voice app (how it listens, talks, asks for "
+            "approval, its config) to the Claude session that maintains it.",
+            {"summary": str, "details": str},
+        )(wrap(lambda a: _request_change(a))),
     ]
     return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
 
@@ -160,7 +194,7 @@ def _cancelled(names: list[str]) -> str:
 async def _request_change(a: dict[str, Any]) -> str:
     entry = {"ts": time.time(), "summary": a.get("summary", ""), "details": a.get("details", "")}
     REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(REQUESTS_FILE, "a") as fh:
+    with REQUESTS_FILE.open("a") as fh:
         fh.write(json.dumps(entry) + "\n")
     log.info("change request: %s", entry["summary"])
     return "Sent to the owner session."

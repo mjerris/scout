@@ -8,12 +8,63 @@ import re
 _WORD = re.compile(r"[a-z']+")
 _LEADERS = {"hey", "hi", "hello", "ok", "okay", "yo", "a", "ay", "hay"}
 
-STOP_WORDS = {"stop", "stomp", "stopp", "cancel", "quiet", "shut up", "enough", "never mind", "nevermind", "be quiet", "hush"}
-RESET_PHRASES = {"new conversation", "start over", "reset", "new session", "forget everything", "clear context"}
-_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "approve", "approved", "allow", "affirmative",
-        "go ahead", "do it", "proceed", "please do", "go for it", "correct", "fine"}
-_NO = {"no", "nope", "nah", "don't", "dont", "deny", "denied", "negative", "stop", "cancel", "skip",
-       "do not", "never mind", "wait"}
+STOP_WORDS = {
+    "stop",
+    "stomp",
+    "stopp",
+    "cancel",
+    "quiet",
+    "shut up",
+    "enough",
+    "never mind",
+    "nevermind",
+    "be quiet",
+    "hush",
+}
+RESET_PHRASES = {
+    "new conversation",
+    "start over",
+    "reset",
+    "new session",
+    "forget everything",
+    "clear context",
+}
+_YES = {
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "sure",
+    "ok",
+    "okay",
+    "approve",
+    "approved",
+    "allow",
+    "affirmative",
+    "go ahead",
+    "do it",
+    "proceed",
+    "please do",
+    "go for it",
+    "correct",
+    "fine",
+}
+_NO = {
+    "no",
+    "nope",
+    "nah",
+    "don't",
+    "dont",
+    "deny",
+    "denied",
+    "negative",
+    "stop",
+    "cancel",
+    "skip",
+    "do not",
+    "never mind",
+    "wait",
+}
 
 
 def words(text: str) -> list[str]:
@@ -29,8 +80,7 @@ def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
     for m in tokens:
         w = m.group().lower()
         if w in names:
-            rest = raw[m.end():].lstrip(" ,.!?:;-")
-            return rest
+            return raw[m.end() :].lstrip(" ,.!?:;-")
         if w not in _LEADERS:
             seen += 1
         if seen >= max_position:
@@ -38,8 +88,22 @@ def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
     return None
 
 
-_STOP_FILLER = {"please", "now", "it", "that", "that's", "thats", "ok", "okay", "claude", "just",
-                "right", "talking", "a", "the"}
+_STOP_FILLER = {
+    "please",
+    "now",
+    "it",
+    "that",
+    "that's",
+    "thats",
+    "ok",
+    "okay",
+    "claude",
+    "just",
+    "right",
+    "talking",
+    "a",
+    "the",
+}
 
 
 def is_stop(cmd: str) -> bool:
@@ -70,7 +134,9 @@ def parse_yes_no(text: str) -> bool | None:
 _WAIT = re.compile(
     r"[\s,.;:!-]*\b(?:hang on|hold on|wait(?: a (?:sec|second|minute|moment))?|"
     r"give me a (?:sec|second|minute|moment)|one (?:sec|second|moment)|just a (?:sec|second|moment))"
-    r"[\s,.!?]*$", re.I)
+    r"[\s,.!?]*$",
+    re.I,
+)
 
 
 def split_wait(text: str) -> tuple[str, bool]:
@@ -78,7 +144,7 @@ def split_wait(text: str) -> tuple[str, bool]:
     m = _WAIT.search(text)
     if not m:
         return text, False
-    return text[:m.start()].strip(" ,.;:-"), True
+    return text[: m.start()].strip(" ,.;:-"), True
 
 
 def parse_answer(text: str) -> bool | str | None:
@@ -119,16 +185,15 @@ def strip_own_speech(heard: str, spoken: str) -> str:
         return heard
     # Words before our speech started belong to the user (the clip can begin
     # with them, e.g. a timer announcement starting mid-request).
-    before = h[:blocks[0].b] if blocks[0].a == 0 else []
+    before = h[: blocks[0].b] if blocks[0].a == 0 else []
     end = blocks[-1].b + blocks[-1].size
     # Whatever we said after the last exact match may have come back misheard
     # ("Claude Max account" -> "call my count"); drop it if it sounds alike.
-    tail = sp[blocks[-1].a + blocks[-1].size:]
+    tail = sp[blocks[-1].a + blocks[-1].size :]
     rest = " ".join(h[end:])
     if tail and rest:
         # Compare against each suffix of what we said (the start may have matched).
-        best = max(difflib.SequenceMatcher(None, rest, " ".join(tail[i:])).ratio()
-                   for i in range(len(tail)))
+        best = max(difflib.SequenceMatcher(None, rest, " ".join(tail[i:])).ratio() for i in range(len(tail)))
         if best >= 0.6:
             rest = ""
     return " ".join([*before, *([rest] if rest else [])])

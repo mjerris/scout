@@ -11,6 +11,7 @@ import secrets
 import socket
 import uuid
 from importlib import resources
+from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
@@ -33,13 +34,48 @@ def load_token() -> str:
     return token
 
 
-def _lan_ip() -> str:
+def _lan_ip() -> str | None:
+    """The address this Mac uses on the local network (no packet is sent)."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
-            return s.getsockname()[0]
+            ip = s.getsockname()[0]
     except OSError:
-        return "127.0.0.1"
+        return None
+    return None if ip.startswith(("127.", "100.")) else ip
+
+
+async def _tailscale_ip() -> str | None:
+    from .mac import ToolError, _run
+
+    for exe in ("/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
+        if Path(exe).exists():
+            try:
+                ip = (await _run(exe, "ip", "-4", timeout=5)).splitlines()
+            except ToolError:
+                continue
+            if ip:
+                return ip[0].strip()
+    return None
+
+
+async def resolve_hosts(names: list[str]) -> list[str]:
+    """Turn the configured names into concrete addresses, skipping any that aren't up."""
+    out: list[str] = []
+    for name in names:
+        if name == "localhost":
+            ip = "127.0.0.1"
+        elif name == "lan":
+            ip = _lan_ip()
+        elif name == "tailscale":
+            ip = await _tailscale_ip()
+        else:
+            ip = name
+        if ip is None:
+            log.warning("web: no %s address right now; not listening there", name)
+        elif ip not in out:
+            out.append(ip)
+    return out
 
 
 async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
@@ -48,8 +84,11 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
 
     def authed(req: web.Request) -> bool:
         bearer = req.headers.get("Authorization", "")
-        given = (bearer[7:] if bearer.startswith("Bearer ") else "") or req.query.get("token") \
+        given = (
+            (bearer[7:] if bearer.startswith("Bearer ") else "")
+            or req.query.get("token")
             or req.cookies.get(_COOKIE, "")
+        )
         return hmac.compare_digest(given.encode(), token.encode())  # bytes: non-ASCII input can't raise
 
     # --- API for the MCP server (and anything else holding the token) -------------
@@ -91,8 +130,15 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         await ws.prepare(req)
         q = assistant.subscribe()
         client_id = uuid.uuid4().hex
-        await ws.send_json({"type": "hello", "history": list(assistant.history),
-                            "rules": assistant.rules.listing(), **assistant.snapshot()})
+        bg: set[asyncio.Task] = set()  # keep fire-and-forget tasks referenced
+        await ws.send_json(
+            {
+                "type": "hello",
+                "history": list(assistant.history),
+                "rules": assistant.rules.listing(),
+                **assistant.snapshot(),
+            }
+        )
 
         async def send_audio(text: str) -> None:
             try:
@@ -137,7 +183,9 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
                 elif kind == "mute":
                     assistant.set_mic_muted(bool(m.get("value")))
                 elif kind == "reset":
-                    asyncio.create_task(assistant.reset())
+                    task = asyncio.create_task(assistant.reset())
+                    bg.add(task)
+                    task.add_done_callback(bg.discard)
                 elif kind == "audio":
                     try:
                         clip = base64.b64decode(m.get("data", ""))
@@ -155,11 +203,20 @@ async def start(cfg: WebConfig, assistant: Assistant) -> web.AppRunner:
         return ws
 
     app = web.Application(client_max_size=30 * 1024 * 1024)
-    app.add_routes([web.get("/", index), web.get("/ws", ws_handler),
-                    web.post("/api/discuss", api_discuss), web.get("/api/status", api_status)])
+    app.add_routes(
+        [
+            web.get("/", index),
+            web.get("/ws", ws_handler),
+            web.post("/api/discuss", api_discuss),
+            web.get("/api/status", api_status),
+        ]
+    )
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    await web.TCPSite(runner, cfg.host, cfg.port).start()
-    host = _lan_ip() if cfg.host in ("0.0.0.0", "") else cfg.host
-    log.info("web UI: http://%s:%d/?token=%s", host, cfg.port, token)
+    hosts = await resolve_hosts(cfg.hosts)
+    for host in hosts:
+        await web.TCPSite(runner, host, cfg.port).start()
+    log.info("web: listening on %s", ", ".join(f"{h}:{cfg.port}" for h in hosts))
+    shown = next((h for h in hosts if not h.startswith("127.")), hosts[0] if hosts else "127.0.0.1")
+    log.info("web UI: http://%s:%d/?token=%s", shown, cfg.port, token)
     return runner

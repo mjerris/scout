@@ -27,4 +27,23 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.16.10",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.format]
+# Stable formatting only, so local and CI runs agree.
+preview = false
+
+[tool.ruff.lint]
+# Same rule set as signalwire-python: defaults (E4/E7/E9, F) plus bugbear, bandit,
+# comprehensions, perf, simplify, pathlib, return, ruff-specific and pyupgrade.
+# E501 is left to the formatter.
+select = ["E4", "E7", "E9", "F", "B", "S", "C4", "PERF", "SIM", "PTH", "RET", "RUF", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert by definition.
+"tests/**" = ["S101"]

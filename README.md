@@ -133,7 +133,7 @@ heard line includes the stats the gate used, e.g. `[conf -0.31, no-speech 0.01,
 2.4 words/s, 24 dB over noise]`.
 
 Everything said and heard is also written to
-`logs/transcript-YYYY-MM-DD.jsonl`, one event per line. Set
+`logs/transcript.jsonl`, one event per line (rotated at midnight, 30 days kept). Set
 `audio.save_utterances = 50` to keep the last 50 clips (wav + transcript +
 stats) in `state/utterances/` for tuning; off by default.
 
