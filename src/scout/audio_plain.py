@@ -113,7 +113,10 @@ class SoundDevice:
         self.sd._initialize()
 
     def resolve(self, spec: str, kind: str) -> int | None:
-        return resolve_device(spec, kind, self.sd.query_devices())
+        default = self.sd.default.device[0 if kind == "input" else 1]
+        return resolve_device(
+            spec, kind, self.sd.query_devices(), default if isinstance(default, int) else None
+        )
 
     def device_name(self, device: int | None, kind: str) -> str:
         return str(self.sd.query_devices(device, kind)["name"])
@@ -122,10 +125,46 @@ class SoundDevice:
         return int(self.sd.query_devices(device, "output")["max_output_channels"])
 
 
-def resolve_device(spec: str, kind: str, devices: Any) -> int | None:
-    """Turn a config device spec (index or name substring) into a device index."""
-    if not spec:
-        return None
+# Continuity microphones (a nearby iPhone or iPad) are never picked automatically,
+# only when named: otherwise an unplugged mic would quietly turn into your phone.
+AVOID_AUTO = ("iphone", "ipad")
+
+
+def _avoided(dev: Any) -> bool:
+    return any(a in str(dev["name"]).lower() for a in AVOID_AUTO)
+
+
+def resolve_device(spec: str, kind: str, devices: Any, default: int | None = None) -> int | None:
+    """Turn a config device spec into a device index. A spec is an index or a name
+    substring, or several separated by "|", tried in order: "OBSBOT|any" means the
+    OBSBOT if it's there, else any other device ("any" and an empty part = the system
+    default skip Continuity mics). The device watcher re-resolves every few seconds,
+    so falling back and switching back when the preferred device returns are both
+    automatic."""
+    if "|" not in spec:
+        if not spec:
+            return None
+        return _resolve_one(spec, kind, devices)
+    ch = f"max_{kind}_channels"
+    for part in (p.strip() for p in spec.split("|")):
+        if not part or part.lower() == "default":
+            if default is None or not 0 <= default < len(devices):
+                continue
+            if devices[default][ch] > 0 and not _avoided(devices[default]):
+                return default
+        elif part.lower() == "any":
+            for i, dev in enumerate(devices):
+                if dev[ch] > 0 and not _avoided(dev):
+                    return i
+        else:
+            try:
+                return _resolve_one(part, kind, devices)
+            except ValueError:
+                continue
+    raise ValueError(f"no {kind} device matching {spec!r}; run with --list-devices")
+
+
+def _resolve_one(spec: str, kind: str, devices: Any) -> int:
     if spec.isdigit():
         return int(spec)
     for i, dev in enumerate(devices):

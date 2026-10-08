@@ -37,6 +37,9 @@ class WakeConfig:
 @dataclass
 class AudioConfig:
     input_device: str = ""  # name substring or index; empty = system default
+    # When that mic is gone, try these in order ("any" = any other mic except a nearby
+    # iPhone's or iPad's), and switch back as soon as it returns. [] = wait for it.
+    input_fallback: list[str] = field(default_factory=lambda: ["any"])
     output_device: str = ""
     vad_aggressiveness: int = 2  # 0-3, higher filters more non-speech
     silence_ms: int = 1200  # trailing silence that ends an utterance
