@@ -59,8 +59,8 @@
  {
   "function": "strip_wake",
   "input": "Hey Clawd, what time is it?",
-  "expected": null,
-  "note": "no default STT rule for 'clawd' (tests/test_routing.py uses it as a rule-free token)"
+  "expected": "what time is it?",
+  "note": "the STT rule turns Clawd into Claude first, as in the app"
  },
  {
   "function": "strip_wake",
@@ -1907,8 +1907,8 @@
  {
   "function": "pronounce_stt",
   "input": "Hey Clawd, open Netflix.",
-  "expected": "Hey Clawd, open Netflix.",
-  "note": "no default STT rule for 'clawd' (tests/test_routing.py uses it as a rule-free token)"
+  "expected": "Hey Claude, open Netflix.",
+  "note": "Clawd is not a word; always the name"
  },
  {
   "function": "gate.junk",

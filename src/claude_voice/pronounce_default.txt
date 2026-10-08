@@ -24,7 +24,7 @@ TTS  '~/'  'home slash '
 
 # --- common mishearings ---------------------------------------------------------
 # "clawed", "clod" and "cloud" are real words: only fixed where they can only be the name.
-STT  '\b(?:Claud|Klaud)\b'  'Claude'
+STT  '\b(?:Claud|Klaud|Clawd)\b'  'Claude'
 STT  '\b(hey|hi|okay|ok)(,?\s+)(?:clawed|clod|claw)\b'  '\1\2Claude'  # "Hey Clawed, ..."
 STT  '\bsignal wire\b'  'SignalWire'
 STT  '(?<!google )\bcloud code\b'  'Claude Code'  # but "Google Cloud Code" is a product
