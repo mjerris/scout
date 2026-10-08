@@ -49,6 +49,13 @@ class AudioConfig:
     backend: str = "auto"
     # Talking over the assistant stops it (needs an echo-cancelling backend).
     barge_in: bool = True
+    # Barge-in waits until the echo canceller has adapted to the room: at least
+    # this much playback experience and this much echo removed. Before that, its
+    # own voice leaking through (a TV's speakers add delay and processing) looked
+    # like the user talking over it and cut its messages short. Backends that
+    # don't report it (apple) skip the check.
+    barge_in_min_learned_s: float = 3.0
+    barge_in_min_erle_db: float = 12.0
     # WebRTC noise suppression on the mic. Off by default: it learns steady room
     # noise and removes that band from speech too (measured on the Mac mini: a
     # 3.5-4 kHz fan tone made it cut 8-11 dB there, and Whisper started hearing

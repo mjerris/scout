@@ -89,6 +89,7 @@ async def _amain(cfg: config_mod.Config) -> None:
     await asr.warmup()
 
     assistant = Assistant(cfg, asr, speaker, echo_cancelled=io.name != "plain")
+    assistant.echo_stats = io.stats
     speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant) if cfg.web.enabled else None
     seg = _segmenter(cfg)

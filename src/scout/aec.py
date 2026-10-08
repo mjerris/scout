@@ -106,6 +106,11 @@ class EchoCanceller:
         self._apm._ffi_handle.dispose()
 
     @property
+    def learned_seconds(self) -> float:
+        """How much playback the canceller has adapted on (its echo-path experience)."""
+        return self._erle_blocks * self.block / self.sample_rate
+
+    @property
     def erle_db(self) -> float | None:
         """Rough echo return loss enhancement (dB) while playing; None before any playback.
         Includes noise suppression and is pulled down by double talk."""
