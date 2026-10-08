@@ -57,9 +57,11 @@ class Assistant:
         self._silence_turn = False  # set by stop(): drain the turn without speaking
         self._queued: str | None = None  # follow-up spoken over the end of a reply
         self._held_words: list[str] = []  # words before a "hang on"
+        self._held_until = 0.0  # ...kept only while the wait window is open
         self._ref_db: float | None = None  # your voice level on accepted wake requests
         self._confirm_fut: asyncio.Future | None = None
         self._confirm_lock = asyncio.Lock()  # parallel tool calls ask one at a time
+        self._confirm_gen = 0  # bumped by stop(): queued questions are dropped, not asked
         self._confirm_started = 0.0
         self._listen: _Listen | None = None
         # Where the current room turn's speech goes: the mini's speakers and/or
@@ -208,6 +210,8 @@ class Assistant:
             if confirming:
                 if speech.parse_answer(residual) is None:
                     return
+            elif self._listen is not None and not self._listen.fut.done():
+                pass  # a session asked a question: a one-word answer is fine
             elif self._reject("residual", residual, gate.check("residual", residual, t, a, self._ref_db, self.cfg.gate)):
                 return
             log.info("heard after own speech: %s", residual)
@@ -290,14 +294,18 @@ class Assistant:
         cmd, waiting = speech.split_wait(cmd)
         if waiting:
             # "…, hang on": keep what was said and keep listening.
+            if self._held_words and time.monotonic() > self._held_until:
+                self._held_words = []
             if cmd:
                 self._held_words.append(cmd)
+            self._held_until = time.monotonic() + self.cfg.wake.wait_seconds + 5
             self.speaker.chime("wake")
             self._set_state("listening")
             self.follow_up_until = time.monotonic() + self.cfg.wake.wait_seconds
             return
         if self._held_words:
-            cmd = " ".join([*self._held_words, cmd]).strip()
+            if time.monotonic() <= self._held_until:
+                cmd = " ".join([*self._held_words, cmd]).strip()
             self._held_words = []
         if not cmd.strip():
             self.speaker.chime("wake")
@@ -488,12 +496,16 @@ class Assistant:
 
     async def _confirm(self, spoken: str, description: str) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered."""
+        gen = self._confirm_gen
         async with self._confirm_lock:
+            if gen != self._confirm_gen:
+                return False  # the user said stop while this one was waiting its turn
             return await self._confirm_one(spoken, description)
 
     async def _confirm_one(self, spoken: str, description: str) -> bool | str | None:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
+        self._confirm_started = float("inf")  # no speech counts until the question has been asked
         self._confirm_fut = fut
         self.emit("confirm", text=description)
         self._set_state("confirming")
@@ -522,6 +534,7 @@ class Assistant:
         self.follow_up_until = 0
         self._queued = None
         self._held_words = []
+        self._confirm_gen += 1
         self.answer_confirm(False)
         if self._listen is not None and not self._listen.fut.done():
             self._listen.fut.set_result("stop")

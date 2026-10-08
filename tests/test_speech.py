@@ -60,3 +60,16 @@ def test_to_speech_flattens_markdown():
 ])
 def test_is_stop_whole_utterance(text, stop):
     assert is_stop(text) is stop
+
+
+@pytest.mark.parametrize("text, reset", [
+    ("new conversation", True), ("let's start over", True), ("reset please", True),
+    ("reset my router", False), ("preset the oven", False), ("tell me about the new conversation feature", False),
+])
+def test_is_reset_whole_utterance(text, reset):
+    assert is_reset(text) is reset
+
+
+def test_strip_own_speech_keeps_words_before_our_speech():
+    heard = "Claude what's the weather your timer is done"
+    assert strip_own_speech(heard, "Your timer is done.") == "claude what's the weather"

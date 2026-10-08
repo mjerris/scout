@@ -51,8 +51,10 @@ def is_stop(cmd: str) -> bool:
 
 
 def is_reset(cmd: str) -> bool:
-    w = " ".join(words(cmd))
-    return any(p in w for p in RESET_PHRASES) and len(w.split()) <= 5
+    """True only for the whole phrase ("new conversation", "start over please"),
+    not "reset my router"."""
+    w = [x for x in words(cmd) if x not in _STOP_FILLER and x not in ("let's", "lets", "a")]
+    return " ".join(w) in RESET_PHRASES
 
 
 def parse_yes_no(text: str) -> bool | None:
@@ -115,6 +117,9 @@ def strip_own_speech(heard: str, spoken: str) -> str:
     blocks = [b for b in difflib.SequenceMatcher(None, sp, h, autojunk=False).get_matching_blocks() if b.size]
     if not blocks:
         return heard
+    # Words before our speech started belong to the user (the clip can begin
+    # with them, e.g. a timer announcement starting mid-request).
+    before = h[:blocks[0].b] if blocks[0].a == 0 else []
     end = blocks[-1].b + blocks[-1].size
     # Whatever we said after the last exact match may have come back misheard
     # ("Claude Max account" -> "call my count"); drop it if it sounds alike.
@@ -125,5 +130,5 @@ def strip_own_speech(heard: str, spoken: str) -> str:
         best = max(difflib.SequenceMatcher(None, rest, " ".join(tail[i:])).ratio()
                    for i in range(len(tail)))
         if best >= 0.6:
-            return ""
-    return rest
+            rest = ""
+    return " ".join([*before, *([rest] if rest else [])])
