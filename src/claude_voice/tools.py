@@ -14,7 +14,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from . import calendar_mac, mac
+from . import calendar_mac, mac, mail_mac
 from .config import ROOT
 
 log = logging.getLogger(__name__)
@@ -212,6 +212,57 @@ def build_server(timers: Timers) -> tuple[McpSdkServerConfig, list[str]]:
                 "required": ["title", "start"],
             },
         )(wrap(lambda a: calendar_mac.create_event(a))),
+        tool(
+            "mail_recent",
+            "List the newest messages in Mail's inbox (all accounts): id, date, sender, subject. "
+            "count 1-50 (default 10); unread_only=true for unread only.",
+            {
+                "type": "object",
+                "properties": {"count": {"type": "integer"}, "unread_only": {"type": "boolean"}},
+            },
+        )(wrap(lambda a: mail_mac.recent(a.get("count"), a.get("unread_only", False)))),
+        tool(
+            "mail_search",
+            "Find recent inbox messages whose subject or sender contains query (searches the newest 300).",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "count": {"type": "integer"}},
+                "required": ["query"],
+            },
+        )(wrap(lambda a: mail_mac.search(a.get("query"), a.get("count")))),
+        tool("mail_read", "Read one inbox message by its id (from mail_recent or mail_search).", {"id": int})(
+            wrap(lambda a: mail_mac.read(a.get("id")))
+        ),
+        tool(
+            "mail_draft",
+            "Create an email draft in Mail and open it for the user to review. Sends nothing. "
+            "to and cc are lists of email addresses.",
+            {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "array", "items": {"type": "string"}},
+                    "cc": {"type": "array", "items": {"type": "string"}},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["to"],
+            },
+        )(wrap(lambda a: mail_mac.draft(a))),
+        tool(
+            "mail_send",
+            "Send an email from Mail (the user confirms by voice). to and cc are lists of email "
+            "addresses. Prefer mail_draft unless the user clearly asked to send.",
+            {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "array", "items": {"type": "string"}},
+                    "cc": {"type": "array", "items": {"type": "string"}},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["to"],
+            },
+        )(wrap(lambda a: mail_mac.send(a))),
         tool(
             "request_app_change",
             "Send a requested change to this voice app (how it listens, talks, asks for "
