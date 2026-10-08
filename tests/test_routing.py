@@ -612,3 +612,91 @@ def test_barge_into_a_session_message_becomes_its_reply() -> None:
         return await task
 
     assert run(go()) == {"status": "ok", "text": "the second one"}
+
+
+# --- mail and calendar for other sessions (POST /api/tool) ------------------------------------
+
+
+def _shared(monkeypatch: pytest.MonkeyPatch, name: str) -> list[dict[str, Any]]:
+    """Swap a shared tool's action for a recorder; returns the calls it got."""
+    import dataclasses
+
+    from claude_voice import shared_tools
+
+    ran: list[dict[str, Any]] = []
+
+    async def act(args: dict[str, Any]) -> str:
+        ran.append(args)
+        return "done"
+
+    monkeypatch.setitem(shared_tools.BY_NAME, name, dataclasses.replace(shared_tools.BY_NAME[name], run=act))
+    return ran
+
+
+SEND = {"to": ["sam@example.com"], "subject": "Lunch", "body": "Noon works."}
+
+
+async def _answer(r: Rig, task: asyncio.Task[dict[str, Any]], words: str) -> dict[str, Any]:
+    await asyncio.sleep(0.01)  # the question is asked
+    await hear(r, words, started=time.monotonic())  # speech that starts after it
+    return await task
+
+
+def test_a_sessions_send_is_confirmed_by_voice_in_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _shared(monkeypatch, "mail_send")
+
+    async def go() -> dict[str, Any]:
+        r = make()
+        task = asyncio.create_task(r.a.run_shared_tool("proj#42", "mail_send", SEND))
+        result = await _answer(r, task, "yes")
+        assert r.spk.said[0] == "From proj: Send email to sam@example.com, subject Lunch?"
+        return result
+
+    assert run(go()) == {"status": "ok", "text": "done"}
+    assert ran == [SEND]
+
+
+def test_a_declined_send_never_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _shared(monkeypatch, "mail_send")
+
+    async def go() -> dict[str, Any]:
+        r = make()
+        return await _answer(r, asyncio.create_task(r.a.run_shared_tool("proj#42", "mail_send", SEND)), "no")
+
+    assert run(go())["status"] == "declined"
+    assert ran == []
+
+
+def test_always_is_just_once_for_a_session_add_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _shared(monkeypatch, "calendar_create_event")
+    event = {"title": "Dentist", "start": "2026-10-09T15:00"}
+
+    async def go() -> list[str]:
+        r = make()
+        for _ in range(2):  # the second call asks again
+            t = asyncio.create_task(r.a.run_shared_tool("proj#42", "calendar_create_event", event))
+            assert (await _answer(r, t, "yes, always"))["status"] == "ok"
+        return r.spk.said
+
+    said = run(go())
+    assert said.count("From proj: Add Dentist, Friday October 9, 3:00 PM, to your calendar?") == 2
+    assert "Okay, just this once. That kind of action always asks." in said
+    assert len(ran) == 2
+
+
+def test_reading_runs_without_a_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _shared(monkeypatch, "mail_recent")
+
+    async def go() -> tuple[dict[str, Any], list[str]]:
+        r = make()
+        return await r.a.run_shared_tool("proj#42", "mail_recent", {"count": 3}), r.spk.said
+
+    assert run(go()) == ({"status": "ok", "text": "done"}, [])
+    assert ran == [{"count": 3}]
+
+
+def test_unknown_shared_tool_is_refused() -> None:
+    async def go() -> dict[str, Any]:
+        return await make().a.run_shared_tool("proj#42", "Bash", {"command": "ls"})
+
+    assert run(go())["status"] == "error"

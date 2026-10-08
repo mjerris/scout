@@ -63,6 +63,7 @@ def test_events_are_read_and_formatted(tmp_path: Path) -> None:
     assert "Thu Oct 8, 9:30 AM to 9:45 AM: Standup [Work] (repeats)" in out
     assert "Thu Oct 8, 3:00 PM to 4:00 PM: Dentist [Home] at Main St" in out
     assert "Fri Oct 9, all day: Holiday [Home]" in out
+    assert "Dentist [Home] at Main St (2026-10-08T15:00:00-05:00 to 2026-10-08T16:00:00-05:00)" in out
     call = _calls(tmp_path)[-1]
     assert call[0] == "events"
     assert call[call.index("--query") + 1] == "dent" and call[call.index("--calendar") + 1] == "Home"

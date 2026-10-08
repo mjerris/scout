@@ -109,6 +109,10 @@ class StubApp:
         self.calls.append(("discuss", agent, message, listen, timeout, hold, voice, wait_for_floor))
         return {"status": "ok", "text": "sure"}
 
+    async def run_shared_tool(self, agent: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("tool", agent, name, args))
+        return {"status": "ok", "text": "No events in that range."}
+
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None:
         self.calls.append(("say", text, speak, client))
         if self.text_gate is not None:
@@ -325,6 +329,32 @@ def test_discuss_validates_body(token_file: Path) -> None:
                 assert r.status == 200
                 assert await r.json() == {"status": "ok", "text": "sure"}
             assert srv.app.calls == [("discuss", "proj#123", "hi", True, 300.0, False, None, 0.0)]
+
+    run(main())
+
+
+# --- /api/tool ----------------------------------------------------------------------------
+
+
+def test_tool_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
+    async def main() -> None:
+        async with serve() as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/tool"
+            async with s.post(url, json={"name": "calendar_events"}) as r:
+                assert r.status == 401  # no token, no calendar
+            async with s.post(
+                url, data='{"name": "mail_send"}', headers={**srv.auth, "Content-Type": "text/plain"}
+            ) as r:
+                assert r.status == 415
+            bad: list[object] = [[], {"name": 5}, {"name": "x", "args": []}, {"name": "x", "agent": 3}]
+            for b in bad:
+                async with s.post(url, json=b, headers=srv.auth) as r:
+                    assert r.status == 400, b
+            assert srv.app.calls == []
+            body = {"agent": "proj#9", "name": "calendar_events", "args": {"start": "2026-10-08"}}
+            async with s.post(url, json=body, headers=srv.auth) as r:
+                assert await r.json() == {"status": "ok", "text": "No events in that range."}
+            assert srv.app.calls == [("tool", "proj#9", "calendar_events", {"start": "2026-10-08"})]
 
     run(main())
 

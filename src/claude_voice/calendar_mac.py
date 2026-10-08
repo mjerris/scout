@@ -114,6 +114,7 @@ def format_events(data: dict[str, Any]) -> str:
             line += " (repeats)"
         if e.get("attendees"):
             line += f" ({e['attendees']} people)"
+        line += f" ({e['start']} to {e['end']})"  # exact values, for programs
         if e.get("notes"):
             line += f"\n  notes: {e['notes']}"
         lines.append(line)
