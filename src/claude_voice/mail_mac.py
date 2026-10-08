@@ -24,24 +24,38 @@ _UNTRUSTED = (
 )
 _EMAIL = re.compile(r"^[^@\s<>,;\"]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253})\.[A-Za-z]{2,}$")
 _MAX_BODY = 4000
+RECENT_DAYS = 30  # mail_recent looks this far back
+SEARCH_DAYS = 180  # mail_search looks this far back
 
 # One JXA script per action. Arguments arrive as argv strings, never spliced in.
 _LIST = r"""
 function run(argv) {
-  const [count, unreadOnly, query] = [parseInt(argv[0]), argv[1] === "true", (argv[2] || "").toLowerCase()];
+  const [count, unreadOnly, query, days] =
+    [parseInt(argv[0]), argv[1] === "true", (argv[2] || "").toLowerCase(), parseInt(argv[3])];
   const Mail = Application("Mail");
-  const msgs = Mail.inbox.messages;
+  // Work per account inbox: the combined inbox is neither in date order nor stable
+  // between requests, and its `whose` filter checks messages one by one (slow). Bulk-
+  // fetch ids and dates per mailbox, sort here, then read details by id, never by position.
+  const since = Date.now() - days * 86400000;
+  let rows = [];
+  for (const mb of Mail.inbox.mailboxes()) {
+    const ids = mb.messages.id(), dates = mb.messages.dateReceived();
+    if (ids.length !== dates.length) continue;  // changed mid-read; skip rather than mismatch
+    for (let i = 0; i < ids.length; i++)
+      if (dates[i] && dates[i].getTime() >= since) rows.push({mb: mb, id: ids[i], date: dates[i]});
+  }
+  rows.sort((a, b) => b.date - a.date);
   const out = [];
-  const scan = Math.min(msgs.length, query ? 300 : (unreadOnly ? 200 : count));
-  for (let i = 0; i < scan && out.length < count; i++) {
-    const m = msgs[i];
-    if (unreadOnly && m.readStatus()) continue;
+  for (const r of rows) {
+    if (out.length >= count) break;
+    const m = r.mb.messages.byId(r.id);
+    const read = m.readStatus();
+    if (unreadOnly && read) continue;
     const subject = m.subject() || "", sender = m.sender() || "";
     if (query && !(subject.toLowerCase().includes(query) || sender.toLowerCase().includes(query))) continue;
-    out.push({id: m.id(), date: m.dateReceived().toISOString(), sender: sender, subject: subject,
-              read: m.readStatus(), account: m.mailbox().account().name()});
+    out.push({id: r.id, date: r.date.toISOString(), sender: sender, subject: subject, read: read});
   }
-  return JSON.stringify({messages: out, scanned: scan, inbox: msgs.length});
+  return JSON.stringify({messages: out, considered: rows.length, days: days});
 }
 """
 
@@ -49,9 +63,11 @@ _READ = r"""
 function run(argv) {
   const id = parseInt(argv[0]), limit = parseInt(argv[1]);
   const Mail = Application("Mail");
-  const found = Mail.inbox.messages.whose({id: id})();
-  if (found.length === 0) return JSON.stringify({error: "no inbox message with id " + id});
-  const m = found[0];
+  let m = null;
+  for (const mb of Mail.inbox.mailboxes()) {
+    if (mb.messages.id().includes(id)) { m = mb.messages.byId(id); break; }
+  }
+  if (m === null) return JSON.stringify({error: "no inbox message with id " + id});
   const content = m.content() || "";
   return JSON.stringify({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
     to: m.toRecipients().map(r => r.address()), cc: m.ccRecipients().map(r => r.address()),
@@ -133,7 +149,7 @@ def format_list(data: dict[str, Any], what: str) -> str:
 
 async def recent(count: Any = 10, unread_only: Any = False, run: Runner = _jxa) -> str:
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
-    data = await _call(run, _LIST, str(n), "true" if unread_only else "false", "")
+    data = await _call(run, _LIST, str(n), "true" if unread_only else "false", "", str(RECENT_DAYS))
     return format_list(data, "unread messages in the inbox" if unread_only else "messages in the inbox")
 
 
@@ -142,7 +158,7 @@ async def search(query: Any, count: Any = 10, run: Runner = _jxa) -> str:
     if not q:
         raise ToolError("query is required")
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
-    data = await _call(run, _LIST, str(n), "false", q)
+    data = await _call(run, _LIST, str(n), "false", q, str(SEARCH_DAYS))
     return format_list(data, f"recent inbox messages matching {q!r}")
 
 

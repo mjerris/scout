@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,29 @@ def _when(e: dict[str, Any]) -> str:
     return f"{s.strftime('%a %b %-d, %-I:%M %p')} to {t.strftime('%-I:%M %p' if same_day else '%a %b %-d, %-I:%M %p')}"
 
 
+_VIDEO = re.compile(r"meet\.google\.com|zoom\.us/j|teams\.microsoft\.com|webex\.com", re.I)
+_BOILERPLATE = re.compile(
+    r"^(join with google meet|join zoom meeting|or dial|more phone numbers|learn more about meet|"
+    r"meeting id|passcode|pin:|join on your computer|microsoft teams meeting|dial in|one tap mobile|"
+    r"please do not edit this section|invitation from google calendar)",
+    re.I,
+)
+
+
+def clean_notes(text: str) -> tuple[str, bool]:
+    """Drop conferencing boilerplate (dial-ins, separators, join links); report a video link."""
+    video = bool(_VIDEO.search(text or ""))
+    keep = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or not re.search(r"[A-Za-z]{2}", s) or _BOILERPLATE.match(s) or _VIDEO.search(s):
+            continue
+        if re.match(r"^(https?://|tel:|\+?\d[\d\s().-]{6,}$)", s):
+            continue
+        keep.append(s)
+    return " ".join(keep)[:200], video
+
+
 def format_events(data: dict[str, Any]) -> str:
     events = data.get("events", [])
     if not events:
@@ -115,8 +139,11 @@ def format_events(data: dict[str, Any]) -> str:
         if e.get("attendees"):
             line += f" ({e['attendees']} people)"
         line += f" ({e['start']} to {e['end']})"  # exact values, for programs
-        if e.get("notes"):
-            line += f"\n  notes: {e['notes']}"
+        notes, video = clean_notes(e.get("notes", ""))
+        if video:
+            line += " (has a video link)"
+        if notes:
+            line += f"\n  notes: {notes}"
         lines.append(line)
     total = data.get("total", len(events))
     if total > len(events):
