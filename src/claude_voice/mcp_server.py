@@ -24,10 +24,10 @@ filtered for noise, so an empty reply means the user said nothing. The app
 has one speaker at a time (the floor); set hold_floor=true when your next
 discuss call follows straight on, so nobody cuts in between turns.
 
-The user may be watching this session's text as well as listening. Every time
-a discuss result comes back, first write its `Heard: "..."` line into your
-reply as a quote line (> 🎙 ...) so they can see what you heard, then act on
-it."""
+The user may be watching this session's text as well as listening. When a
+discuss result comes back with `Heard: "..."`, show it once, immediately, as a
+single quote line (> 🎙 ...) before you act. Never repeat earlier heard lines
+in later messages or summaries."""
 
 mcp = MCPServer("voice", instructions=INSTRUCTIONS)
 
