@@ -174,9 +174,8 @@ Scout is one plugin: the background app, its MCP server (voice, mail, calendar)
 and its skills. Installing it is all the setup there is.
 
 ```sh
-gh auth login && gh auth setup-git          # once: lets Claude Code fetch the private repo
-claude plugin marketplace add mjerris/scout
-claude plugin install scout@scout
+claude plugin marketplace add mjerris/claude-plugins   # once: Michael Jerris's plugins
+claude plugin install scout@mjerris
 ```
 
 The next Claude session's start runs the plugin's SessionStart hook
@@ -196,8 +195,8 @@ version, which the next session start switches to.
   pre-approved.
 - `/scout:uninstall` stops the app and removes the login item, keeping the data
   folder unless asked to purge; then `claude plugin uninstall scout`.
-- Working from a checkout instead: `claude plugin marketplace add ~/src/scout`
-  loads the plugin in place, and `scripts/install.sh` installs from it by hand.
+- Working from a checkout instead: `claude --plugin-dir ~/src/scout` loads it for
+  one session, and `scripts/install.sh` installs the background app from it by hand.
 
 ## Always on
 

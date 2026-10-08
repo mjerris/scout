@@ -356,8 +356,6 @@ def test_plugin_files_point_at_real_scripts() -> None:
     from scout.config import ROOT
 
     assert json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["name"] == "scout"
-    market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
-    assert [p["name"] for p in market["plugins"]] == ["scout"]
     mcp = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["scout"]["command"]
     hook = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0][
         "command"
