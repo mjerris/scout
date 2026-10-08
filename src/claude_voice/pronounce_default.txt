@@ -5,6 +5,7 @@
 TTS  '\.toml\b'  ' dot toml'          # config.toml -> "config dot toml"
 TTS  '\.py\b'  ' dot pie'             # brain.py
 TTS  '\.md\b'  ' dot M D'             # README.md
+TTS  '\.jsonl\b'  ' dot jason L'      # events.jsonl
 TTS  '\.json\b'  ' dot jason'         # config.json
 TTS  '\.sh\b'  ' dot S H'             # run.sh
 TTS  '\bSignalWire\b'  'Signal Wire'
@@ -14,13 +15,16 @@ TTS  '\bMCP\b'  'M C P'
 TTS  '\bASR\b'  'A S R'
 TTS  '\bTTS\b'  'T T S'
 TTS  '\bVAD\b'  'vad'
-TTS  '\bJSONL?\b'  'jason'
+TTS  '\bJSONL\b'  'jason L'
+TTS  '\bJSON\b'  'jason'
 TTS  '\bgh\b'  'G H'
 TTS  '\bPR\b'  'P R'
 TTS  '\bURL\b'  'U R L'
 TTS  '~/'  'home slash '
 
 # --- common mishearings ---------------------------------------------------------
-STT  '\b(?:Claud|Clawed|Klaud|Clod)\b'  'Claude'
+# "clawed", "clod" and "cloud" are real words: only fixed where they can only be the name.
+STT  '\b(?:Claud|Klaud)\b'  'Claude'
+STT  '\b(hey|hi|okay|ok)(,?\s+)(?:clawed|clod|claw)\b'  '\1\2Claude'  # "Hey Clawed, ..."
 STT  '\bsignal wire\b'  'SignalWire'
-STT  '\bcloud code\b'  'Claude Code'
+STT  '(?<!google )\bcloud code\b'  'Claude Code'  # but "Google Cloud Code" is a product

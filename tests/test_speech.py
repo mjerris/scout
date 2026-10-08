@@ -116,7 +116,7 @@ def test_strip_own_speech_keeps_words_before_our_speech() -> None:
     [
         ("sure, no problem", True),
         ("yes, always, don't ask me again", "always"),
-        ("yes, don't ask again", True),
+        ("yes, don't ask again", "always"),  # an explicit "don't ask again" is permanent
         ("no, don't", False),
         ("no problem, but don't do it", False),
     ],

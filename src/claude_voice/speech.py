@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import difflib
+import itertools
 import re
+from dataclasses import dataclass
 
-_WORD = re.compile(r"[a-z']+")
+_WORD = re.compile(r"[a-z0-9']+")
+# Curly and modifier apostrophes (iOS keyboards, some transcripts): U+2019, U+2018, U+02BC.
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
 _LEADERS = {"hey", "hi", "hello", "ok", "okay", "yo", "a", "ay", "hay"}
+# Filler that may come before the wake name without counting as words of a
+# sentence ("Um, hey Claude", "So anyway, Claude"). At most _MAX_FILLERS of them.
+_WAKE_FILLERS = {"uh", "um", "er", "erm", "ah", "oh", "so", "and", "anyway", "well", "alright"}
+_MAX_FILLERS = 2
 
 STOP_WORDS = {
     "stop",
@@ -14,81 +22,78 @@ STOP_WORDS = {
     "stopp",
     "cancel",
     "quiet",
+    "silence",
     "shut up",
     "enough",
     "never mind",
     "nevermind",
     "be quiet",
     "hush",
+    "shush",
 }
 RESET_PHRASES = {
     "new conversation",
-    "start over",
-    "reset",
     "new session",
+    "start new conversation",
+    "start new session",
+    "start over",
+    "start fresh",
+    "reset",
     "forget everything",
     "clear context",
 }
-_YES = {
-    "yes",
-    "yeah",
-    "yep",
-    "yup",
-    "sure",
-    "ok",
-    "okay",
-    "approve",
-    "approved",
-    "allow",
-    "affirmative",
-    "go ahead",
-    "do it",
-    "proceed",
-    "please do",
-    "go for it",
-    "correct",
-    "fine",
-}
-_NO = {
-    "no",
-    "nope",
-    "nah",
-    "don't",
-    "dont",
-    "deny",
-    "denied",
-    "negative",
-    "stop",
-    "cancel",
-    "skip",
-    "do not",
-    "never mind",
-    "wait",
-}
+
+
+def normalize(text: str) -> str:
+    """Lowercase, with curly apostrophes (iOS keyboards, some transcripts) made straight."""
+    return text.translate(_APOSTROPHES).lower()
 
 
 def words(text: str) -> list[str]:
-    return _WORD.findall(text.lower())
+    return _WORD.findall(normalize(text))
 
 
 def strip_wake(text: str, names: list[str], max_position: int) -> str | None:
     """If text is addressed to the assistant, return the command after the wake
-    name (possibly ""). Otherwise None."""
-    raw = text.strip()
-    tokens = list(re.finditer(r"[A-Za-z']+", raw))
+    name (possibly ""). Otherwise None.
+
+    The name has to be said to the assistant, not about it: at the start (after
+    "hey", "okay", a filler or two), or set off by a comma ("Oh and Claude, ...",
+    "Excuse me, Claude, ..."). "I think Claude is great" and "Did Claude finish
+    the build?" are about it, so they don't wake it."""
+    raw = text.strip().translate(_APOSTROPHES)
+    tokens = list(re.finditer(r"[A-Za-z0-9']+", raw))
     wanted = {n.lower() for n in names}
-    seen = 0
+    seen = 0  # words before the name that count toward max_position
+    fillers = 0
     for m in tokens:
         w = m.group().lower()
         if w in wanted:
-            return raw[m.end() :].lstrip(" ,.!?:;-")
-        if w not in _LEADERS:
-            seen += 1
+            before = raw[: m.start()].rstrip()
+            after = raw[m.end() :]
+            # "I asked Claude, and it said no" is about it; "He Claude, ..." (a
+            # misheard "hey") is to it.
+            vocative = (
+                seen == 0
+                or before.endswith((",", ".", "!", "?", ";", ":", "-"))
+                or (seen <= 1 and bool(re.match(r"\s*[,.!?;:]", after)))
+            )
+            if vocative:
+                return after.lstrip(" ,.!?:;-")
+            return None
+        if w in _LEADERS:
+            continue
+        if w in _WAKE_FILLERS and fillers < _MAX_FILLERS:
+            fillers += 1
+            continue
+        seen += 1
         if seen >= max_position:
             break
     return None
 
 
+# Words that may surround a stop without changing it ("stop it now please",
+# "okay, that's enough", "um, stop").
 _STOP_FILLER = {
     "please",
     "now",
@@ -102,128 +107,424 @@ _STOP_FILLER = {
     "just",
     "right",
     "talking",
+    "speaking",
     "a",
     "the",
+    "um",
+    "uh",
+    "er",
+    "oh",
+    "alright",
+    "so",
 }
+_STOP_EXTRA = re.compile(r"\b(?:thank you|thanks|all right)\b")
+_SHH = re.compile(r"^sh+$")
+
+
+def _is_stop_words(w: list[str]) -> bool:
+    w = [x for x in w if x not in _STOP_FILLER]
+    if not w:
+        return False
+    i = 0
+    while i < len(w):  # one or more stop phrases: "stop, stop", "stop! stop!"
+        if i + 1 < len(w) and f"{w[i]} {w[i + 1]}" in STOP_WORDS:
+            i += 2
+        elif w[i] in STOP_WORDS or _SHH.match(w[i]):
+            i += 1
+        else:
+            return False
+    return True
 
 
 def is_stop(cmd: str) -> bool:
     """True only when the whole utterance is a stop phrase, give or take filler
-    ("stop", "stop talking", "that's enough", "never mind please"). "Cancel the
-    timer" or "no, cancel it" are requests/answers, not stops."""
-    w = [x for x in words(cmd) if x not in _STOP_FILLER]
-    return bool(w) and " ".join(w) in STOP_WORDS
+    ("stop", "stop talking", "that's enough", "um, stop", "stop, stop", "stop,
+    thank you"). "Cancel the timer" or "no, cancel it" are requests/answers,
+    not stops."""
+    return _is_stop_words(words(_STOP_EXTRA.sub(" ", normalize(cmd))))
+
+
+def is_stop_utterance(text: str, names: list[str], max_position: int) -> bool:
+    """True when the whole utterance is a stop, with or without the wake name
+    before or after it: "Stop, Claude.", "Claude, stop, stop.", "Stop. Stop.
+    Stop.", "Um, stop." The name may only sit within the first max_position
+    words or at the end."""
+    w = words(_STOP_EXTRA.sub(" ", normalize(text)))
+    wanted = {n.lower() for n in names}
+    kept: list[str] = []
+    for i, x in enumerate(w):
+        if x in _LEADERS:
+            continue
+        if x in wanted and (i < max_position or i == len(w) - 1):
+            continue
+        kept.append(x)
+    return _is_stop_words(kept)
+
+
+_RESET_FILLER = {
+    "please",
+    "now",
+    "um",
+    "uh",
+    "ok",
+    "okay",
+    "alright",
+    "so",
+    "just",
+    "let's",
+    "lets",
+    "a",
+    "the",
+    "claude",
+}
 
 
 def is_reset(cmd: str) -> bool:
-    """True only for the whole phrase ("new conversation", "start over please"),
-    not "reset my router"."""
-    w = [x for x in words(cmd) if x not in _STOP_FILLER and x not in ("let's", "lets", "a")]
+    """True only for the whole phrase ("new conversation", "start over please",
+    "let's start a new conversation"), not "reset my router" or "reset it"."""
+    w = [x for x in words(cmd) if x not in _RESET_FILLER]
     return " ".join(w) in RESET_PHRASES
 
 
-# Phrases that contain a "no" word but agree: "sure, no problem", "yes, don't ask again".
-_AGREEING = re.compile(
-    r"\b(?:no (?:problem|worries|prob)|don'?t (?:ask|bother asking)(?: me)?(?: again| anymore)?|"
-    r"don'?t need to ask|no need to ask)\b"
+# ---------------------------------------------------------------- yes / no ---
+# Only a short, clear answer counts. Anything else is None and the caller asks
+# again: an unclear reply must never approve a tool call.
+_MAX_ANSWER_WORDS = 6
+_ANSWER_FILLER = {
+    "um",
+    "uh",
+    "er",
+    "erm",
+    "ah",
+    "oh",
+    "hmm",
+    "hm",
+    "mm",
+    "mmm",
+    "well",
+    "so",
+    "please",
+    "thanks",
+    "sir",
+    "ma'am",
+    "just",
+    "claude",
+    "claud",
+    "klaud",
+    "hey",
+}
+# "mm-hmm" and "uh-huh" are yes; mapped before the filler is dropped.
+_YES_SOUNDS = re.compile(r"\b(?:m+-?hm+|mm+ hm+|uh-?huh|uh huh|mhm)\b")
+# Agreeing phrases that contain a "no" word: "sure, no problem", "why not".
+_AGREE = re.compile(
+    r"\b(?:(?:i )?don't see why not|why not|no problem|not a problem|no prob|no worries|no doubt|"
+    r"(?:i )?don't mind|no go ahead|no go for it)\b"
+)
+# Neither yes nor no on their own: "yes, don't ask again" is a yes because of the "yes".
+_NEUTRAL = re.compile(
+    r"\b(?:(?:you )?(?:don't|do not|never) (?:need to |have to |bother )?ask(?:ing)?(?: me)?(?: again| anymore)?|"
+    r"(?:you )?(?:don't|do not) (?:need|have) to ask(?: me)?(?: again| anymore)?|no need to ask(?: me)?(?: again)?|"
+    r"stop asking(?: me)?(?: again)?)\b"
+)
+_UNSURE = re.compile(
+    r"\b(?:not sure|unsure|maybe|perhaps|possibly|probably|i don't know|don't know|dunno|no idea|"
+    r"let me (?:think|see|check|look)|i guess|i think so|i suppose|kind of|sort of|"
+    r"if|unless|assuming|provided|actually|although|though|except|whatever you think)\b"
+)
+_QUESTION = re.compile(r"\b(?:what|what's|whats|which|who|whose|where|when|how|why|huh|eh|pardon|repeat)\b")
+_PAUSE = re.compile(
+    r"\b(?:hold on|hang on|hold up|one (?:sec|second|moment|minute)|(?:a|just a) (?:sec|second|moment|minute|bit)|"
+    r"give me|gimme)\b"
+)
+_LATER = re.compile(r"\b(?:later|in a (?:minute|bit|moment|sec|second|while)|tomorrow)\b")
+_NO = re.compile(
+    r"\b(?:no|nope|nah|nay|don't|dont|do not|deny|denied|negative|stop|cancel|skip|never|never mind|"
+    r"wait|abort|reject|rejected|decline|declined|refuse|hold off|go away|"
+    r"not|isn't|aren't|won't|wouldn't|shouldn't|can't|cannot|doesn't|didn't|mustn't)\b"
+)
+_YES = re.compile(
+    r"\b(?:yes|yeah|yea|yep|yup|ya|yah|sure|ok|okay|alright|all right|approve|approved|allow|allowed|"
+    r"affirmative|go ahead|go|go for it|do it|do that|do|run it|proceed|carry on|correct|right|fine|"
+    r"absolutely|definitely|certainly|of course|sounds good|good to go|perfect|you bet|agreed|agree|"
+    r"agreeidiom)\b"
 )
 
 
-# Not an answer either way: ask again.
-_UNSURE = re.compile(r"\b(?:not sure|unsure|maybe|i don'?t know|dunno|no idea|hmm+|let me think)\b")
-# Negation flips a yes word: "not okay", "not yes", "never".
-_NEGATION = {"not", "never", "isn't", "aren't", "won't", "shouldn't"}
+@dataclass
+class _Reply:
+    text: str  # normalized words joined by spaces, idioms replaced
+    question: bool  # a "?" is left that isn't part of an agreeing idiom ("why not?")
 
 
-def parse_yes_no(text: str) -> bool | None:
-    """True for yes, False for no, None when unclear (the caller asks again)."""
-    w = _AGREEING.sub(" ", " ".join(words(text)))
-    if _UNSURE.search(w):
+def _reply(text: str) -> _Reply:
+    t = _YES_SOUNDS.sub(" yes ", normalize(text))
+    t = re.sub(r"\bthank you\b", " ", t)
+    question = "?" in re.sub(r"why not\s*\?", " ", t)
+    t = re.sub(r"^\W*(?:okay|ok|alright|all right|right),? so\b", " ", t)  # "okay so ..." leads in
+    w = " ".join(x for x in words(t) if x not in _ANSWER_FILLER)
+    w = _AGREE.sub(" agreeidiom ", w)
+    w = _NEUTRAL.sub(" ", w)
+    return _Reply(re.sub(r"\s+", " ", w).strip(), question)
+
+
+def _decide(r: _Reply) -> bool | None:
+    w = r.text
+    if not w:
         return None
-    padded = f" {w} "
-    if any(f" {n} " in padded for n in _NO) or any(t in _NEGATION for t in w.split()):
+    if _UNSURE.search(w) or _QUESTION.search(w):
+        return None
+    if _NO.search(w):
         return False
-    if any(f" {y} " in padded for y in _YES):
-        return True
+    if _LATER.search(w):
+        return False  # "do it later", "sure, in a minute": not now
+    if _PAUSE.search(w):
+        return None
+    if len(_YES.sub("y", w).split()) > _MAX_ANSWER_WORDS:  # "go ahead" counts as one
+        return None
+    if _YES.search(w):
+        return None if r.question else True  # "yes?" / "okay?" is asking back
     return None
 
 
+def parse_yes_no(text: str) -> bool | None:
+    """True for a clear yes, False for a clear no, None when unclear (the caller
+    asks again). Only short replies count; a question, a pause ("okay, hold
+    on"), a condition ("yes if ...") or doubt is never a yes."""
+    return _decide(_reply(text))
+
+
+# "Yes, but always ask" means keep asking: a one-time yes.
+_KEEP_ASKING = re.compile(
+    r"\b(?:(?:i |you )?always (?:want to be asked|ask|asks|warn|check|confirm|tell|prompt|"
+    r"double check|run (?:it|that|this|things) by|let me know|notify|remind)"
+    r"(?: (?:me|with me|first|before|it|that))*|ask(?: me)? always|not always)\b"
+)
+# Explicit permanent approval: "yes, always", "yes, don't ask me again".
+_FOREVER = re.compile(
+    r"\b(?:always|from now on|(?:don't|do not|never) ask(?: me)? (?:again|anymore)|stop asking(?: me)?|"
+    r"no need to ask(?: me)? again|(?:you )?(?:don't|do not) (?:need|have) to ask(?: me)? again)\b"
+)
+
+
+def parse_answer(text: str) -> bool | str | None:
+    """Like parse_yes_no, plus "always" for an explicit permanent approval
+    ("yes, always", "always allow that", "yes, don't ask me again", "yes, from
+    now on"). "Always" never turns an unclear or negative answer into an
+    approval, and "always ask/warn/check me", "ask me always" or "not always"
+    mean keep asking: a one-time yes when the rest is a clear yes."""
+    question = _reply(text).question
+    w = _KEEP_ASKING.sub(" ", " ".join(words(_YES_SOUNDS.sub(" yes ", normalize(text)))))
+    if not _FOREVER.search(w):
+        return _decide(_Reply(_reply(w).text, question))
+    rest = _reply(_FOREVER.sub(" ", w)).text
+    if not rest:
+        # A bare "always" ("Always.", "Hmm, always"): yes, unless it was asked back.
+        return "always" if re.search(r"\balways\b", w) and not question else None
+    answer = _decide(_Reply(rest, question))
+    return "always" if answer is True else answer
+
+
+# ------------------------------------------------------------------ "wait" ---
+_SPAN = r"(?:sec|second|minute|moment|bit)"
+_WAIT_CORE = (
+    rf"(?:just\s+)?(?:hang on|hold on|hold up|wait)(?:\s+(?:a|one|just a)\s+{_SPAN})?"
+    rf"|(?:one|just a)\s+{_SPAN}"
+)
+_WAIT_TAIL = r"(?:[\s,]+(?:please|thanks|thank you))?[\s,.!]*$"
+# "hang on", "wait", "one second" only on their own, after punctuation or a
+# filler/"and", so "tell Bob to hang on", "set a timer for one second" and
+# "play the song Hold On" stay ordinary requests.
 _WAIT = re.compile(
-    # Unambiguous anywhere at the end ("open Netflix and hang on") ...
-    r"(?:[\s,.;:!-]*\b(?:hang on|give me a (?:sec|second|minute|moment)|one (?:sec|second|moment)|"
-    r"just a (?:sec|second|moment)|wait a (?:sec|second|minute|moment))"
-    # ... but "wait" / "hold on" only on their own or after punctuation, so
-    # "tell them not to wait" and "hold on to it" are ordinary requests.
-    r"|(?:^|[,.;:!?-])\s*(?:wait|hold on))"
-    r"[\s,.!?]*$",
+    rf"(?:^|[,.;:!?-]\s*|\b(?:and|so|okay|ok|uh|um|oh|well|now|but)\s+)"
+    rf"(?P<w>(?:{_WAIT_CORE})(?:[\s,.!-]+(?:{_WAIT_CORE}))*){_WAIT_TAIL}",
     re.I,
 )
+# "give me a sec" is unambiguous anywhere at the end.
+_GIVE_ME = re.compile(rf"\b(?P<w>(?:give me|gimme)\s+(?:a|one)\s+{_SPAN}){_WAIT_TAIL}", re.I)
 
 
 def split_wait(text: str) -> tuple[str, bool]:
     """("rest", True) when the user ends with "hang on", "wait", "give me a sec"..."""
-    m = _WAIT.search(text)
+    t = text.translate(_APOSTROPHES)
+    if t.rstrip().endswith("?"):  # "how long should I hang on?" asks, it doesn't pause
+        return text, False
+    m = _WAIT.search(t) or _GIVE_ME.search(t)
     if not m:
         return text, False
-    return text[: m.start()].strip(" ,.;:-"), True
+    return text[: m.start("w")].strip(" ,.;:-"), True
 
 
-_ALWAYS_ASK = re.compile(r"\balways (?:ask|check|confirm|tell)\b")
-_ALWAYS_OK = re.compile(r"^(?:always|always allow(?: it| that)?|allow (?:it |that )?always)$")
-
-
-def parse_answer(text: str) -> bool | str | None:
-    """Like parse_yes_no, plus "always" ("yes, always", "always allow that").
-    "Always" never turns an unclear or negative answer into an approval, and
-    "always ask me" means keep asking, not stop asking."""
-    w = " ".join(words(text))
-    if _ALWAYS_ASK.search(w):
-        return parse_yes_no(_ALWAYS_ASK.sub(" ", w))  # "yes, but always ask" is a one-time yes
-    answer = parse_yes_no(text)
-    if "always" in w.split() and (answer is True or _ALWAYS_OK.match(w)):
-        return "always"
-    return answer
+# --------------------------------------------------------------- to_speech ---
+_CODE_MARK = "\x00"
 
 
 def to_speech(md: str) -> str:
     """Flatten markdown into something pleasant to hear."""
-    s = re.sub(r"```.*?```", " (code omitted) ", md, flags=re.S)
+    s = re.sub(r"```.*?(?:```|\Z)", f"\n{_CODE_MARK}\n", md, flags=re.S)
     s = re.sub(r"`([^`]*)`", r"\1", s)
     s = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
-    s = re.sub(r"https?://\S+", "a link", s)
+    s = re.sub(r"<(https?://[^>\s]+)>", r"\1", s)
+    s = re.sub(r"https?://[^\s<>]*[^\s<>.,;:!?)\]'\"]", "a link", s)
     s = re.sub(r"^\s*\|.*\|\s*$", "", s, flags=re.M)  # tables
     s = re.sub(r"^\s{0,3}#{1,6}\s*", "", s, flags=re.M)
     s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.M)
     s = re.sub(r"^\s*(\d+)[.)]\s+", r"\1. ", s, flags=re.M)
-    s = re.sub(r"(\*\*|__|\*|_|~~)(.+?)\1", r"\2", s)
+    # Emphasis only when the markers sit outside a word: my_var, a_b_c, 2 * 3
+    # and file_name.py keep their characters.
+    s = re.sub(r"(?<![\w*])(\*\*|\*)(?=[^\s*])(.+?)(?<=[^\s*])\1(?![\w*])", r"\2", s)
+    s = re.sub(r"(?<!\w)(__|_)(?=[^\s_])(.+?)(?<=[^\s_])\1(?!\w)", r"\2", s)
+    s = re.sub(r"~~(.+?)~~", r"\1", s)
+    s = re.sub(r"(?<![\w*])\*{1,2}(?=[A-Za-z_])", "", s)  # *args, **kwargs
+    s = re.sub(r"\s*(?:→|⇒|->)\s*", " to ", s)
     s = re.sub(r"[☀-➿\U0001F000-\U0001FAFF]", "", s)  # emoji
-    s = re.sub(r"\n{2,}", ". ", s)
-    s = re.sub(r"\s*\n\s*", " ", s)
+    lines = [x.strip() for x in s.split("\n")]
+    lines = [x for x in lines if x]
+    if len(lines) > 1:
+        # Line breaks and list items are pauses when read out.
+        lines = [x if x == _CODE_MARK or x[-1] in ".!?:;," else x + "." for x in lines]
+    s = " ".join(lines).replace(_CODE_MARK, " (code omitted) ")
     s = re.sub(r"\.\s*\.", ".", s)
+    s = re.sub(r"\s+([.,!?])", r"\1", s)
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
-def strip_own_speech(heard: str, spoken: str) -> str:
-    """Remove the assistant's own words (picked up by the mic) from a transcript,
-    returning whatever the user said after them."""
+# --------------------------------------------------------- strip_own_speech ---
+_SOUNDS_ALIKE = 0.6
+
+
+def _alike(a: list[str], b: list[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, " ".join(a), " ".join(b), autojunk=False).ratio()
+
+
+_SOUND_MAP = (
+    ("ph", "f"),
+    ("th", "t"),
+    ("ck", "k"),
+    ("c", "k"),
+    ("q", "k"),
+    ("x", "ks"),
+    ("z", "s"),
+    ("y", "i"),
+    ("w", "u"),
+)
+
+
+def _sound(ws: list[str]) -> str:
+    """A rough sound-alike key: "the mic" and "mike" both become "...mik"."""
+    s = re.sub(r"[^a-z0-9]", "", "".join(ws))
+    for a, b in _SOUND_MAP:
+        s = s.replace(a, b)
+    s = re.sub(r"([a-z])\1+", r"\1", s)
+    return re.sub(r"(?<=[^aeiou])e$", "", s)
+
+
+def _sounds_alike(a: list[str], b: list[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return max(_alike(a, b), difflib.SequenceMatcher(None, _sound(a), _sound(b), autojunk=False).ratio())
+
+
+def _ours(h: list[str], sp: list[str]) -> list[bool]:
+    """For each heard word, whether it is (probably) our own speech."""
+    ours = [False] * len(h)
+    blocks = [b for b in difflib.SequenceMatcher(None, sp, h, autojunk=False).get_matching_blocks() if b.size]
+    kept: list[difflib.Match] = []
+    exact: set[int] = set()  # heard words that matched ours exactly but were judged the user's
+    for b in blocks:
+        if not kept:
+            # A long run of our words, or our opening words: one or two common
+            # words in the middle ("yes" in "say yes or no") is a coincidence.
+            ok = b.size >= 3 or (b.a == 0 and (b.size >= 2 or b.b == 0 or len(sp) == 1))
+        else:
+            prev = kept[-1]
+            gap_h = h[prev.b + prev.size : b.b]
+            gap_s = sp[prev.a + prev.size : b.a]
+            # Our words in between came back misheard: we're still talking.
+            misheard = bool(gap_h and gap_s) and _sounds_alike(gap_h, gap_s) >= _SOUNDS_ALIKE
+            # A short match after the user cut in only counts when it carries
+            # straight on from what we were saying and ends the clip ("do you
+            # want me to yes run it"). Otherwise it's the user's own words
+            # ("I found three items, open the first one").
+            ok = b.size >= 3 or misheard or (not gap_s and b.b + b.size == len(h))
+            # We can't have said many words in no time: a match that skips far
+            # ahead in our speech is a later sentence of ours that happens to
+            # share the user's words ("what about the ...").
+            ok = ok and len(gap_s) <= len(gap_h) + 2
+        if ok:
+            kept.append(b)
+        else:
+            exact.update(range(b.b, b.b + b.size))
+    if not kept:
+        return ours
+    for b in kept:
+        for i in range(b.b, b.b + b.size):
+            ours[i] = True
+    # Between two of our runs: misheard words of ours if they sound like what we
+    # said there ("the mic" for "mike").
+    for prev, nxt in itertools.pairwise(kept):
+        span = range(prev.b + prev.size, nxt.b)
+        said_there = sp[prev.a + prev.size : nxt.a]
+        heard_there = [h[i] for i in span]
+        if (
+            said_there
+            and not exact.intersection(span)
+            and _sounds_alike(heard_there, said_there) >= _SOUNDS_ALIKE
+        ):
+            for i in span:
+                ours[i] = True
+    # Before the first run: the clip may begin on the end of what we said before
+    # it. Misheard words never match exactly, so the user's exact words stop the search.
+    first = kept[0]
+    head, said = h[: first.b], sp[: first.a]
+    if head and said:
+        limit = next((first.b - 1 - i for i in range(first.b - 1, -1, -1) if i in exact), len(head))
+        for k in range(limit, 0, -1):
+            tail_of_said = [said[-n:] for n in range(max(1, k - 1), min(len(said), k + 1) + 1)]
+            if max(_alike(head[-k:], x) for x in tail_of_said) >= _SOUNDS_ALIKE:
+                for i in range(first.b - k, first.b):
+                    ours[i] = True
+                break
+    # After the last run: what we said next may have come back misheard ("Claude
+    # Max account" -> "call my count"). Only the words right after the match can
+    # overlap the clip, so later sentences of ours are never compared.
+    last = kept[-1]
+    rest, tail = h[last.b + last.size :], sp[last.a + last.size :]
+    if rest and tail:
+        start = last.b + last.size
+        limit = next((i - start for i in range(start, len(h)) if i in exact), len(rest))
+        for k in range(limit, 0, -1):
+            windows = [tail[i : i + n] for i in range(min(3, len(tail))) for n in range(max(1, k - 1), k + 2)]
+            if max(_alike(rest[:k], x) for x in windows if x) >= _SOUNDS_ALIKE:
+                for i in range(last.b + last.size, last.b + last.size + k):
+                    ours[i] = True
+                break
+    return ours
+
+
+def _strip(heard: str, spoken: str) -> tuple[str, int]:
     h, sp = words(heard), words(spoken)
     if not h or not sp:
-        return heard
-    blocks = [b for b in difflib.SequenceMatcher(None, sp, h, autojunk=False).get_matching_blocks() if b.size]
-    if not blocks:
-        return heard
-    # Words before our speech started belong to the user (the clip can begin
-    # with them, e.g. a timer announcement starting mid-request).
-    before = h[: blocks[0].b] if blocks[0].a == 0 else []
-    end = blocks[-1].b + blocks[-1].size
-    # Whatever we said after the last exact match may have come back misheard
-    # ("Claude Max account" -> "call my count"); drop it if it sounds alike.
-    tail = sp[blocks[-1].a + blocks[-1].size :]
-    rest = " ".join(h[end:])
-    if tail and rest:
-        # Compare against each suffix of what we said (the start may have matched).
-        best = max(difflib.SequenceMatcher(None, rest, " ".join(tail[i:])).ratio() for i in range(len(tail)))
-        if best >= 0.6:
-            rest = ""
-    return " ".join([*before, *([rest] if rest else [])])
+        return heard, len(h)
+    ours = _ours(h, sp)
+    if not any(ours):
+        return heard, len(h)
+    left = [w for w, o in zip(h, ours, strict=True) if not o]
+    return " ".join(left), len(left)
+
+
+def strip_own_speech(heard: str, spoken: str, spoken_alt: str = "") -> str:
+    """Remove the assistant's own words (picked up by the mic) from a transcript,
+    returning whatever the user said before, between and after them.
+
+    spoken is only the speech that could have overlapped the clip. spoken_alt
+    is the same speech as it was pronounced ("config dot pie" for config.py),
+    when that differs; whichever explains more of the clip wins."""
+    best = _strip(heard, spoken)
+    if spoken_alt and spoken_alt != spoken:
+        alt = _strip(heard, spoken_alt)
+        if alt[1] < best[1]:
+            best = alt
+    return best[0]

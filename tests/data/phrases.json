@@ -1,0 +1,2598 @@
+[
+ {
+  "function": "strip_wake",
+  "input": "Hey Claude, what time is it?",
+  "expected": "what time is it?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Claude.",
+  "expected": ""
+ },
+ {
+  "function": "strip_wake",
+  "input": "Claude, what's the weather?",
+  "expected": "what's the weather?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey cloud, open Netflix.",
+  "expected": null,
+  "note": "'cloud' is no longer a wake name (user decision 3)"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Clawed, play music.",
+  "expected": "play music."
+ },
+ {
+  "function": "strip_wake",
+  "input": "Okay Claude, set a timer for 5 minutes.",
+  "expected": "set a timer for 5 minutes."
+ },
+ {
+  "function": "strip_wake",
+  "input": "Um, hey Claude, what's up?",
+  "expected": "what's up?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Uh, um, okay, so, Claude, what time is it?",
+  "expected": "what time is it?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Oh and Claude, turn it down.",
+  "expected": "turn it down."
+ },
+ {
+  "function": "strip_wake",
+  "input": "Excuse me, Claude, what's next?",
+  "expected": "what's next?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Clyde, what time is it?",
+  "expected": null,
+  "note": "Clyde is a real name; not treated as Claude"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Clawd, what time is it?",
+  "expected": null,
+  "note": "no default STT rule for 'clawd' (tests/test_routing.py uses it as a rule-free token)"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Claw, what time is it?",
+  "expected": "what time is it?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Clod, open YouTube.",
+  "expected": "open YouTube."
+ },
+ {
+  "function": "strip_wake",
+  "input": "The cloud is down again.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Is cloud storage full?",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "In the cloud, everything is cheaper.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Cloud costs are way up this month.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "My cloud backup failed.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "The cat clawed the couch.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "She clawed her way up.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Claudia is coming over tonight.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Tell Claudia dinner's ready.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "I think Claude is great.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Did Claude finish the build?",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "I love Claude Code.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "What a clod he is.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Cloudy with a chance of rain.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "I was talking to my friend about clouds",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "We use cloud code at work.",
+  "expected": null
+ },
+ {
+  "function": "is_stop",
+  "input": "stop",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop!",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "stop it",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop talking.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Please stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Okay, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "That's enough.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Never mind.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Shut up.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Be quiet.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Cancel.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Cancel that.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop, stop, stop!",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "stop stop",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop! Stop!",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Um, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Uh stop",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Alright, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "All right, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop speaking.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop, thank you.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Enough, thanks.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Okay okay stop",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Hush.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Quiet please.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop now please",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop that.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Nevermind.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Shh.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Shush.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Silence.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "That’s enough.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop it now.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Just stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Cancel the timer.",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop the build after the tests finish please",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "No, cancel it.",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Is that enough?",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop the music.",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Quiet hours start at ten.",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Never mind the weather, what time is it?",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Enough about that, what's the news?",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Reset",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "New conversation.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Start over.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Let's start over.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "New session please.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Forget everything.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Clear context.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Clear the context.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Start a new conversation.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Let's start a new conversation.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Start a new session.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Let’s start over.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Um, new conversation.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "New conversation, please.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Okay, start over.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset my router.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset the timer.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Tell me about the new conversation feature",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset it.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset that.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Start over the song.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "How do I start over in Mario?",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Forget everything I said about Bob.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes!",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yeah.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yep.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yup.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sure.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "OK.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Go ahead.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Do it.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes please.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yeah, go for it.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sure, no problem.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Um, yes.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Uh, yeah.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Absolutely.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Definitely.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Of course.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sounds good.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, I don't mind.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sure, why not?",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Why not.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Not a problem.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I don't see why not.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No doubt.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yeah, no worries.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Mm-hmm.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Uh-huh.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yea.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, sir.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Please do.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Run it.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Go.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Approve.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Allowed.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Right.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, don't ask again.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Correct.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Fine.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "That's fine.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, you don't need to ask.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, you don't have to ask.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, stop asking.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, never ask again.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Nope.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Nah.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No thanks.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don't.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don't do it.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Do not.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Deny.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No way.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Not now.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Not yet.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Absolutely not.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Of course not.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hell no.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Please don't.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I'd rather not.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Never.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don’t do it.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don’t.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don’t allow that.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don’t proceed.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I don’t think so.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Please don’t do it.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "That isn’t okay.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "You shouldn’t do that, okay?",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I won’t allow it.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I wouldn't.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "You can't do that.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I'd rather you didn't.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Abort.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Reject.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Decline.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hold off.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Do it later.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don't do it, okay?",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No, skip it.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, wait.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Wait.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, hold on.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay hang on.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, give me a second.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, one sec.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, just a moment.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sure, but what does it do?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay so what will that command do?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yeah, what is that?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, which file is it?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Fine, what's it going to delete?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hmm.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Maybe.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I'm not sure.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I don't know.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Let me think.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "What?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Huh?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hold on.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hang on.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay let me think about it.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, no, wait.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hmm, yes.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay, okay, yes.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No, go ahead.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always allow that.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Allow it always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yeah, always do this.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes always",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always yes.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, don't ask me again.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, and don't ask again.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, never ask again.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, from now on.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, stop asking me.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always ask.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always ask me first.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Okay, but always check with me.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but ask me always.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always warn me.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always let me know.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always double check.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but I always want to be asked.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always prompt me.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always run it by me first.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, this time. Always ask.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, you always ask, that's fine.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes this time but not always.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but not always.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Not always.",
+  "expected": null,
+  "note": "ambiguous on its own (strict yes/no): ask again"
+ },
+ {
+  "function": "parse_answer",
+  "input": "No, always deny.",
+  "expected": false
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always? No.",
+  "expected": false
+ },
+ {
+  "function": "parse_answer",
+  "input": "Never.",
+  "expected": false
+ },
+ {
+  "function": "parse_answer",
+  "input": "Hmm, always?",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always ask.",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "I always forget, what is it?",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Okay, always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always, no.",
+  "expected": false
+ },
+ {
+  "function": "parse_answer",
+  "input": "Don’t, always.",
+  "expected": false
+ },
+ {
+  "function": "split_wait",
+  "input": "Open Netflix, hang on.",
+  "expected": [
+   "Open Netflix",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Hang on.",
+  "expected": [
+   "",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Wait.",
+  "expected": [
+   "",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Hold on.",
+  "expected": [
+   "",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Open Netflix and hang on",
+  "expected": [
+   "Open Netflix and",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Search for, give me a sec.",
+  "expected": [
+   "Search for",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Look up, one moment.",
+  "expected": [
+   "Look up",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Open Netflix, hang on a sec.",
+  "expected": [
+   "Open Netflix",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, hang on a second.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, hold on a sec.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Hang on a minute.",
+  "expected": [
+   "",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, one moment please.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, hang on please.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, wait please.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Uh, hold on.",
+  "expected": [
+   "Uh",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "So hold on",
+  "expected": [
+   "So",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, just a minute.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, gimme a sec.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, hold up.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, wait, wait.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Tell them not to wait",
+  "expected": [
+   "Tell them not to wait",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Hold on to it",
+  "expected": [
+   "Hold on to it",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Hang on, what's the weather?",
+  "expected": [
+   "Hang on, what's the weather?",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Set a timer for one second.",
+  "expected": [
+   "Set a timer for one second.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Change the sleep to one second.",
+  "expected": [
+   "Change the sleep to one second.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Pause the video for just a second.",
+  "expected": [
+   "Pause the video for just a second.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Tell Bob to hang on.",
+  "expected": [
+   "Tell Bob to hang on.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "How long should I hang on?",
+  "expected": [
+   "How long should I hang on?",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Should I wait?",
+  "expected": [
+   "Should I wait?",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "What's a good song to hang on to? Hang on.",
+  "expected": [
+   "What's a good song to hang on to?",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Play Wait a Minute by Willow.",
+  "expected": [
+   "Play Wait a Minute by Willow.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Play the song Hold On.",
+  "expected": [
+   "Play the song Hold On.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Play Hold On by Justin Bieber, wait.",
+  "expected": [
+   "Play Hold On by Justin Bieber",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Remind me in one second.",
+  "expected": [
+   "Remind me in one second.",
+   false
+  ]
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "The weather is sunny today. Stop.",
+   "The weather is sunny today."
+  ],
+  "expected": "stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Run command. Yes.",
+   "Run command?"
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Sorry, was that a yes or a no? No.",
+   "Sorry, was that a yes or a no?"
+  ],
+  "expected": "no"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Sorry, was that a yes or a no? Yes.",
+   "Sorry, was that a yes or a no?"
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Sorry, was that a yes or yes",
+   "Sorry, was that a yes or a no?"
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Here are the results Claude stop I found three items",
+   "Here are the results of the search. I found three items."
+  ],
+  "expected": "claude stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Here are the results Claude stop of the search",
+   "Here are the results of the search. I found three items."
+  ],
+  "expected": "claude stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "I found three items. Open the first one.",
+   "I found three items. The first is a blue shirt."
+  ],
+  "expected": "open the first one"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "I found three items the first open the first one",
+   "I found three items. The first is a blue shirt."
+  ],
+  "expected": "open the first one"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Do you want me to yes run it",
+   "Do you want me to run it?"
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Run the tests, it's running the tests now.",
+   "It's running the tests now."
+  ],
+  "expected": "run the tests"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Hey Claude, what time it is 3 p.m.",
+   "It is 3 p.m."
+  ],
+  "expected": "hey claude what time"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Your timer is done. Shop.",
+   "Your timer is done. Top."
+  ],
+  "expected": "shop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Edit config dot pie. Yes.",
+   "Edit config.py?",
+   "Edit config dot pie?"
+  ],
+  "expected": "yes",
+  "note": "spoken_alt: the pronounced form of what was said"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Edit config.py? Yes.",
+   "Edit config.py?"
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Run command? Yeah.",
+   "Run command? Say yes or no."
+  ],
+  "expected": "yeah"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Run command? Say yes or no. Yes.",
+   "Run command? Say yes or no."
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "It's 72 degrees and sunny. And tomorrow?",
+   "It's 72 degrees and sunny."
+  ],
+  "expected": "and tomorrow"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "It's 72 degrees. What about tomorrow?",
+   "It's 72 degrees and sunny. Tomorrow looks rainy."
+  ],
+  "expected": "what about tomorrow"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Its 72 degrees and sunny stop",
+   "It's 72 degrees and sunny."
+  ],
+  "expected": "stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Opening Netflix. No, YouTube.",
+   "Opening Netflix."
+  ],
+  "expected": "no youtube"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "hey claude open sunny in austin today",
+   "It's 72 degrees and sunny in Austin today."
+  ],
+  "expected": "hey claude open"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Hey Claude, stop. And sunny in Austin today.",
+   "It's 72 degrees and sunny in Austin today."
+  ],
+  "expected": "hey claude stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Opening Netflix. Netflix, no YouTube.",
+   "Opening Netflix."
+  ],
+  "expected": "netflix no youtube"
+ },
+ {
+  "function": "to_speech",
+  "input": "**Done.** The file is saved.",
+  "expected": "Done. The file is saved."
+ },
+ {
+  "function": "to_speech",
+  "input": "I changed `test_speech.py` and `test_gate.py`.",
+  "expected": "I changed test_speech.py and test_gate.py."
+ },
+ {
+  "function": "to_speech",
+  "input": "Set my_var and other_var to 1.",
+  "expected": "Set my_var and other_var to 1."
+ },
+ {
+  "function": "to_speech",
+  "input": "The path is ~/src/my_project/file_name.py",
+  "expected": "The path is ~/src/my_project/file_name.py"
+ },
+ {
+  "function": "to_speech",
+  "input": "2 * 3 * 4 = 24",
+  "expected": "2 * 3 * 4 = 24"
+ },
+ {
+  "function": "to_speech",
+  "input": "Use *args and **kwargs.",
+  "expected": "Use args and kwargs."
+ },
+ {
+  "function": "to_speech",
+  "input": "## Summary\n- Fixed the bug\n- Added a test",
+  "expected": "Summary. Fixed the bug. Added a test."
+ },
+ {
+  "function": "to_speech",
+  "input": "Steps:\n1. Install\n2. Run",
+  "expected": "Steps: 1. Install. 2. Run."
+ },
+ {
+  "function": "to_speech",
+  "input": "See https://example.com.",
+  "expected": "See a link."
+ },
+ {
+  "function": "to_speech",
+  "input": "See <https://example.com>",
+  "expected": "See a link"
+ },
+ {
+  "function": "to_speech",
+  "input": "Done ✅ all good",
+  "expected": "Done all good"
+ },
+ {
+  "function": "to_speech",
+  "input": "Price is $5 → $7",
+  "expected": "Price is $5 to $7"
+ },
+ {
+  "function": "to_speech",
+  "input": "```python\nprint(1)\n```\nThat prints 1.",
+  "expected": "(code omitted) That prints 1."
+ },
+ {
+  "function": "to_speech",
+  "input": "```python\nprint(1)",
+  "expected": "(code omitted)"
+ },
+ {
+  "function": "to_speech",
+  "input": "| a | b |\n|---|---|\n| 1 | 2 |\n\nThat's the table.",
+  "expected": "That's the table."
+ },
+ {
+  "function": "to_speech",
+  "input": "# 1 priority is speed",
+  "expected": "1 priority is speed"
+ },
+ {
+  "function": "to_speech",
+  "input": "Version 2.0. Next is 3.0.",
+  "expected": "Version 2.0. Next is 3.0."
+ },
+ {
+  "function": "to_speech",
+  "input": "e.g. use __init__.py",
+  "expected": "e.g. use init.py"
+ },
+ {
+  "function": "to_speech",
+  "input": "a_b_c",
+  "expected": "a_b_c"
+ },
+ {
+  "function": "to_speech",
+  "input": "The total is 5 * 3, so 15.",
+  "expected": "The total is 5 * 3, so 15."
+ },
+ {
+  "function": "to_speech",
+  "input": "Call `foo_bar()` then `baz_qux()`.",
+  "expected": "Call foo_bar() then baz_qux()."
+ },
+ {
+  "function": "to_speech",
+  "input": "Set `MAX_RETRIES` to 3.",
+  "expected": "Set MAX_RETRIES to 3."
+ },
+ {
+  "function": "to_speech",
+  "input": "Item one\nItem two",
+  "expected": "Item one. Item two."
+ },
+ {
+  "function": "to_speech",
+  "input": "~~old~~ new",
+  "expected": "old new"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Edit config.toml now.",
+  "expected": "Edit config dot toml now."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Open brain.py.",
+  "expected": "Open brain dot pie."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "copy.pyramid",
+  "expected": "copy.pyramid"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "See README.md for details.",
+  "expected": "See README dot M D for details."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Run run.sh.",
+  "expected": "Run run dot S H."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "The PR is merged.",
+  "expected": "The P R is merged."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Use gh to open it.",
+  "expected": "Use G H to open it."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Data in config.json.",
+  "expected": "Data in config dot jason."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Data in events.jsonl.",
+  "expected": "Data in events dot jason L."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Edit ~/src/app.",
+  "expected": "Edit home slash src/app."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "SignalWire rocks",
+  "expected": "Signal Wire rocks"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Edit foo.py, bar.py",
+  "expected": "Edit foo dot pie, bar dot pie"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "MCP server",
+  "expected": "M C P server"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Tell the vad",
+  "expected": "Tell the vad"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "I use macOS daily",
+  "expected": "I use mac O S daily"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Hey Clawed, what time is it?",
+  "expected": "Hey Claude, what time is it?"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Hey Claud, what time is it?",
+  "expected": "Hey Claude, what time is it?"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "The cat clawed the couch.",
+  "expected": "The cat clawed the couch."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "He's such a clod.",
+  "expected": "He's such a clod."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "A clod of dirt.",
+  "expected": "A clod of dirt."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Ask cloud code to fix it.",
+  "expected": "Ask Claude Code to fix it."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Google cloud code extension",
+  "expected": "Google cloud code extension"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "I work at signal wire.",
+  "expected": "I work at SignalWire."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Hey Clawd, open Netflix.",
+  "expected": "Hey Clawd, open Netflix.",
+  "note": "no default STT rule for 'clawd' (tests/test_routing.py uses it as a rule-free token)"
+ },
+ {
+  "function": "gate.junk",
+  "input": "5.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "42",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "10:30.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "3",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "2.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Stop. Stop. Stop.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "No. No. No.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Yes. Yes. Yes.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Claude, stop. Stop. Stop.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Thank you.",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "Thanks for watching!",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "[Music]",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "You",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "Okay.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "No.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Yes.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Bye.",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "Sorry.",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "So.",
+  "expected": "noise phrase"
+ },
+ {
+  "function": "gate.junk",
+  "input": "Hey Claude. Hey Claude. Hey Claude.",
+  "expected": "repeated sentence"
+ },
+ {
+  "function": "gate.junk",
+  "input": "Wait. Wait. Wait.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Thank you. Thank you. Thank you.",
+  "expected": "repeated sentence"
+ },
+ {
+  "function": "gate.junk",
+  "input": "¿Qué hora es?",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Café.",
+  "expected": null
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Stop, Claude.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude, stop, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Stop. Stop. Stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Um, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Hey Claude, stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude stop talking please",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Okay Claude, that's enough.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Shh, Claude.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Enough, thanks Claude.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude, never mind.",
+  "expected": true
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Stop the music, Claude.",
+  "expected": false
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude, stop the timer.",
+  "expected": false
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude.",
+  "expected": false
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Thanks, Claude.",
+  "expected": false
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "Claude, cancel my meeting.",
+  "expected": false
+ },
+ {
+  "function": "is_stop_utterance",
+  "input": "I told Claude to stop.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "do it later",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "sure, in a minute",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "approve? what is it",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "correct me if I'm wrong",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I'd say yes if it weren't for rm",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "yeah go ahead, actually",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay?",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Okay so",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I guess so.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "I think so.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Go away.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Not a chance.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes and no.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, wait.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Don’t ask again.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Claude, yes.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, please go ahead and run it now, thanks.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, delete all of my files right now please",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Sure thing.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "You bet.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Go on.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Yes, run the tests.",
+  "expected": true
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "No, no, no.",
+  "expected": false
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "Hmm, I don’t know.",
+  "expected": null
+ },
+ {
+  "function": "parse_yes_no",
+  "input": "That’s fine.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "yes, don't ask again",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, you don't need to ask.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Don't ask me again.",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Sure, always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always warn me first.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always tell me.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, but always confirm.",
+  "expected": true
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always?",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Always, I guess.",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Yes, always, if it's safe.",
+  "expected": null
+ },
+ {
+  "function": "parse_answer",
+  "input": "Mm-hmm, always.",
+  "expected": "always"
+ },
+ {
+  "function": "parse_answer",
+  "input": "Don’t do that, always ask.",
+  "expected": false
+ },
+ {
+  "function": "strip_wake",
+  "input": "I asked Claude, and it said no.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "So anyway Claude, what's next?",
+  "expected": "what's next?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Um so anyway Claude, hi.",
+  "expected": "hi."
+ },
+ {
+  "function": "strip_wake",
+  "input": "Okay so Claude, what time is it?",
+  "expected": "what time is it?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Is Claude there?",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey, Clawed, what time is it?",
+  "expected": "what time is it?"
+ },
+ {
+  "function": "strip_wake",
+  "input": "Hey Claude’s great, open Netflix.",
+  "expected": null
+ },
+ {
+  "function": "strip_wake",
+  "input": "We use cloud code at work, Claude.",
+  "expected": null
+ },
+ {
+  "function": "split_wait",
+  "input": "Open it, hang on a sec please.",
+  "expected": [
+   "Open it",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Open it, just hang on.",
+  "expected": [
+   "Open it",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Okay, gimme a minute.",
+  "expected": [
+   "Okay",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Give me one second.",
+  "expected": [
+   "",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "I need to wait.",
+  "expected": [
+   "I need to wait.",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find it. One moment.",
+  "expected": [
+   "Find it",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find it, one sec, please.",
+  "expected": [
+   "Find it",
+   true
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Can you hang on?",
+  "expected": [
+   "Can you hang on?",
+   false
+  ]
+ },
+ {
+  "function": "split_wait",
+  "input": "Find the file, hold on a sec, thanks.",
+  "expected": [
+   "Find the file",
+   true
+  ]
+ },
+ {
+  "function": "is_reset",
+  "input": "Okay, start a new session.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Start fresh.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Uh, let's start a new conversation please.",
+  "expected": true
+ },
+ {
+  "function": "is_reset",
+  "input": "Reset everything on my phone.",
+  "expected": false
+ },
+ {
+  "function": "is_reset",
+  "input": "Start a new document.",
+  "expected": false
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop, Claude.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Um. Stop.",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Shhh!",
+  "expected": true
+ },
+ {
+  "function": "is_stop",
+  "input": "Stop it, you.",
+  "expected": false
+ },
+ {
+  "function": "gate.junk",
+  "input": "No, no, no.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Stop! Stop! Stop!",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Cancel. Cancel. Cancel.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Okay. Okay. Okay.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "1, 2, 3.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "It’s me.",
+  "expected": null
+ },
+ {
+  "function": "gate.junk",
+  "input": "Bye. Bye. Bye.",
+  "expected": "repeated sentence"
+ },
+ {
+  "function": "to_speech",
+  "input": "**Note:** keep `snake_case` names.",
+  "expected": "Note: keep snake_case names."
+ },
+ {
+  "function": "to_speech",
+  "input": "Read more at https://example.com/a_b.",
+  "expected": "Read more at a link."
+ },
+ {
+  "function": "to_speech",
+  "input": "First line\n\nSecond line",
+  "expected": "First line. Second line."
+ },
+ {
+  "function": "to_speech",
+  "input": "- **Bold** item\n- _italic_ item",
+  "expected": "Bold item. italic item."
+ },
+ {
+  "function": "to_speech",
+  "input": "x = a*b + c*d",
+  "expected": "x = a*b + c*d"
+ },
+ {
+  "function": "to_speech",
+  "input": "Go A -> B",
+  "expected": "Go A to B"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Claude what's the weather your timer is done",
+   "Your timer is done."
+  ],
+  "expected": "claude what's the weather"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Your timer stop is done",
+   "Your timer is done."
+  ],
+  "expected": "stop"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Run command? Yes.",
+   "Run command? Say yes or no."
+  ],
+  "expected": "yes"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Yes.",
+   "Say yes or no."
+  ],
+  "expected": "Yes."
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "It's done. What about the logs?",
+   "It's done. The logs are in the folder. What about the cache?"
+  ],
+  "expected": "what about the logs"
+ },
+ {
+  "function": "strip_own_speech",
+  "input": [
+   "Okay. What about the logs?",
+   "Okay. The logs are in the folder. What about the cache?"
+  ],
+  "expected": "what about the logs"
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "Logs go to events.jsonl and data.json.",
+  "expected": "Logs go to events dot jason L and data dot jason."
+ },
+ {
+  "function": "pronounce_tts",
+  "input": "JSONL is line-delimited JSON.",
+  "expected": "jason L is line-delimited jason."
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Hey, clawed, what time is it?",
+  "expected": "Hey, Claude, what time is it?"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "Okay clod open it",
+  "expected": "Okay Claude open it"
+ },
+ {
+  "function": "pronounce_stt",
+  "input": "I use Google Cloud Code daily.",
+  "expected": "I use Google Cloud Code daily."
+ }
+]
