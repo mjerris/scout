@@ -45,21 +45,33 @@ status installing "fetching models (first time: about 350 MB)"
 "$DATA/current/scripts/fetch-models.sh" >/dev/null
 
 # Rebuild a helper only when its source changed, so macOS keeps its permissions.
-build_if_changed() {  # NAME SOURCE-DIR
-    local name="$1" src="$2" sum
+BUILT=""
+build_if_changed() {  # NAME SOURCE-DIR [BINARY-NAME]
+    local name="$1" src="$2" bin="${3:-$1}" sum
     sum="$( (cd "$src" && find . -type f \( -name '*.swift' -o -name '*.plist' \) -print0 | sort -z | xargs -0 shasum -a 256) | shasum -a 256 | cut -d' ' -f1)"
-    if [ -x "$DATA/bin/$name" ] && [ "$(cat "$DATA/bin/$name.source-sha256" 2>/dev/null)" = "$sum" ]; then
+    if [ -x "$DATA/bin/$bin" ] && [ "$(cat "$DATA/bin/$name.source-sha256" 2>/dev/null)" = "$sum" ]; then
         return
     fi
     status installing "building the $name helper"
     "$DATA/current/scripts/build-$name.sh" >/dev/null
     echo "$sum" >"$DATA/bin/$name.source-sha256"
+    BUILT="$BUILT $name"
 }
 if command -v swiftc >/dev/null; then
     build_if_changed vcal "$DATA/current/native/vcal"
     build_if_changed voiceio "$DATA/current/native/voiceio"
+    # A rebuilt Messages helper is a new binary to macOS: Full Disk Access must be
+    # granted again (Scout walks the user through it on the next messages question).
+    build_if_changed messages "$DATA/current/native/messages" scout-messages
 else
-    echo "swiftc missing: skipping the calendar and Apple voice helpers (xcode-select --install)"
+    echo "swiftc missing: skipping the calendar, messages and Apple voice helpers (xcode-select --install)"
+fi
+if [ -x "$DATA/bin/scout-messages" ]; then
+    status installing "starting the Messages helper"
+    restart=""
+    case " $BUILT " in *" messages "*) restart=--restart ;; esac
+    "$DATA/current/scripts/messages-agent.sh" install ${restart:+"$restart"} >/dev/null ||
+        echo "the Messages helper's login item didn't start; see logs/messages-helper.log"
 fi
 
 status installing "starting the background app"

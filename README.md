@@ -154,6 +154,8 @@ push-to-talk decodes browser recordings with it).
 scripts/fetch-models.sh     # Kokoro voice (~350 MB), Silero VAD, smart-turn; Whisper (~1.6 GB) downloads on first run
 scripts/build-voiceio.sh    # optional: the Apple voice-processing helper (audio.backend = "apple")
 scripts/build-vcal.sh       # optional: calendar access (EventKit helper; see Calendar below)
+scripts/build-messages.sh   # optional: read-only Messages history (see Messages below)
+scripts/messages-agent.sh install   # ...and its own login item
 cp config.example.toml "$HOME/Library/Application Support/Scout/config.toml"   # optional; every key has a default
 scripts/run.sh              # foreground run; allow microphone access when macOS asks
 ```
@@ -336,3 +338,39 @@ prompt on the Mac's screen (System Settings → Privacy & Security → Automatio
 - Email is written by other people. Message text reaches the agent marked as
   untrusted, and the agent is told never to act on instructions inside it;
   anything that sends, opens or runs something still needs a spoken yes.
+
+## Messages (iMessage and SMS)
+
+Scout can read your texts, never send them. Messages keeps its history in
+`~/Library/Messages/chat.db`, which macOS guards with Full Disk Access. That
+permission goes to one small helper, `bin/scout-messages` (`native/messages`),
+not to Scout's Python, Claude or a terminal:
+
+- It runs as its own login item, `com.local.scout.messages`, so macOS checks the
+  permission against the helper itself. The installer builds it (only when its
+  source changed: a rebuilt helper is a new program to macOS and needs the
+  switch again) and `scripts/scoutctl.sh uninstall` removes it.
+- It opens the database read-only and answers a few fixed questions on a Unix
+  socket in `state/` (owner-only, with a fresh random token in
+  `state/messages_token` on every start): the newest messages, messages from one
+  person, unread messages, one conversation, and a text search. At most 50
+  messages and 365 days per answer, 60 lookups a minute, message text only (no
+  attachments), no sending, no SQL from callers.
+- Every lookup is logged to `logs/messages-access.log` (what kind, how many,
+  which program asked; never message text or search words).
+- Names: it maps phone numbers and addresses to names from Contacts. macOS asks
+  once, on the first real lookup; without it you see numbers.
+
+The tools (`messages_recent`, `messages_from`, `messages_unread`,
+`messages_search`) are read-only and run without asking, for the room and other
+sessions alike. Text messages are written by other people and reach the agent
+marked as untrusted, like email. `messages.enabled = false` in `config.toml`
+turns them off.
+
+**First use.** Full Disk Access has no "allow" prompt, so the first messages
+question sets it up: Scout opens System Settings at Privacy & Security → Full
+Disk Access and a Finder window with `scout-messages` selected, and says what to
+do. Drag `scout-messages` into the list (or click +, press Cmd-Shift-G and paste
+`~/Library/Application Support/Scout/bin/scout-messages`), turn it on, and
+Scout says "Got it" a few seconds later. To take it back, turn it off or remove
+it in the same list.

@@ -9,6 +9,8 @@ DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"
 LABEL=com.local.scout
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
+MESSAGES_LABEL=com.local.scout.messages
+MESSAGES_PLIST="$HOME/Library/LaunchAgents/$MESSAGES_LABEL.plist"
 
 case "${1:-status}" in
 status)
@@ -29,6 +31,11 @@ status)
             "http://127.0.0.1:$port/api/status" | head -c 600 || echo "web: no answer"
         echo
     fi
+    if launchctl print "$DOMAIN/$MESSAGES_LABEL" >/dev/null 2>&1; then
+        launchctl print "$DOMAIN/$MESSAGES_LABEL" | grep -E '^\s+(state|pid) =' | sed 's/^\s*/messages helper: /'
+    else
+        echo "messages helper: not loaded"
+    fi
     echo "code: $(cd "$DATA/current" 2>/dev/null && pwd -P || echo none)"
     echo "data: $DATA"
     ;;
@@ -43,6 +50,9 @@ uninstall)
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     rm -f "$PLIST" "$DATA/current"
     echo "removed the login item"
+    launchctl bootout "$DOMAIN/$MESSAGES_LABEL" 2>/dev/null || true
+    rm -f "$MESSAGES_PLIST" "$DATA/state/messages.sock" "$DATA/state/messages_token"
+    echo "removed the Messages helper's login item (turn off scout-messages in System Settings, Privacy and Security, Full Disk Access)"
     if [ "${2:-}" = "--purge" ]; then
         rm -rf "$DATA"
         echo "deleted $DATA"

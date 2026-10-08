@@ -84,3 +84,8 @@ work_end = "17:00"
 
 [briefing]
 at = ""  # e.g. "07:30" to hear the briefing every day; "brief me" works either way
+
+[messages]
+# Read iMessage and SMS history (read-only) through the scout-messages helper,
+# the only program given Full Disk Access. false = the messages_* tools refuse.
+enabled = true
