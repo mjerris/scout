@@ -9,6 +9,12 @@ follow_up_seconds = 8.0
 wait_seconds = 20.0   # after "hang on" / "wait" / "give me a sec"
 
 [audio]
+backend = "auto"          # auto (= webrtc), webrtc, apple (scripts/build-voiceio.sh), plain
+barge_in = true           # talking over the assistant stops it (needs webrtc or apple)
+turn_detection = "smart"  # smart (Silero + smart-turn) or simple (silence_ms of quiet)
+min_pause_ms = 250        # smart: ask the turn model after this much quiet
+max_pause_ms = 1500       # smart: end the turn after this much quiet regardless
+turn_threshold = 0.5      # smart: "finished" probability that ends the turn
 input_device = ""     # name substring or index from `uv run claude-voice --list-devices`
 output_device = ""
 vad_aggressiveness = 2

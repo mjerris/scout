@@ -5,10 +5,29 @@ recognition and speech synthesis run locally on Apple Silicon; only the request
 text goes to Claude.
 
 ```
-mic → WebRTC VAD → MLX Whisper (large-v3-turbo) → "hey Claude …" → Claude Agent SDK session
-                                                                       │
-speakers ← Kokoro TTS (ONNX) ← markdown → speech ←─────────────────────┘
+mic ─┐                                                    ┌→ Silero VAD + smart-turn → MLX Whisper → gate → "hey Claude …" → Claude
+     ├─ voice layer: one duplex engine, echo cancelled ───┤
+spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS ← markdown → speech ←────────────────────────────────┘
 ```
+
+- **Voice layer:** one audio engine owns the mic and the speakers, so the
+  echo canceller knows exactly what was played and removes the assistant's
+  own voice before Whisper hears it. `audio.backend`: `auto` (= `webrtc`,
+  WebRTC AEC3 + noise suppression; cross-platform), `apple` (macOS voice
+  processing in a small Swift helper, `scripts/build-voiceio.sh`), or `plain`
+  (no canceller; the app then strips its own words from transcripts
+  instead). Measured on the Mac mini with `python -m claude_voice.measure`:
+  WebRTC removed 27.7 dB of the assistant's voice (Whisper could recover 2%
+  of its words, vs 97% with no canceller); Apple 15 dB / 6%, with ~100 ms
+  more latency, so WebRTC is the default.
+- **Barge-in:** with a canceller, talking over the assistant stops it. Over
+  a reply, what you say becomes the follow-up; over a desk session's
+  `discuss` message, it becomes the session's answer. `audio.barge_in`.
+- **End of turn:** Silero VAD finds speech; after a short pause the
+  smart-turn model judges from how you sounded whether you're finished. A
+  finished sentence ends the turn ~0.2 s after you stop; "…, um" waits up to
+  `audio.max_pause_ms` (1.5 s). `audio.turn_detection = "simple"` goes back
+  to a fixed silence (`audio.silence_ms`).
 
 - **Wake word:** say "Hey Claude, …" (or just "Claude, …") with the request in
   the same breath, or say "Hey Claude", wait for the chime, then speak. For 8
@@ -132,7 +151,8 @@ Needs [uv](https://docs.astral.sh/uv/) and `ffmpeg` (`brew install ffmpeg`;
 push-to-talk decodes browser recordings with it).
 
 ```sh
-scripts/fetch-models.sh     # Kokoro voice model (~350 MB); Whisper (~1.6 GB) downloads on first run
+scripts/fetch-models.sh     # Kokoro voice (~350 MB), Silero VAD, smart-turn; Whisper (~1.6 GB) downloads on first run
+scripts/build-voiceio.sh    # optional: the Apple voice-processing helper (audio.backend = "apple")
 cp config.example.toml config.toml   # optional; every key has a default
 scripts/run.sh              # foreground run; allow microphone access when macOS asks
 ```
@@ -149,6 +169,8 @@ scripts/launchd.sh status | restart | uninstall
 
 - The Mac must be logged in, so a LaunchAgent has an audio session (System
   Settings → Users & Groups → automatic login).
+- With `audio.backend = "apple"`, the helper needs microphone access too; the
+  first start under launchd may prompt for it.
 - `run.sh` holds a `caffeinate` assertion, so the mini won't idle-sleep while
   the assistant runs.
 - If the microphone stops delivering audio (unplugged, device changed) or
