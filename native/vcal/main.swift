@@ -1,12 +1,19 @@
-// vcal: read (and, when asked, add to) the Mac's calendars through EventKit.
-// Every calendar synced to this Mac (Google, iCloud, Exchange via Internet
+// vcal: read (and, when asked, add to) the Mac's calendars and reminders through
+// EventKit. Every account synced to this Mac (Google, iCloud, Exchange via Internet
 // Accounts) is visible; macOS handles the accounts, so no tokens live here.
 //
-//   vcal status                         authorization state
-//   vcal request                        ask macOS for calendar access (prompts once)
+//   vcal status [--reminders]           authorization state (calendars, or reminders)
+//   vcal request [--reminders]          ask macOS for access (prompts once)
 //   vcal calendars                      list calendars
 //   vcal events --from T --to T [--calendar ID]... [--query TEXT] [--limit N]
 //   vcal create --title S --start T --end T [--calendar ID] [--location S] [--notes S] [--all-day]
+//   vcal reminder-lists                 list reminder lists
+//   vcal reminders [--list NAME]... [--include-completed] [--due-before T] [--limit N]
+//   vcal reminder-add --title S [--list NAME] [--due T] [--notes S]
+//   vcal reminder-complete --id ID [--title S]   (--title must match: a guard against a stale id)
+//
+// A list NAME matches its title ignoring case, spaces, punctuation and a trailing
+// "list" ("shopping list" finds "Shopping", "to-do" finds "To Do").
 //
 // Times are ISO 8601; without an offset they are local time ("2026-10-08T15:00").
 // Output is one JSON object on stdout; on failure {"error": "..."} and exit 1.
@@ -41,13 +48,15 @@ func statusName(_ s: EKAuthorizationStatus) -> String {
     }
 }
 
-func requireAccess() {
-    let s = EKEventStore.authorizationStatus(for: .event)
+func requireAccess(_ entity: EKEntityType = .event) {
+    let s = EKEventStore.authorizationStatus(for: entity)
     if s == .fullAccess { return }
+    let what = entity == .event ? "calendar" : "reminders"
+    let pane = entity == .event ? "Calendars" : "Reminders"
     if s == .notDetermined {
-        fail("calendar access not granted yet: run `vcal request` once from the Mac and allow it")
+        fail("\(what) access not granted yet: run `vcal request\(entity == .event ? "" : " --reminders")` once from the Mac and allow it")
     }
-    fail("calendar access is \(statusName(s)): allow it in System Settings > Privacy & Security > Calendars")
+    fail("\(what) access is \(statusName(s)): allow it in System Settings > Privacy & Security > \(pane)")
 }
 
 let localFormats = ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"]
@@ -119,25 +128,86 @@ func calendars(matching ids: [String]) -> [EKCalendar]? {
     return found
 }
 
+func norm(_ name: String) -> String {
+    var n = name.lowercased().filter { $0.isLetter || $0.isNumber }
+    if n.hasSuffix("list"), n.count > 4 { n.removeLast(4) }
+    return n
+}
+
+func reminderLists(matching names: [String]) -> [EKCalendar]? {
+    if names.isEmpty { return nil }
+    let all = store.calendars(for: .reminder)
+    let found = all.filter { c in
+        names.contains { $0 == c.calendarIdentifier || norm($0) == norm(c.title) }
+    }
+    if found.isEmpty { fail("no reminder list matches \(names.joined(separator: ", "))") }
+    return found
+}
+
+func fetch(_ pred: NSPredicate) -> [EKReminder] {
+    let done = DispatchSemaphore(value: 0)
+    var out: [EKReminder] = []
+    store.fetchReminders(matching: pred) { r in
+        out = r ?? []
+        done.signal()
+    }
+    done.wait()
+    return out
+}
+
+let timeUnits: Set<Calendar.Component> = [.hour, .minute]
+
+/// A due date as "yyyy-MM-dd" (no time of day) or a local ISO time.
+func dueString(_ c: DateComponents) -> String? {
+    guard let d = Calendar.current.date(from: c) else { return nil }
+    return c.hour == nil ? dayString(d) : isoLocal(d)
+}
+
+func reminderInfo(_ r: EKReminder) -> [String: Any] {
+    var d: [String: Any] = [
+        "id": r.calendarItemIdentifier,
+        "title": r.title ?? "",
+        "list": r.calendar?.title ?? "",
+        "completed": r.isCompleted,
+    ]
+    if let c = r.dueDateComponents, let due = dueString(c) { d["due"] = due }
+    if let n = r.notes, !n.isEmpty { d["notes"] = String(n.prefix(300)) }
+    if r.priority > 0 { d["priority"] = r.priority }
+    return d
+}
+
+func dueDate(_ r: EKReminder) -> Date? {
+    r.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
+}
+
 let argv = CommandLine.arguments
-guard argv.count >= 2 else { fail("usage: vcal status|request|calendars|events|create ...") }
+guard argv.count >= 2 else {
+    fail("usage: vcal status|request|calendars|events|create|reminder-lists|reminders|reminder-add|reminder-complete ...")
+}
 let rest = argv.dropFirst(2)
 
 switch argv[1] {
 case "status":
-    emit(["status": statusName(EKEventStore.authorizationStatus(for: .event))])
+    let entity: EKEntityType = options(rest, bools: ["reminders"])["reminders"] == nil ? .event : .reminder
+    emit(["status": statusName(EKEventStore.authorizationStatus(for: entity))])
 
 case "request":
+    let entity: EKEntityType = options(rest, bools: ["reminders"])["reminders"] == nil ? .event : .reminder
     let done = DispatchSemaphore(value: 0)
     var granted = false
     var message = ""
-    store.requestFullAccessToEvents { ok, err in
+    let answer: (Bool, Error?) -> Void = { ok, err in
         granted = ok
         message = err?.localizedDescription ?? ""
         done.signal()
     }
+    if entity == .event {
+        store.requestFullAccessToEvents(completion: answer)
+    } else {
+        store.requestFullAccessToReminders(completion: answer)
+    }
     done.wait()
-    emit(["granted": granted, "status": statusName(EKEventStore.authorizationStatus(for: .event)), "error": message])
+    emit(["granted": granted, "status": statusName(EKEventStore.authorizationStatus(for: entity)), "error": message])
 
 case "calendars":
     requireAccess()
@@ -174,6 +244,7 @@ case "events":
         if let n = e.notes, !n.isEmpty { d["notes"] = String(n.prefix(300)) }
         if let a = e.attendees, !a.isEmpty { d["attendees"] = a.count }
         if e.hasRecurrenceRules { d["recurring"] = true }
+        if e.availability == .free { d["free"] = true }  // shown as free: doesn't block time
         return d
     }
     emit(["events": out, "total": total, "timezone": TimeZone.current.identifier])
@@ -208,6 +279,88 @@ case "create":
         fail("could not save: \(error.localizedDescription)")
     }
     emit(["created": true, "title": title, "calendar": cal.title, "start": isoLocal(start), "end": isoLocal(end)])
+
+case "reminder-lists":
+    requireAccess(.reminder)
+    let lists = store.calendars(for: .reminder).sorted { ($0.source?.title ?? "", $0.title) < ($1.source?.title ?? "", $1.title) }
+    let def = store.defaultCalendarForNewReminders()?.calendarIdentifier
+    emit(["lists": lists.map { c in calendarInfo(c).merging(["default": c.calendarIdentifier == def]) { a, _ in a } }])
+
+case "reminders":
+    requireAccess(.reminder)
+    let o = options(rest, bools: ["include-completed"])
+    let lists = reminderLists(matching: o["list"] ?? [])
+    let before = o["due-before"]?.last.map { parseDate($0, "due-before") }
+    let limit = Int(o["limit"]?.last ?? "200") ?? 200
+    let pred = o["include-completed"] != nil
+        ? store.predicateForReminders(in: lists)
+        : store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: lists)
+    var items = fetch(pred)
+    if let b = before {
+        items = items.filter { r in dueDate(r).map { $0 < b } ?? false }
+    }
+    // Due ones first (soonest first), then the rest in list order.
+    items.sort { a, b in
+        switch (dueDate(a), dueDate(b)) {
+        case let (x?, y?): return x < y
+        case (.some, nil): return true
+        case (nil, .some): return false
+        default: return (a.creationDate ?? .distantPast) < (b.creationDate ?? .distantPast)
+        }
+    }
+    emit(["reminders": items.prefix(max(limit, 0)).map(reminderInfo), "total": items.count,
+          "timezone": TimeZone.current.identifier])
+
+case "reminder-add":
+    requireAccess(.reminder)
+    let o = options(rest)
+    guard let title = o["title"]?.last, !title.isEmpty else { fail("reminder-add needs --title") }
+    let list: EKCalendar
+    if let names = o["list"], let found = reminderLists(matching: names) {
+        list = found[0]
+    } else if let def = store.defaultCalendarForNewReminders() {
+        list = def
+    } else {
+        fail("no default reminder list; pass --list")
+    }
+    if !list.allowsContentModifications { fail("reminder list \(list.title) is read-only") }
+    let r = EKReminder(eventStore: store)
+    r.title = title
+    r.calendar = list
+    if let n = o["notes"]?.last { r.notes = n }
+    if let due = o["due"]?.last {
+        let date = parseDate(due, "due")
+        let dateOnly = !due.contains("T") && !due.contains(" ")
+        var units: Set<Calendar.Component> = [.year, .month, .day]
+        if !dateOnly { units.formUnion(timeUnits) }
+        r.dueDateComponents = Calendar.current.dateComponents(units, from: date)
+        if !dateOnly { r.addAlarm(EKAlarm(absoluteDate: date)) }
+    }
+    do {
+        try store.save(r, commit: true)
+    } catch {
+        fail("could not save: \(error.localizedDescription)")
+    }
+    emit(["created": true, "reminder": reminderInfo(r)])
+
+case "reminder-complete":
+    requireAccess(.reminder)
+    let o = options(rest)
+    guard let id = o["id"]?.last, !id.isEmpty else { fail("reminder-complete needs --id") }
+    guard let r = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("no reminder with id \(id)") }
+    if let t = o["title"]?.last, t.lowercased() != (r.title ?? "").lowercased() {
+        fail("reminder \(id) is \"\(r.title ?? "")\", not \"\(t)\"")
+    }
+    if !(r.calendar?.allowsContentModifications ?? false) { fail("reminder list \(r.calendar?.title ?? "") is read-only") }
+    if !r.isCompleted {
+        r.isCompleted = true
+        do {
+            try store.save(r, commit: true)
+        } catch {
+            fail("could not save: \(error.localizedDescription)")
+        }
+    }
+    emit(["completed": true, "reminder": reminderInfo(r)])
 
 default:
     fail("unknown command \(argv[1])")
