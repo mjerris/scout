@@ -181,6 +181,12 @@ class ClaudeConfig:
     # Answer everyday requests in plain code first (time, date, timers, volume,
     # play/pause, today's calendar): instant and no tokens. Anything else goes to Claude.
     local_first: bool = True
+    # Tier 1: a small local model (MLX) that answers calendar and mail lookups
+    # itself, read-only, and hands everything else to Claude. "" turns it off.
+    # Download it with scripts/fetch-models.sh (Qwen3 4B, 2.3 GB): it was the only
+    # candidate that handled all 13 test lookups with none of 23 "needs Claude"
+    # requests kept (scripts/bench_tier1.py), deciding in a median 0.7 s.
+    local_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     # Prefix each request with context (date and time, running timers, recent local
     # answers) and, for calendar or mail questions, the data itself, so Claude can
     # answer in one pass instead of calling a tool first (each round trip is ~1.5-2.5 s).

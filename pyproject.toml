@@ -11,6 +11,7 @@ dependencies = [
     "claude-agent-sdk>=0.2.164",
     "kokoro-onnx>=0.6.1",
     "livekit>=1.1.20",
+    "mlx-lm>=0.28",
     "mlx-whisper>=0.4.3",
     "numpy>=2.5.3",
     "onnxruntime>=1.30.0",
