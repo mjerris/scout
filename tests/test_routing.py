@@ -192,9 +192,9 @@ def test_timer_waits_for_session_floor() -> None:
 
 def test_broken_pronounce_replacement_is_disabled_not_fatal() -> None:
     p = Pronouncer()
-    p.rules += parse("STT 'clawd' '\\1'")
-    assert p.stt("hey clawd") == "hey clawd"
-    assert p.stt("hey clawd") == "hey clawd"  # rule removed after the first failure
+    p.rules += parse("STT 'zzyzx' '\\1'")
+    assert p.stt("hey zzyzx") == "hey zzyzx"
+    assert p.stt("hey zzyzx") == "hey zzyzx"  # rule removed after the first failure
 
 
 def test_speaker_overlap_math() -> None:

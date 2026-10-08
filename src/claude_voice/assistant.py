@@ -266,12 +266,17 @@ class Assistant:
         if echo:
             # The mic heard the assistant too: "<wake> stop" always counts;
             # otherwise keep only the words that weren't ours.
-            if cmd is not None and speech.is_stop(cmd):
+            if self._named(text) and self._is_stop(text):
                 self.emit("heard", text=text)
                 await self.stop()
                 return
-            residual = speech.strip_own_speech(text, self.speaker.recent_speech(since=utt.started))
+            spoken = self.speaker.recent_speech(since=utt.started)
+            residual = speech.strip_own_speech(text, spoken, self.pronounce.tts(spoken))
             if not residual or gate.junk(residual):
+                return
+            if self._is_stop(residual):  # "stop, stop" said over the reply
+                self.emit("heard", text=residual)
+                await self.stop()
                 return
             # Leftovers are often misheard bits of our own speech: during an approval
             # only a clear yes/no counts; otherwise apply the follow-up rules.
@@ -344,8 +349,8 @@ class Assistant:
 
         # "Stop" ends whatever is going on: speech, a turn, a pending question, a
         # session's listen or floor hold, a "hang on".
-        bare = text if (direct or confirming or listening or in_follow_up) else ""
-        if speech.is_stop(cmd if cmd is not None else bare):
+        expecting = direct or confirming or listening or in_follow_up
+        if (self._named(text) or expecting) and self._is_stop(text):
             self.emit("heard", text=text, **via)
             await self.stop()
             return None
@@ -418,6 +423,14 @@ class Assistant:
         self.emit("heard", text=text, **via)
         self._room_command(cmd, speak, client)
         return None
+
+    def _is_stop(self, text: str) -> bool:
+        return speech.is_stop_utterance(text, self.cfg.wake.names, self.cfg.wake.max_position)
+
+    def _named(self, text: str) -> bool:
+        """Does the utterance contain the wake name at all ("Stop, Claude")?"""
+        wanted = {n.lower() for n in self.cfg.wake.names}
+        return any(w in wanted for w in speech.words(speech.normalize(text)))
 
     def _floor_taken_by_session(self) -> bool:
         owner = self.floor.owner()
