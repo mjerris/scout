@@ -250,3 +250,32 @@ def test_summaries_need_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ToolError, match="isn't ready"):
         asyncio.run(tier1.run({"tool": "mail_summarize", "args": {"query": "x"}}, NOW, Summaries(None)))
+
+
+def test_anything_from_someone_says_what_the_email_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Heard live: "anything from Rover?" answered with only the subject line, which
+    sounded cut off. With the local model loaded it now speaks the gist."""
+    from scout import mail_mac
+    from scout.summary import Summaries
+
+    rover = {"id": 9, "date": "2026-10-08T20:30:00-04:00", "sender": "Rover.com <rover@e.rover.com>",
+             "subject": "New message from Catherine (Wyatt)"}  # fmt: skip
+
+    async def message_data(count: Any, unread: Any, query: Any) -> list[dict[str, Any]]:
+        return [rover]
+
+    async def bodies(ids: list[int]) -> dict[int, dict[str, Any]]:
+        return {9: {"body": "Catherine says she'll be home Tuesday. Reply in the app.", "truncated": False}}
+
+    class Model:
+        ready = True
+
+        async def complete(self, system: str, user: str, max_tokens: int) -> str:
+            return "Rover says Catherine will be home Tuesday and asks you to reply."
+
+    monkeypatch.setattr(mail_mac, "message_data", message_data)
+    monkeypatch.setattr(mail_mac, "bodies", bodies)
+    decision = {"tool": "mail_search", "args": {"query": "Rover"}}
+    out = asyncio.run(tier1.run(decision, NOW, Summaries(Model())))
+    assert "Catherine will be home Tuesday" in out and "New message from Catherine (Wyatt)" not in out
+    assert "Rover.com" not in out

@@ -277,7 +277,9 @@ def speak_mail(msgs: list[dict[str, Any]], args: dict[str, Any], tool: str) -> s
         if not msgs:
             return f"I don't see any email from or about {q} lately."
         m = msgs[0]
-        return f"The latest from {_sender(m.get('sender', ''))} is about {_subject(m.get('subject', ''))}."
+        return (
+            f"The latest from {sender_name(m.get('sender', ''))} is about {_subject(m.get('subject', ''))}."
+        )
     if not msgs:
         return "No new email." if args.get("unread_only") else "Your inbox is empty."
     top = "; ".join(
@@ -375,6 +377,13 @@ async def run(decision: dict[str, Any], now: dt.datetime, summaries: Summaries |
         if summaries is None or not summaries.available:
             raise ToolError("the local model isn't ready to summarize email yet")
         return await summarize(args, now, summaries)
+    if tool in ("mail_search", "mail_recent") and summaries is not None and summaries.available:
+        # "Anything from Rover?" wants what it says, not its subject line (heard live: the
+        # subject alone sounded cut off). A local gist costs ~1 s and stays on the Mac.
+        q = args.get("query") if tool == "mail_search" else None
+        return await summarize(
+            {"query": q} if q else {"unread_only": args.get("unread_only", True)}, now, summaries
+        )
     msgs = await mail_mac.message_data(
         args.get("count") or 5,
         bool(args.get("unread_only")),
