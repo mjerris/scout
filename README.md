@@ -339,6 +339,18 @@ prompt on the Mac's screen (System Settings → Privacy & Security → Automatio
 - Email is written by other people. Message text reaches the agent marked as
   untrusted, and the agent is told never to act on instructions inside it;
   anything that sends, opens or runs something still needs a spoken yes.
+- Finding mail (newest, unread, by sender or subject) is fast once
+  `scout-messages` (below) has Full Disk Access: it reads Mail's own index,
+  `~/Library/Mail/V<N>/MailData/Envelope Index`, read-only, envelopes only
+  (sender, subject, date, read, mailbox; never message text), in the inbox of
+  each account. Without it Scout scripts Mail, which has to fetch every inbox
+  message's date first (7 s and more on a 60,000-message inbox). It's the same
+  single grant as Messages, to the same helper; nothing else gets it. Message
+  text still comes from Mail, by id, and each message read for an index row is
+  checked against that row (subject, sender, time received): if Mail's id ever
+  meant another message, Scout finds the right one by subject and date, logs
+  `MAIL INDEX ID MISMATCH`, and goes back to scripting Mail for the session.
+  `mail_mac.verify_index_ids()` compares the two directly (ids and counts only).
 
 ## Messages (iMessage and SMS)
 
@@ -357,6 +369,10 @@ not to Scout's Python, Claude or a terminal:
   person, unread messages, one conversation, and a text search. At most 50
   messages and 365 days per answer, 60 lookups a minute, message text only (no
   attachments), no sending, no SQL from callers.
+- It also answers three questions about Mail's index (`mail_status`,
+  `mail_recent`, `mail_search`; see Mail above), under the same token, limits
+  and log. Rebuilding the helper for a source change needs the switch again for
+  both.
 - Every lookup is logged to `logs/messages-access.log` (what kind, how many,
   which program asked; never message text or search words).
 - Names: it maps phone numbers and addresses to names from Contacts. macOS asks

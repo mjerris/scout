@@ -1,15 +1,18 @@
 // scout-messages: read-only access to the Mac's Messages history (iMessage and SMS)
-// for Scout, through a narrow API on a Unix socket. It is the one program that needs
-// Full Disk Access (Messages keeps chat.db behind it); Scout's Python, Claude and the
-// terminal never get it. It runs as its own login item (com.local.scout.messages),
-// so macOS checks the grant against this binary, not whoever started it.
+// and to Mail's message index, for Scout, through a narrow API on a Unix socket. It is
+// the one program that needs Full Disk Access (Messages keeps chat.db behind it, Mail
+// its "Envelope Index"); Scout's Python, Claude and the terminal never get it. It runs
+// as its own login item (com.local.scout.messages), so macOS checks the grant against
+// this binary, not whoever started it.
 //
-//   scout-messages serve [--home DIR] [--db PATH] [--socket PATH] [--token PATH]
-//                        [--log PATH] [--contacts none|FILE.json] [--rate N]
+//   scout-messages serve [--home DIR] [--db PATH] [--mail-index PATH] [--socket PATH]
+//                        [--token PATH] [--log PATH] [--contacts none|FILE.json] [--rate N]
 //   scout-messages probe [--db PATH]     access check in a fresh process: granted|denied|missing
+//   scout-messages probe-mail [--mail-index PATH]                  the same for Mail's index
 //
 // Protocol: one JSON object per line, one request per connection:
-//   {"token": "...", "op": "status"|"recent"|"from"|"unread"|"chat"|"search", "args": {...}}
+//   {"token": "...", "op": "status"|"recent"|"from"|"unread"|"chat"|"search"
+//                          |"mail_status"|"mail_recent"|"mail_search", "args": {...}}
 // The answer is one JSON line: {"ok": true, ...} or {"ok": false, "code": "...", "error": "..."}.
 // The token is random per start, in DATA/state/messages_token (0600); the socket is 0600
 // and only answers this user. Limits: at most 50 messages per answer, 365 days back,
@@ -17,8 +20,10 @@
 // callers: each op is a fixed query with bound parameters. Every request is logged
 // (op, numbers, caller; never message text or search words) to DATA/logs/messages-access.log.
 //
-// The database is opened read-only (SQLITE_OPEN_READONLY, query_only). Not `immutable`
-// while Messages has it open: new messages go to chat.db-wal first, which that would skip.
+// The databases are opened read-only (SQLITE_OPEN_READONLY, query_only). Not `immutable`
+// while Messages or Mail has one open: new rows go to the -wal file first, which that
+// would skip. Mail answers are envelopes only (sender, subject, date, read, mailbox),
+// never message bodies: the index doesn't hold them, and Scout reads a body through Mail.
 
 import Contacts
 import Darwin
@@ -70,6 +75,7 @@ struct Options {
     var socket: String
     var token: String
     var log: String
+    var mailIndex = ""  // "" = the newest ~/Library/Mail/V*/MailData/Envelope Index
     var contacts = ""  // "" = the Contacts app (asked on first use), "none" = off, else a JSON file
     var ratePerMinute = 60
 }
@@ -94,6 +100,7 @@ func parseOptions(_ args: ArraySlice<String>) -> Options {
     for (key, value) in pairs {
         switch key {
         case "--db": o.db = value
+        case "--mail-index": o.mailIndex = value
         case "--socket": o.socket = value
         case "--token": o.token = value
         case "--log": o.log = value
@@ -126,16 +133,50 @@ func checkAccess(_ path: String) -> Access {
     return n >= 0 ? .granted : .denied
 }
 
+/// Where Mail keeps its index: the newest V<N> folder under ~/Library/Mail that has
+/// MailData/Envelope Index (V10 on recent macOS), unless --mail-index names a file.
+/// Without Full Disk Access, macOS refuses even the listing of ~/Library/Mail.
+func findMailIndex(_ o: Options) -> (path: String, access: Access) {
+    if !o.mailIndex.isEmpty { return (o.mailIndex, checkAccess(o.mailIndex)) }
+    let root = NSHomeDirectory() + "/Library/Mail"
+    guard let dir = opendir(root) else {
+        return ("", errno == ENOENT || errno == ENOTDIR ? .missing : .denied)
+    }
+    var versions: [Int] = []
+    while let entry = readdir(dir) {
+        let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
+            String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+        if name.hasPrefix("V"), let n = Int(name.dropFirst()), n > 0 { versions.append(n) }
+    }
+    closedir(dir)
+    for n in versions.sorted(by: >) {
+        let path = "\(root)/V\(n)/MailData/Envelope Index"
+        let access = checkAccess(path)
+        if access != .missing { return (path, access) }
+    }
+    return ("", .missing)
+}
+
 /// The same check in a fresh process, so a grant made while this one runs shows up.
 func probeAccess(_ path: String) -> Access {
-    guard let exe = Bundle.main.executableURL else { return checkAccess(path) }
+    probe(["probe", "--db", path], fallback: { checkAccess(path) })
+}
+
+func probeMailAccess(_ o: Options) -> Access {
+    probe(["probe-mail"] + (o.mailIndex.isEmpty ? [] : ["--mail-index", o.mailIndex]),
+          fallback: { findMailIndex(o).access })
+}
+
+func probe(_ args: [String], fallback: () -> Access) -> Access {
+    guard let exe = Bundle.main.executableURL else { return fallback() }
     let p = Process()
     p.executableURL = exe
-    p.arguments = ["probe", "--db", path]
+    p.arguments = args
     let out = Pipe()
     p.standardOutput = out
     p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { return checkAccess(path) }
+    do { try p.run() } catch { return fallback() }
     p.waitUntilExit()
     let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
     return Access(rawValue: text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .denied
@@ -307,12 +348,14 @@ enum Bind {
 
 final class Database {
     private var db: OpaquePointer?
+    private let what: String
 
     /// Read-only. While Messages runs, its -wal and -shm files exist and a read-only
     /// connection reads through them. When neither exists (nothing has the database
     /// open, so everything is in the main file) a read-only connection can't create
     /// -shm; then it opens as `immutable`, which is exact in that state.
-    init(path: String) throws {
+    init(path: String, what: String = "the Messages database") throws {
+        self.what = what
         try open(path, "mode=ro")
         if sqlite3_exec(db, "SELECT 1 FROM sqlite_master LIMIT 1", nil, nil, nil) == SQLITE_CANTOPEN,
            !FileManager.default.fileExists(atPath: path + "-wal")
@@ -330,7 +373,7 @@ final class Database {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             sqlite3_close(db)
             db = nil
-            throw Failure(code: "db_error", message: "can't open the Messages database: \(message)")
+            throw Failure(code: "db_error", message: "can't open \(what): \(message)")
         }
         sqlite3_busy_timeout(db, 3000)
         sqlite3_exec(db, "PRAGMA query_only = 1", nil, nil, nil)
@@ -496,6 +539,225 @@ final class Reader {
     }
 }
 
+// MARK: - Mail's index
+
+let maxMailScan = 400_000
+
+/// What of Mail's index this helper relies on, checked on every open (columns differ a
+/// little between macOS versions). `missing` lists required columns that aren't there.
+struct MailSchema {
+    var missing: [String] = []
+    var notes: [String] = []
+    var hasDeleted = false
+    var hasPrefix = false
+    var hasLabels = false
+}
+
+/// "Name <address>", quoting a name that has commas or other address punctuation.
+func displaySender(_ comment: String, _ address: String) -> String {
+    let name = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+    if name.isEmpty || name.caseInsensitiveCompare(address) == .orderedSame { return address }
+    if address.isEmpty { return name }
+    let special = CharacterSet(charactersIn: ",;:<>@()[]\"\\")
+    if name.unicodeScalars.contains(where: special.contains) {
+        let escaped = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\" <\(address)>"
+    }
+    return "\(name) <\(address)>"
+}
+
+/// An account's inbox: a mailbox URL whose path ends in /INBOX (any case).
+func isInboxURL(_ url: String) -> Bool {
+    var path = (url.removingPercentEncoding ?? url).lowercased()
+    while path.hasSuffix("/") { path.removeLast() }
+    return path.hasSuffix("/inbox")
+}
+
+final class MailIndex {
+    let db: Database
+    let schema: MailSchema
+
+    init(path: String) throws {
+        db = try Database(path: path, what: "Mail's index")
+        schema = try MailIndex.check(db)
+    }
+
+    private static func columns(_ db: Database, _ table: String) throws -> Set<String> {
+        var out: Set<String> = []
+        try db.rows("SELECT name FROM pragma_table_info(?)", [.text(table)]) { st in
+            out.insert(columnText(st, 0).lowercased())
+            return true
+        }
+        return out
+    }
+
+    private static func check(_ db: Database) throws -> MailSchema {
+        var s = MailSchema()
+        let required: [(String, [String])] = [
+            ("messages", ["sender", "subject", "date_received", "mailbox", "read"]),
+            ("addresses", ["address", "comment"]),
+            ("subjects", ["subject"]),
+            ("mailboxes", ["url"]),
+        ]
+        var have: [String: Set<String>] = [:]
+        for (table, cols) in required {
+            let found = try columns(db, table)
+            have[table] = found
+            if found.isEmpty {
+                s.missing.append("table \(table)")
+                continue
+            }
+            s.missing += cols.filter { !found.contains($0) }.map { "\(table).\($0)" }
+        }
+        let messages = have["messages"] ?? []
+        s.hasDeleted = messages.contains("deleted")
+        s.hasPrefix = messages.contains("subject_prefix")
+        let labels = try columns(db, "labels")
+        s.hasLabels = labels.contains("message_id") && labels.contains("mailbox_id")
+        if !s.hasDeleted { s.notes.append("no messages.deleted: deleted messages can't be left out") }
+        if s.hasPrefix { s.notes.append("subjects include messages.subject_prefix") }
+        if s.hasLabels { s.notes.append("inbox includes labels (Gmail)") }
+        return s
+    }
+
+    /// Inbox mailboxes: ROWID to URL.
+    func inboxMailboxes() throws -> [Int64: String] {
+        var out: [Int64: String] = [:]
+        try db.rows("SELECT ROWID, COALESCE(url, '') FROM mailboxes", []) { st in
+            let url = columnText(st, 1)
+            if isInboxURL(url) { out[sqlite3_column_int64(st, 0)] = url }
+            return true
+        }
+        return out
+    }
+
+    /// The WHERE clause for "in an inbox" (its own mailbox, or a Gmail label), its binds.
+    private func inInbox(_ inbox: [Int64: String]) -> (sql: String, binds: [Bind]) {
+        let ids = inbox.keys.sorted().map { Bind.int($0) }
+        let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        var sql = "(m.mailbox IN (\(marks))"
+        var binds = ids
+        if schema.hasLabels {
+            sql += " OR m.ROWID IN (SELECT message_id FROM labels WHERE mailbox_id IN (\(marks)))"
+            binds += ids
+        }
+        sql += ")" + (schema.hasDeleted ? " AND COALESCE(m.deleted, 0) = 0" : "")
+        return (sql, binds)
+    }
+
+    func inboxCount(_ inbox: [Int64: String]) throws -> Int {
+        if inbox.isEmpty { return 0 }
+        let w = inInbox(inbox)
+        var n = 0
+        try db.rows("SELECT COUNT(*) FROM messages m WHERE " + w.sql, w.binds) { st in
+            n = Int(sqlite3_column_int64(st, 0))
+            return false
+        }
+        return n
+    }
+
+    /// Inbox envelopes, newest first. With `matching`, only those whose subject, sender
+    /// address or sender name contains it (ignoring case and accents); every row looked
+    /// at counts toward `scanned`. Senders and subjects repeat, so each is tested once.
+    func envelopes(days: Int, unreadOnly: Bool, limit: Int, matching: String?) throws
+        -> (rows: [[String: Any]], scanned: Int)
+    {
+        let inbox = try inboxMailboxes()
+        if inbox.isEmpty { return ([], 0) }
+        let w = inInbox(inbox)
+        let subject = schema.hasPrefix
+            ? "COALESCE(m.subject_prefix, '') || COALESCE(s.subject, '')" : "COALESCE(s.subject, '')"
+        let sql = """
+            SELECT m.ROWID, COALESCE(m.date_received, 0), COALESCE(a.address, ''), COALESCE(a.comment, ''),
+                   \(subject), COALESCE(m."read", 0), m.mailbox, COALESCE(m.sender, 0),
+                   COALESCE(m.subject, 0), \(schema.hasPrefix ? "COALESCE(m.subject_prefix, '')" : "''")
+            FROM messages m
+            LEFT JOIN addresses a ON a.ROWID = m.sender
+            LEFT JOIN subjects s ON s.ROWID = m.subject
+            WHERE \(w.sql) AND m.date_received >= ?\(unreadOnly ? " AND COALESCE(m.\"read\", 0) = 0" : "")
+            ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?
+            """
+        let since = Int64(Date().timeIntervalSince1970) - Int64(days) * 86400
+        var out: [[String: Any]] = []
+        var scanned = 0
+        var labelled: [Int64] = []
+        var senderHit: [Int64: Bool] = [:]
+        var subjectHit: [Int64: Bool] = [:]
+        let needle = Array((matching ?? "").lowercased().utf8)
+        let asciiNeedle = needle.allSatisfy { $0 < 0x80 }
+        /// Column `i` contains `matching`: bytewise for plain ASCII (most subjects and
+        /// addresses), else Foundation's case- and accent-blind search.
+        func has(_ st: OpaquePointer, _ i: Int32) -> Bool {
+            guard let matching else { return true }
+            guard let p = sqlite3_column_text(st, i) else { return false }
+            let text = UnsafeBufferPointer(start: p, count: Int(sqlite3_column_bytes(st, i)))
+            if asciiNeedle, text.allSatisfy({ $0 < 0x80 }) {
+                if needle.isEmpty { return true }
+                if text.count < needle.count { return false }
+                let lower: (UInt8) -> UInt8 = { $0 >= 65 && $0 <= 90 ? $0 + 32 : $0 }
+                outer: for start in 0...(text.count - needle.count) {
+                    for k in 0..<needle.count where lower(text[start + k]) != needle[k] { continue outer }
+                    return true
+                }
+                return false
+            }
+            return String(cString: p).range(of: matching, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        try db.rows(sql, w.binds + [.int(since), .int(Int64(matching == nil ? limit : maxMailScan))]) { st in
+            scanned += 1
+            if matching != nil {
+                let sender = sqlite3_column_int64(st, 7)
+                var hit = senderHit[sender] ?? {
+                    let h = has(st, 2) || has(st, 3)
+                    senderHit[sender] = h
+                    return h
+                }()
+                if !hit {
+                    if columnText(st, 9).isEmpty {
+                        let subjectID = sqlite3_column_int64(st, 8)
+                        hit = subjectHit[subjectID] ?? {
+                            let h = has(st, 4)
+                            subjectHit[subjectID] = h
+                            return h
+                        }()
+                    } else {
+                        hit = has(st, 4)  // with its Re: prefix
+                    }
+                }
+                if !hit { return true }
+            }
+            let address = columnText(st, 2)
+            let name = columnText(st, 3)
+            let subj = columnText(st, 4)
+            let id = sqlite3_column_int64(st, 0)
+            var row: [String: Any] = [
+                "id": id,
+                "date": isoLocal(Date(timeIntervalSince1970: Double(sqlite3_column_int64(st, 1)))),
+                "sender": displaySender(name, address),
+                "subject": subj,
+                "read": sqlite3_column_int64(st, 5) != 0,
+            ]
+            if let url = inbox[sqlite3_column_int64(st, 6)] { row["mailbox"] = url } else { labelled.append(id) }
+            out.append(row)
+            return out.count < limit
+        }
+        if !labelled.isEmpty {  // in an inbox by label: name that inbox
+            var boxes: [Int64: String] = [:]
+            let marks = Array(repeating: "?", count: labelled.count).joined(separator: ",")
+            try db.rows(
+                "SELECT message_id, mailbox_id FROM labels WHERE message_id IN (\(marks))", labelled.map { Bind.int($0) }
+            ) { st in
+                if let url = inbox[sqlite3_column_int64(st, 1)] { boxes[sqlite3_column_int64(st, 0)] = url }
+                return true
+            }
+            for i in out.indices where out[i]["mailbox"] == nil {
+                out[i]["mailbox"] = boxes[out[i]["id"] as? Int64 ?? 0] ?? ""
+            }
+        }
+        return (out, scanned)
+    }
+}
+
 // MARK: - request handling
 
 func intArg(_ args: [String: Any], _ key: String, default def: Int, max hi: Int) throws -> Int {
@@ -507,6 +769,14 @@ func intArg(_ args: [String: Any], _ key: String, default def: Int, max hi: Int)
     }
     guard n >= 1, n <= hi else { throw Failure(code: "bad_request", message: "\(key) must be 1-\(hi)") }
     return n
+}
+
+func boolArg(_ args: [String: Any], _ key: String) throws -> Bool {
+    guard let raw = args[key] else { return false }
+    guard CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID(), let b = raw as? Bool else {
+        throw Failure(code: "bad_request", message: "\(key) must be true or false")
+    }
+    return b
 }
 
 func textArg(_ args: [String: Any], _ key: String, max hi: Int) throws -> String {
@@ -527,7 +797,49 @@ let allowedArgs: [String: Set<String>] = [
     "unread": ["limit", "since_days"],
     "chat": ["chat", "limit", "since_days"],
     "search": ["text", "limit", "since_days"],
+    "mail_status": [],
+    "mail_recent": ["limit", "unread_only", "since_days"],
+    "mail_search": ["text", "limit", "since_days"],
 ]
+
+/// Read access to one file, re-checked in a fresh process while it's missing (a grant
+/// made in System Settings shows up there at once); at most every 2 seconds.
+final class AccessWatch {
+    let check: () -> Access
+    let probe: () -> Access
+    let socket: String
+    private var access: Access = .denied
+    private var accessAt = Date.distantPast
+
+    init(socket: String, check: @escaping () -> Access, probe: @escaping () -> Access) {
+        self.socket = socket
+        self.check = check
+        self.probe = probe
+    }
+
+    func current() -> Access {
+        if access == .granted { return check() == .granted ? .granted : probeAndCache() }
+        if check() == .granted {  // readable here already: no need to ask a fresh process
+            access = .granted
+            return access
+        }
+        if Date().timeIntervalSince(accessAt) < 2 { return access }
+        return probeAndCache()
+    }
+
+    private func probeAndCache() -> Access {
+        access = probe()
+        accessAt = Date()
+        if access == .granted, check() != .granted {
+            // Granted, but not to this already-running process: restart (launchd's
+            // KeepAlive starts it again) so the next request can read.
+            warn("Full Disk Access was just granted; restarting to pick it up")
+            unlink(socket)
+            exit(0)
+        }
+        return access
+    }
+}
 
 final class Server {
     let o: Options
@@ -535,36 +847,22 @@ final class Server {
     let names: Names
     private var bucket: Double
     private var bucketAt = Date()
-    private var access: Access = .denied
-    private var accessAt = Date.distantPast
+    private let messagesAccess: AccessWatch
+    private let mailAccess: AccessWatch
 
     init(_ o: Options, token: String) {
         self.o = o
         self.token = token
         names = Names(mode: o.contacts)
         bucket = Double(o.ratePerMinute)
+        let db = o.db
+        messagesAccess = AccessWatch(
+            socket: o.socket, check: { checkAccess(db) }, probe: { probeAccess(db) })
+        mailAccess = AccessWatch(
+            socket: o.socket, check: { findMailIndex(o).access }, probe: { probeMailAccess(o) })
     }
 
-    /// Read access, re-checked in a fresh process while it's missing (a grant made in
-    /// System Settings shows up there at once); at most every 2 seconds.
-    func currentAccess() -> Access {
-        if access == .granted { return checkAccess(o.db) == .granted ? .granted : probeAndCache() }
-        if Date().timeIntervalSince(accessAt) < 2 { return access }
-        return probeAndCache()
-    }
-
-    private func probeAndCache() -> Access {
-        access = probeAccess(o.db)
-        accessAt = Date()
-        if access == .granted, checkAccess(o.db) != .granted {
-            // Granted, but not to this already-running process: restart (launchd's
-            // KeepAlive starts it again) so the next request can read.
-            warn("Full Disk Access was just granted; restarting to pick it up")
-            unlink(o.socket)
-            exit(0)
-        }
-        return access
-    }
+    func currentAccess() -> Access { messagesAccess.current() }
 
     private func takeToken() -> Bool {
         let now = Date()
@@ -592,6 +890,7 @@ final class Server {
                 throw Failure(code: "bad_request", message: "unknown argument \(bad) for \(op)")
             }
             note = args.compactMap { k, v in v is Int ? "\(k)=\(v)" : nil }.sorted().joined(separator: ",")
+            if op.hasPrefix("mail_") { return try mailOp(op, args, note) }
             if op == "status" {
                 return (
                     [
@@ -617,6 +916,71 @@ final class Server {
         } catch {
             return (["ok": false, "code": "error", "error": "\(error)"], op, note + ",error")
         }
+    }
+
+    /// mail_status (free, like status) and the two envelope lookups (rate-limited).
+    private func mailOp(_ op: String, _ args: [String: Any], _ note: String) throws
+        -> (answer: [String: Any], op: String, note: String)
+    {
+        var note = note
+        if op != "mail_status" {
+            guard takeToken() else { throw Failure(code: "rate_limited", message: "too many requests; wait a minute") }
+        }
+        let access = mailAccess.current()
+        let found = findMailIndex(o)
+        if op == "mail_status" {
+            var answer: [String: Any] = [
+                "ok": true, "access": access.rawValue, "path": found.path, "usable": false, "version": 1,
+            ]
+            if access == .granted, !found.path.isEmpty {
+                do {
+                    let index = try MailIndex(path: found.path)
+                    answer["schema_ok"] = index.schema.missing.isEmpty
+                    answer["missing"] = index.schema.missing
+                    answer["notes"] = index.schema.notes
+                    if index.schema.missing.isEmpty {
+                        let inbox = try index.inboxMailboxes()
+                        answer["inbox_mailboxes"] = inbox.count
+                        answer["inbox_messages"] = try index.inboxCount(inbox)
+                        answer["usable"] = !inbox.isEmpty
+                    }
+                } catch let f as Failure {
+                    answer["schema_ok"] = false
+                    answer["error"] = f.message
+                }
+            }
+            return (answer, op, note)
+        }
+        switch access {
+        case .granted: break
+        case .missing: throw Failure(code: "missing_index", message: "no Mail index on this Mac")
+        case .denied: throw Failure(code: "no_access", message: "this helper doesn't have Full Disk Access yet")
+        }
+        guard !found.path.isEmpty else { throw Failure(code: "missing_index", message: "no Mail index on this Mac") }
+        let started = Date()
+        let index = try MailIndex(path: found.path)
+        guard index.schema.missing.isEmpty else {
+            throw Failure(code: "schema", message: "Mail's index lacks " + index.schema.missing.joined(separator: ", "))
+        }
+        var answer: [String: Any]
+        if op == "mail_recent" {
+            let limit = try intArg(args, "limit", default: 10, max: maxLimit)
+            let days = try intArg(args, "since_days", default: 30, max: maxDays)
+            let unread = try boolArg(args, "unread_only")
+            let r = try index.envelopes(days: days, unreadOnly: unread, limit: limit, matching: nil)
+            answer = ["messages": r.rows, "since_days": days]
+        } else {
+            let text = try textArg(args, "text", max: 100)
+            let limit = try intArg(args, "limit", default: 10, max: maxLimit)
+            let days = try intArg(args, "since_days", default: 180, max: maxDays)
+            let r = try index.envelopes(days: days, unreadOnly: false, limit: limit, matching: text)
+            answer = ["messages": r.rows, "since_days": days, "scanned": r.scanned, "scan_capped": r.scanned >= maxMailScan]
+        }
+        answer["ok"] = true
+        answer["timezone"] = TimeZone.current.identifier
+        answer["query_ms"] = Int(Date().timeIntervalSince(started) * 1000)
+        note += (note.isEmpty ? "" : ",") + "n=\((answer["messages"] as? [Any])?.count ?? 0)"
+        return (answer, op, note)
     }
 
     private func run(_ op: String, _ args: [String: Any]) throws -> [String: Any] {
@@ -871,7 +1235,8 @@ func serve(_ o: Options) -> Never {
             continue
         }
         let (answer, op, note) = server.handle(req)
-        if op != "status" || answer["ok"] as? Bool != true {  // logged before answering
+        // Logged before answering; a successful status check isn't worth a line.
+        if !(op == "status" || op == "mail_status") || answer["ok"] as? Bool != true {
             log.write("op=\(op.isEmpty ? "?" : op) \(note) \(caller)")
         }
         writeAll(c, jsonLine(answer))
@@ -889,6 +1254,8 @@ case "serve":
     serve(opts)
 case "probe":
     print(checkAccess(opts.db).rawValue)
+case "probe-mail":
+    print(findMailIndex(opts).access.rawValue)
 default:
     die("unknown command \(argv[1])")
 }

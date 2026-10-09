@@ -100,6 +100,18 @@ async def request(
     raise ToolError(str(data.get("error") or f"the messages helper failed ({code})"))
 
 
+async def mail(op: str, args: dict[str, Any] | None = None, helper: Helper | None = None) -> dict[str, Any]:
+    """One request about Mail's index (mail_status, mail_recent, mail_search); its
+    answer, or ToolError. No guided setup here: without the index, mail_mac asks Mail."""
+    h = helper or HELPER
+    data = await _send(h, op, args or {})
+    if not data.get("ok") and data.get("code") == "bad_token":
+        data = await _send(h, op, args or {})  # the helper restarted between reads
+    if data.get("ok"):
+        return data
+    raise ToolError(f"mail index: {data.get('code')}: {data.get('error')}")
+
+
 async def _send(h: Helper, op: str, args: dict[str, Any]) -> dict[str, Any]:
     not_running = (
         "The messages helper isn't running. It's installed with Scout "

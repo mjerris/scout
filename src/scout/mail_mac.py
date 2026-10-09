@@ -3,18 +3,30 @@ spoken yes every time) send. Whatever accounts Mail has (Google, iCloud, IMAP)
 work; macOS holds the credentials. Driven with JavaScript for Automation, so
 the first use asks for "control Mail" permission on the Mac's screen.
 
+Finding messages (newest, unread, by sender or subject) asks Mail's own index
+first, through the scout-messages helper (the one program with Full Disk Access),
+when it's there and has the expected tables: scripting Mail has to fetch every
+inbox message's date to sort (seconds on a big inbox). Without it, Mail scripting
+answers as before. Bodies always come from Mail, by id, and a message read for an
+index row is checked against that row (see `_same`), so an id that meant something
+else to Mail can't put another message's text under this one's subject.
+
 Message text is from other people: it's returned marked as untrusted, and the
 voice agent is told never to act on instructions inside it."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import re
+import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-from . import mac
+from . import mac, messages_mac
 from .mac import ToolError
 
 Runner = Callable[..., Awaitable[str]]
@@ -118,6 +130,40 @@ function run(argv) {
 }
 """
 
+# One inbox message by subject and date (within 5 minutes), for when Mail's id for an
+# index row turned out to be some other message. Looks in the row's own account first
+# (its mailbox URL carries the account id). Slow on a big inbox: a fallback only.
+_FIND = r"""
+function run(argv) {
+  const [subject, dateIso, mailboxUrl, limitS] = argv;
+  const target = new Date(dateIso).getTime(), limit = parseInt(limitS);
+  const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim().replace(/^(?:(?:re|fwd?|aw|sv)\s*:\s*)+/, "");
+  const want = norm(subject);
+  const Mail = Application("Mail");
+  const boxes = Mail.inbox.mailboxes().map(mb => {
+    let own = false;
+    try { own = mailboxUrl.includes(mb.account().id()); } catch (e) {}
+    return {mb: mb, own: own};
+  });
+  boxes.sort((a, b) => (b.own ? 1 : 0) - (a.own ? 1 : 0));
+  for (const {mb} of boxes) {
+    const ids = mb.messages.id(), dates = mb.messages.dateReceived();
+    if (dates.length !== ids.length) continue;
+    for (let i = 0; i < ids.length; i++) {
+      if (!dates[i] || Math.abs(dates[i].getTime() - target) > 300000) continue;
+      const m = mb.messages.byId(ids[i]);
+      if (norm(m.subject()) !== want) continue;
+      const content = m.content() || "";
+      return JSON.stringify({id: ids[i], date: m.dateReceived().toISOString(), sender: m.sender(),
+        subject: m.subject(), to: m.toRecipients().map(r => r.address()),
+        cc: m.ccRecipients().map(r => r.address()), body: content.slice(0, limit),
+        truncated: content.length > limit});
+    }
+  }
+  return JSON.stringify({error: "couldn't find that message in Mail"});
+}
+"""
+
 _COMPOSE = r"""
 function run(argv) {
   const [mode, to, cc, subject, body] = argv;
@@ -202,23 +248,173 @@ def _timed(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+# --- Mail's index, through the scout-messages helper ----------------------------------------
+
+_PREFIX = re.compile(r"^(?:(?:re|fwd?|aw|sv)\s*:\s*)+")
+_ADDRESS = re.compile(r"<([^<>\s]+@[^<>\s]+)>\s*$|^\s*([^<>\s\"]+@[^<>\s\"]+)\s*$")
+SAME_WITHIN_S = 300.0  # an index row and Mail's message received this close are the same one
+
+
+def _norm_subject(s: str) -> str:
+    return _PREFIX.sub("", " ".join(str(s or "").lower().split()))
+
+
+def _address(sender: str) -> str:
+    m = _ADDRESS.search(str(sender or ""))
+    return (m.group(1) or m.group(2)).lower() if m else " ".join(str(sender or "").lower().split())
+
+
+def _seconds(iso: str) -> float | None:
+    try:
+        return dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _same(row: dict[str, Any], m: dict[str, Any]) -> list[str]:
+    """How Mail's message `m` differs from the index row it was read for: [] when it's
+    the same message (subject without Re:/Fwd:, sender address, received within
+    SAME_WITHIN_S). Names the fields only, never their text."""
+    off = []
+    if _norm_subject(row.get("subject", "")) != _norm_subject(m.get("subject", "")):
+        off.append("subject")
+    if _address(row.get("sender", "")) != _address(m.get("sender", "")):
+        off.append("sender")
+    a, b = _seconds(row.get("date", "")), _seconds(m.get("date", ""))
+    if a is None or b is None or abs(a - b) > SAME_WITHIN_S:
+        off.append("date")
+    return off
+
+
+@dataclass
+class Index:
+    """Whether to ask Mail's index, and the rows it gave (for checking reads against).
+    `helper` None means messages_mac.HELPER; tests make their own."""
+
+    helper: messages_mac.Helper | None = None
+    clock: Callable[[], float] = time.monotonic
+    recheck_s: float = 60.0  # ask mail_status again after this long (10 s while unusable)
+    ids_trusted: bool = True  # False after Mail's id for an index row was another message
+    _usable: bool | None = None
+    _checked_at: float = 0.0
+    rows: OrderedDict[int, dict[str, Any]] = field(default_factory=OrderedDict)
+
+    async def usable(self) -> bool:
+        if not self.ids_trusted:
+            return False
+        now = self.clock()
+        wait = self.recheck_s if self._usable else min(self.recheck_s, 10.0)
+        if self._usable is not None and now - self._checked_at < wait:
+            return self._usable
+        try:
+            st = await messages_mac.mail("mail_status", {}, self.helper)
+            ok = bool(st.get("usable"))
+            why = (
+                f"{st.get('inbox_messages')} inbox messages"
+                if ok
+                else f"access {st.get('access')}, missing {st.get('missing') or []}, {st.get('error') or ''}"
+            )
+        except ToolError as exc:
+            ok, why = False, str(exc)
+        if ok != self._usable:
+            log.info("mail: %s Mail's index (%s)", "using" if ok else "not using", why)
+        self._usable, self._checked_at = ok, now
+        return ok
+
+    def invalidate(self) -> None:
+        self._usable = None
+
+    async def listing(self, n: int, unread_only: bool, q: str, days: int) -> dict[str, Any]:
+        if q:
+            args: dict[str, Any] = {"text": q, "limit": n, "since_days": days}
+            data = await messages_mac.mail("mail_search", args, self.helper)
+        else:
+            args = {"limit": n, "unread_only": unread_only, "since_days": days}
+            data = await messages_mac.mail("mail_recent", args, self.helper)
+        out = []
+        for m in data.get("messages") or []:
+            row = {k: m.get(k) for k in ("id", "date", "sender", "subject", "read", "mailbox")}
+            self.remember(row)
+            out.append({k: row[k] for k in ("id", "date", "sender", "subject", "read")})
+        return {"messages": out, "considered": len(out), "days": days, "query_ms": data.get("query_ms")}
+
+    def remember(self, row: dict[str, Any]) -> None:
+        self.rows[int(row["id"])] = row
+        self.rows.move_to_end(int(row["id"]))
+        while len(self.rows) > 2000:
+            self.rows.popitem(last=False)
+
+    def forget(self, ids: list[int]) -> None:
+        """These ids now mean Mail's own (a scripting listing): don't check them against index rows."""
+        for i in ids:
+            self.rows.pop(i, None)
+
+    def mismatch(self, requested: int, row: dict[str, Any], got: dict[str, Any] | None) -> None:
+        what = "no such message" if got is None else "different " + ", ".join(_same(row, got))
+        log.error(
+            "MAIL INDEX ID MISMATCH: Mail's message %d is not the index row with that id (%s); "
+            "finding it by subject and date instead, and listing through Mail scripting from now on. "
+            "Check with mail_mac.verify_index_ids().",
+            requested,
+            what,
+        )
+        self.ids_trusted = False
+
+
+INDEX = Index()
+
+
 async def listing(
-    count: Any = 10, unread_only: Any = False, query: Any = None, run: Runner = _jxa
+    count: Any = 10,
+    unread_only: Any = False,
+    query: Any = None,
+    run: Runner = _jxa,
+    index: Index | None = None,
 ) -> dict[str, Any]:
     """Inbox messages, newest first: {"messages": [{id, date, sender, subject, read}], ...}.
-    With a query: subject or sender matches from the last SEARCH_DAYS, read or not."""
+    With a query: subject or sender matches from the last SEARCH_DAYS, read or not.
+    Mail's index answers when the helper has it; Mail scripting otherwise."""
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
     q = _clean(query, "query", 100)
     days = SEARCH_DAYS if q else RECENT_DAYS
-    return _timed(await _call(run, _LIST, str(n), "true" if unread_only and not q else "false", q, str(days)))
+    unread = bool(unread_only) and not q
+    idx = index or INDEX
+    if await idx.usable():
+        t0 = time.monotonic()
+        try:
+            data = await idx.listing(n, unread, q, days)
+        except ToolError as exc:
+            log.warning("mail: the index failed (%s); asking Mail", exc)
+            idx.invalidate()
+        else:
+            log.info(
+                "mail: listed by the index in %d ms (query %s ms, %d messages)",
+                (time.monotonic() - t0) * 1000,
+                data.pop("query_ms", "?"),
+                len(data["messages"]),
+            )
+            return data
+    t0 = time.monotonic()
+    data = _timed(await _call(run, _LIST, str(n), "true" if unread else "false", q, str(days)))
+    idx.forget([int(m["id"]) for m in data.get("messages", []) if isinstance(m.get("id"), int)])
+    log.info(
+        "mail: listed by Mail scripting in %d ms (%d messages)",
+        (time.monotonic() - t0) * 1000,
+        len(data.get("messages", [])),
+    )
+    return data
 
 
 async def message_data(
-    count: Any = 5, unread_only: Any = False, query: Any = None, run: Runner = _jxa
+    count: Any = 5,
+    unread_only: Any = False,
+    query: Any = None,
+    run: Runner = _jxa,
+    index: Index | None = None,
 ) -> list[dict[str, Any]]:
     """Structured inbox messages (newest first) for spoken summaries: id, date, sender,
     subject, read. With a query: subject or sender matches, from the last SEARCH_DAYS."""
-    data = await listing(count if count is not None else 5, unread_only, query, run)
+    data = await listing(count if count is not None else 5, unread_only, query, run, index)
     msgs: list[dict[str, Any]] = data.get("messages", [])
     return msgs
 
@@ -244,20 +440,111 @@ def _check_id(value: Any) -> int:
     return mac.check_int(value, 1, 2**31 - 1, "id")
 
 
-async def message(message_id: Any, run: Runner = _jxa) -> dict[str, Any]:
-    """One inbox message with its text: id, date, sender, subject, to, cc, body, truncated."""
-    return await _call(run, _READ, str(_check_id(message_id)), str(_MAX_BODY))
+async def _find(run: Runner, requested: int, row: dict[str, Any]) -> dict[str, Any]:
+    """The message an index row describes, found by subject and date (the slow way)."""
+    t0 = time.monotonic()
+    m = await _call(
+        run, _FIND, str(row.get("subject") or ""), str(row.get("date") or ""), str(row.get("mailbox") or ""),
+        str(_MAX_BODY),
+    )  # fmt: skip
+    log.warning(
+        "mail: found message %d by subject and date in %d ms", requested, (time.monotonic() - t0) * 1000
+    )
+    if _same(row, m):
+        raise ToolError("couldn't find that message in Mail")
+    return {**m, "id": requested, "mail_id": m.get("id")}
 
 
-async def bodies(ids: list[int], run: Runner = _jxa) -> dict[int, dict[str, Any]]:
-    """Several messages with their text, by id, in one call to Mail. Missing ids are left out."""
+async def message(message_id: Any, run: Runner = _jxa, index: Index | None = None) -> dict[str, Any]:
+    """One inbox message with its text: id, date, sender, subject, to, cc, body, truncated.
+    For an id from the index, Mail's message must be that row's (subject, sender, date)."""
+    mid = _check_id(message_id)
+    idx = index or INDEX
+    row = idx.rows.get(mid)
+    try:
+        m: dict[str, Any] | None = await _call(run, _READ, str(mid), str(_MAX_BODY))
+    except ToolError as exc:
+        if row is None or "no inbox message" not in str(exc):
+            raise
+        m = None
+    if row is None:  # an id from Mail scripting: Mail's answer is the message
+        if m is None:
+            raise ToolError(f"no inbox message with id {mid}")
+        return m
+    if m is not None and not _same(row, m):
+        return m
+    idx.mismatch(mid, row, m)
+    return await _find(run, mid, row)
+
+
+async def bodies(ids: list[int], run: Runner = _jxa, index: Index | None = None) -> dict[int, dict[str, Any]]:
+    """Several messages with their text, by id, in one call to Mail. Missing ids are left out.
+    Ids from the index are checked like message()'s."""
     if not ids:
         return {}
     if len(ids) > 50:
         raise ToolError("at most 50 messages at a time")
     wanted = [_check_id(i) for i in ids]
     data = await _call(run, _READ_MANY, ",".join(map(str, wanted)), str(_MAX_BODY))
-    return {int(m["id"]): m for m in data.get("messages", []) if m.get("id") in wanted}
+    got = {int(m["id"]): m for m in data.get("messages", []) if m.get("id") in wanted}
+    idx = index or INDEX
+    for mid in wanted:
+        row = idx.rows.get(mid)
+        if row is None or (mid in got and not _same(row, got[mid])):
+            continue
+        idx.mismatch(mid, row, got.get(mid))
+        got.pop(mid, None)
+        try:
+            got[mid] = await _find(run, mid, row)
+        except ToolError as exc:
+            log.warning("mail: message %d left out: %s", mid, exc)
+    return got
+
+
+async def verify_index_ids(n: int = 5, run: Runner = _jxa, index: Index | None = None) -> str:
+    """Do Mail's index and Mail scripting agree on ids? Compares the index's newest n
+    inbox messages with Mail's newest n, and reads each index id through Mail to see
+    whether it's the same message. A short report: ids, counts, field names; no
+    subjects, senders or text. Run it live once Full Disk Access is granted."""
+    n = mac.check_int(n, 1, 20, "n")
+    idx = index or INDEX
+    try:
+        st = await messages_mac.mail("mail_status", {}, idx.helper)
+    except ToolError as exc:
+        return f"index: not reachable ({exc})"
+    head = (
+        f"index: {st.get('path') or '(not found)'}; access {st.get('access')}; usable {st.get('usable')}; "
+        f"{st.get('inbox_messages', '?')} inbox messages in {st.get('inbox_mailboxes', '?')} inboxes; "
+        f"missing {st.get('missing') or []}; notes {st.get('notes') or []}"
+    )
+    if not st.get("usable"):
+        return head
+    t0 = time.monotonic()
+    ix = await messages_mac.mail("mail_recent", {"limit": n, "since_days": RECENT_DAYS}, idx.helper)
+    t1 = time.monotonic()
+    jx = _timed(await _call(run, _LIST, str(n), "false", "", str(RECENT_DAYS)))
+    t2 = time.monotonic()
+    rows = {int(m["id"]): m for m in ix.get("messages") or []}
+    mail = {int(m["id"]): m for m in jx.get("messages") or []}
+    read = await _call(run, _READ_MANY, ",".join(map(str, rows)), "0") if rows else {"messages": []}
+    by_id = {int(m["id"]): m for m in read.get("messages") or []}
+    common = [i for i in rows if i in mail]
+    same_listed = [i for i in common if not _same(rows[i], mail[i])]
+    agree = [i for i in rows if i in by_id and not _same(rows[i], by_id[i])]
+    differ = {i: _same(rows[i], by_id[i]) if i in by_id else ["missing"] for i in rows if i not in agree}
+    lines = [
+        head,
+        f"newest {n} ids: index {list(rows)} ({(t1 - t0) * 1000:.0f} ms); "
+        f"Mail {list(mail)} ({(t2 - t1) * 1000:.0f} ms)",
+        f"same ids in both listings: {len(common)}/{len(rows)}; "
+        f"same subject, sender and date for those: {len(same_listed)}/{len(common)}",
+        f"Mail's message for each index id is that row: {len(agree)}/{len(rows)}"
+        + (f"; differ: {differ}" if differ else ""),
+        "verdict: index ids are Mail's ids"
+        if rows and len(agree) == len(rows)
+        else "verdict: MISMATCH (the index path stops after the first bad read; reads stay correct)",
+    ]
+    return "\n".join(lines)
 
 
 def header(m: dict[str, Any]) -> str:
