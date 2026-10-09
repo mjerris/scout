@@ -174,3 +174,37 @@ def test_sending_is_spoken_with_recipient_and_never_saved_as_always(tmp_path: Pa
     assert [s for s, _ in asked] == ["Send email to sam@example.com, subject Lunch?"] * 2
     assert "Noon works." in asked[0][1]  # the web page shows the full message
     assert rules == []
+
+
+def test_newest_first_range_listing_parses_and_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fast path: newest messages per inbox as ranges (the 58,732-message Google inbox
+    took 12-15 s to scan in full)."""
+    import datetime as dt
+
+    us, rs = "\x1f", "\x1e"
+    epoch = dt.datetime(2020, 1, 1).astimezone()
+    now = dt.datetime.now().astimezone()
+
+    def secs(t: dt.datetime) -> str:
+        return str(int((t - epoch).total_seconds()))
+
+    text = rs.join([
+        us.join(["41", secs(now - dt.timedelta(hours=1)), "Rover.com <rover@e.rover.com>", "New message from Catherine", "false"]),
+        us.join(["40", secs(now - dt.timedelta(days=2)), "Sam <sam@example.com>", "Lunch?", "true"]),
+        us.join(["12", secs(now - dt.timedelta(days=400)), "Old <old@example.com>", "Ancient", "true"]),
+        "garbage",
+    ])  # fmt: skip
+    seen: list[tuple[str, ...]] = []
+
+    async def fake(script: str, *args: str) -> str:
+        seen.append(args)
+        return text
+
+    monkeypatch.setattr(mail_mac, "USE_RANGES", True)
+    monkeypatch.setattr(mail_mac, "_applescript", fake)
+    rows = mail_mac._parse_recent(text)
+    assert [r["id"] for r in rows] == [41, 40, 12] and rows[0]["read"] is False
+    found = asyncio.run(mail_mac.listing(5, query="rover"))
+    assert [m["id"] for m in found["messages"]] == [41] and seen[-1] == (str(mail_mac.SCAN_SEARCH),)
+    unread = asyncio.run(mail_mac.listing(5, unread_only=True))
+    assert [m["id"] for m in unread["messages"]] == [41]  # read and too-old ones left out
