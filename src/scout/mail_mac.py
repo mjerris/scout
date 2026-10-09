@@ -295,6 +295,8 @@ class Index:
     clock: Callable[[], float] = time.monotonic
     recheck_s: float = 60.0  # ask mail_status again after this long (10 s while unusable)
     ids_trusted: bool = True  # False after Mail's id for an index row was another message
+    access: str = ""  # the helper's Full Disk Access state, from mail_status
+    offered_at: float | None = None  # when the slow-search setup was last offered
     _usable: bool | None = None
     _checked_at: float = 0.0
     rows: OrderedDict[int, dict[str, Any]] = field(default_factory=OrderedDict)
@@ -309,6 +311,7 @@ class Index:
         try:
             st = await messages_mac.mail("mail_status", {}, self.helper)
             ok = bool(st.get("usable"))
+            self.access = str(st.get("access") or "")
             why = (
                 f"{st.get('inbox_messages')} inbox messages"
                 if ok
@@ -397,12 +400,39 @@ async def listing(
     t0 = time.monotonic()
     data = _timed(await _call(run, _LIST, str(n), "true" if unread else "false", q, str(days)))
     idx.forget([int(m["id"]) for m in data.get("messages", []) if isinstance(m.get("id"), int)])
+    took = time.monotonic() - t0
     log.info(
-        "mail: listed by Mail scripting in %d ms (%d messages)",
-        (time.monotonic() - t0) * 1000,
-        len(data.get("messages", [])),
+        "mail: listed by Mail scripting in %d ms (%d messages)", took * 1000, len(data.get("messages", []))
     )
+    _offer_setup(idx, took)
     return data
+
+
+SETUP_HINT = (
+    "Searching your mail took a while. One setting makes it instant: I've opened Full Disk Access "
+    "and the scout-messages helper in Finder. Drag it into the list and turn it on."
+)
+SLOW_S = 3.0  # a Mail-scripting search slower than this offers the index setup
+OFFER_EVERY_S = 1800.0
+_hint: list[str] = []
+
+
+def _offer_setup(idx: Index, took: float) -> None:
+    """A slow search because the helper can't read Mail's index: open the one-time
+    setup (like the first messages question does) and say why, at most every 30 min."""
+    if took < SLOW_S or idx.access not in ("denied", "missing") or not idx.ids_trusted:
+        return
+    now = idx.clock()
+    if idx.offered_at is not None and now - idx.offered_at < OFFER_EVERY_S:
+        return
+    idx.offered_at = now
+    messages_mac._start_setup(idx.helper or messages_mac.HELPER)
+    _hint.append(SETUP_HINT)
+
+
+def take_setup_hint() -> str | None:
+    """The setup offer to say after the answer, once."""
+    return _hint.pop() if _hint else None
 
 
 async def message_data(

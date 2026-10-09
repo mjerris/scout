@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import briefing, gate, local_intents, memory, privacy, shared_tools, speech, tier1
+from . import briefing, gate, local_intents, mail_mac, memory, privacy, shared_tools, speech, tier1
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -782,6 +782,8 @@ class Assistant:
             self.say(said)
             if tier is not None:
                 self.last_spoken = ("Scout", said)
+        if hint := mail_mac.take_setup_hint():  # a slow mail search: offer the one-time fix
+            self.say(hint)
         await self.speaker.wait_idle()
         return True
 

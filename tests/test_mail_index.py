@@ -634,3 +634,26 @@ def test_verify_index_ids_reports_without_message_text(running: Running) -> None
         helper=Helper(socket=running.helper.socket.with_name("x.sock"), token=running.helper.token)
     )
     assert run(mail_mac.verify_index_ids(3, same, gone)).startswith("index: not reachable")
+
+
+def test_a_slow_search_without_access_offers_the_setup_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user asked for the setup to come from trying to use it: a slow Mail search
+    (no Full Disk Access yet) opens the setup windows and says why, at most every 30 min."""
+    from scout import mail_mac, messages_mac
+
+    opened: list[str] = []
+    monkeypatch.setattr(messages_mac, "_start_setup", lambda h: opened.append("setup"))
+    clock = [1000.0]
+    idx = mail_mac.Index(clock=lambda: clock[0])
+    idx.access = "missing"
+    mail_mac._offer_setup(idx, took=12.0)
+    assert opened == ["setup"] and mail_mac.take_setup_hint() == mail_mac.SETUP_HINT
+    assert mail_mac.take_setup_hint() is None  # said once
+    mail_mac._offer_setup(idx, took=12.0)  # again soon: no new windows
+    assert opened == ["setup"]
+    clock[0] += 1801
+    mail_mac._offer_setup(idx, took=1.0)  # fast enough: nothing to fix
+    assert opened == ["setup"]
+    idx.access = "granted"
+    mail_mac._offer_setup(idx, took=12.0)  # granted but slow for another reason: not this fix
+    assert opened == ["setup"]
