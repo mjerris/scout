@@ -17,6 +17,7 @@ import datetime as dt
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -337,8 +338,11 @@ async def summarize(args: dict[str, Any], now: dt.datetime, summaries: Summaries
     from . import mail_mac
 
     query = args.get("query")
+    t0 = time.perf_counter()
     msgs = await mail_mac.message_data(1 if query else SUMMARY_COUNT, bool(args.get("unread_only")), query)
+    t1 = time.perf_counter()
     full = await mail_mac.bodies([m["id"] for m in msgs])
+    t2 = time.perf_counter()
     kind = "summary" if query else "gist"
     texts: dict[int, str] = {}
     flagged: set[int] = set()
@@ -352,6 +356,10 @@ async def summarize(args: dict[str, Any], now: dt.datetime, summaries: Summaries
             texts[m["id"]] = await summaries.of(msg, kind)
         except (RuntimeError, TimeoutError) as exc:
             log.info("no summary of message %s: %s", m["id"], exc)
+    log.info(
+        "mail summary timings: find %.1f s, read %.1f s, summarize %.1f s (%d message%s)",
+        t1 - t0, t2 - t1, time.perf_counter() - t2, len(msgs), "s" * (len(msgs) != 1),
+    )  # fmt: skip
     return speak_summaries(msgs, texts, flagged, args, now)
 
 

@@ -335,3 +335,14 @@ def test_briefing(text: str) -> None:
         "You have 1 reminder due today: Call Sam. You have 1 unread email, from GitHub."
     )
     assert calls.mail == [(50, True)]
+
+
+def test_free_answer_mentions_all_day_blocks() -> None:
+    calls = Calls()
+    calls.event_reply = {
+        "events": [{"title": "JERRIS - OOO", "all_day": True, "start": "2026-10-01", "end": "2026-10-11"}]
+    }
+    out = say("am I free tomorrow at 3", calls)
+    assert (
+        out == "Yes, you're free at 3 PM tomorrow. You have JERRIS - OOO all day."
+    )  # heard live: OOO went unmentioned

@@ -67,6 +67,12 @@ def format_reminders(data: dict[str, Any], now: dt.datetime | None = None) -> st
     return "\n".join(lines)
 
 
+async def list_names(helper: Path | None = None) -> list[str]:
+    """The names of the Mac's reminder lists."""
+    await ensure_access(helper, reminders=True)
+    return [str(c["title"]) for c in (await vcal("reminder-lists", helper=helper)).get("lists", [])]
+
+
 async def lists(helper: Path | None = None) -> str:
     await ensure_access(helper, reminders=True)
     found = (await vcal("reminder-lists", helper=helper)).get("lists", [])
