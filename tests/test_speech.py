@@ -205,3 +205,44 @@ def test_greeted_name_stop() -> None:
 
     assert is_stop_utterance("Hey Scott, stop.", W.names, W.max_position, W.greeted_names)
     assert not is_stop_utterance("Scott, stop.", W.names, W.max_position, W.greeted_names)
+
+
+@pytest.mark.parametrize(
+    ("text", "spoken"),
+    [
+        (
+            "Catherine says she'll be home on 09/30/2026.",
+            "Catherine says she'll be home on September 30th.",
+        ),  # heard live
+        ("Due 2026-10-09.", "Due tomorrow."),
+        ("The meeting is on 2026-10-13.", "The meeting is on Tuesday."),
+        ("It shipped on October 7, 2026.", "It shipped yesterday."),
+        ("Renewal on 03/01/2027.", "Renewal on March 1st, 2027."),
+        ("Invoice from 10/02/2026.", "Invoice from last Friday."),
+        ("Call 555-0100 at 10:30.", "Call 555-0100 at 10:30."),  # not dates
+        (
+            "Version 2026-10-08T15:00:00 is ISO with a time.",
+            "Version 2026-10-08T15:00:00 is ISO with a time.",
+        ),
+    ],
+)
+def test_dates_are_spoken_naturally(text: str, spoken: str) -> None:
+    import datetime as dt
+
+    from scout.speech import speak_dates
+
+    assert speak_dates(text, dt.date(2026, 10, 8)) == spoken
+
+
+@pytest.mark.parametrize(
+    ("sender", "name"),
+    [
+        ("Rover.com <rover@e.rover.com>", "Rover"),
+        ("e.rover.com", "Rover"),
+        ('"Pat Lee" <pat@acme.com>', "Pat Lee"),
+    ],
+)
+def test_web_address_senders_are_said_by_name(sender: str, name: str) -> None:
+    from scout.summary import sender_name
+
+    assert sender_name(sender) == name

@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import itertools
 import re
+from datetime import date
 from dataclasses import dataclass
 
 _WORD = re.compile(r"[a-z0-9']+")
@@ -374,6 +375,65 @@ def split_wait(text: str) -> tuple[str, bool]:
 _CODE_MARK = "\x00"
 
 
+_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+           "October", "November", "December"]  # fmt: skip
+_MONTH_RE = r"(?P<mon>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
+_DATES = re.compile(
+    r"(?P<on>\bon )?(?:"
+    r"\b(?P<m1>\d{1,2})/(?P<d1>\d{1,2})/(?P<y1>\d{4}|\d{2})\b|"  # 09/30/2026 (US order)
+    r"\b(?P<y2>\d{4})-(?P<m2>\d{2})-(?P<d2>\d{2})(?![\d:T])|"  # 2026-09-30
+    r"\b" + _MONTH_RE + r" (?P<d3>\d{1,2})(?:st|nd|rd|th)?, (?P<y3>\d{4})\b"  # October 8, 2026
+    r")",
+    re.I,
+)
+
+
+def _ordinal(n: int) -> str:
+    return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def speak_date(day: date, today: date, on: bool = False) -> str:
+    """A date the way people say it: 'today', 'on Tuesday', 'last Friday', 'September 30th'."""
+    delta = (day - today).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    if delta == -1:
+        return "yesterday"
+    if 1 < delta < 7:
+        return ("on " if on else "") + day.strftime("%A")
+    if -7 < delta < -1:
+        return ("on " if on else "") + "last " + day.strftime("%A")
+    words = f"{_MONTHS[day.month - 1]} {_ordinal(day.day)}"
+    if day.year != today.year:
+        words += f", {day.year}"
+    return ("on " if on else "") + words
+
+
+def speak_dates(text: str, today: date | None = None) -> str:
+    """Numeric and long-form dates in text -> spoken words, relative when close."""
+    today = today or date.today()
+
+    def one(m: re.Match[str]) -> str:
+        try:
+            if m["m1"]:
+                y = int(m["y1"]) + (2000 if len(m["y1"]) == 2 else 0)
+                day = date(y, int(m["m1"]), int(m["d1"]))
+            elif m["y2"]:
+                day = date(int(m["y2"]), int(m["m2"]), int(m["d2"]))
+            else:
+                month = next(
+                    i for i, name in enumerate(_MONTHS) if name.lower().startswith(m["mon"].lower()[:3])
+                )
+                day = date(int(m["y3"]), month + 1, int(m["d3"]))
+        except (ValueError, StopIteration):
+            return m.group(0)
+        return speak_date(day, today, on=bool(m["on"]))
+
+    return _DATES.sub(one, text)
+
+
 def to_speech(md: str) -> str:
     """Flatten markdown into something pleasant to hear."""
     s = re.sub(r"```.*?(?:```|\Z)", f"\n{_CODE_MARK}\n", md, flags=re.S)
@@ -402,7 +462,7 @@ def to_speech(md: str) -> str:
     s = " ".join(lines).replace(_CODE_MARK, " (code omitted) ")
     s = re.sub(r"\.\s*\.", ".", s)
     s = re.sub(r"\s+([.,!?])", r"\1", s)
-    return re.sub(r"\s{2,}", " ", s).strip()
+    return speak_dates(re.sub(r"\s{2,}", " ", s).strip())
 
 
 # --------------------------------------------------------- strip_own_speech ---
