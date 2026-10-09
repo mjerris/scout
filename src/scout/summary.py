@@ -52,6 +52,10 @@ def sender_name(sender: str) -> str:
     """'"Pat Lee" <pat@acme.com>' -> 'Pat Lee'; 'billing@austinenergy.com' -> 'austinenergy'."""
     name = sender.split("<", 1)[0].strip().strip('"').strip()
     address = re.search(r"([^\s<>@]+)@([^\s<>]+)", sender)
+    if name and (
+        site := re.fullmatch(r"(?:[\w-]+\.)*([\w-]+)\.(?:com|net|org|io|co|app|us|ai|dev|shop)", name, re.I)
+    ):
+        return site.group(1)[:1].upper() + site.group(1)[1:]  # "Rover.com" is said "Rover"
     if name and not (address and name == address.group(0)):
         return name
     if not address:

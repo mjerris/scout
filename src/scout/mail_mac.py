@@ -35,25 +35,37 @@ function run(argv) {
   const Mail = Application("Mail");
   // Work per account inbox: the combined inbox is neither in date order nor stable
   // between requests, and its `whose` filter checks messages one by one (slow). Bulk-
-  // fetch ids and dates per mailbox, sort here, then read details by id, never by position.
+  // fetch per mailbox (one request per property), sort and filter here, then read
+  // details by id, never by position. A search or unread filter bulk-fetches the
+  // fields it tests too: asking message by message took 7.7 s to find one sender.
   const since = Date.now() - days * 86400000;
   let rows = [];
   for (const mb of Mail.inbox.mailboxes()) {
     const ids = mb.messages.id(), dates = mb.messages.dateReceived();
-    if (ids.length !== dates.length) continue;  // changed mid-read; skip rather than mismatch
-    for (let i = 0; i < ids.length; i++)
-      if (dates[i] && dates[i].getTime() >= since) rows.push({mb: mb, id: ids[i], date: dates[i]});
+    const subjects = query ? mb.messages.subject() : null, senders = query ? mb.messages.sender() : null;
+    const read = (unreadOnly || query) ? mb.messages.readStatus() : null;
+    const n = ids.length;
+    if (dates.length !== n || (subjects && (subjects.length !== n || senders.length !== n)) || (read && read.length !== n))
+      continue;  // changed mid-read; skip rather than mismatch
+    for (let i = 0; i < n; i++) {
+      if (!dates[i] || dates[i].getTime() < since) continue;
+      if (unreadOnly && read[i]) continue;
+      if (query && !(((subjects[i] || "").toLowerCase().includes(query)) || ((senders[i] || "").toLowerCase().includes(query))))
+        continue;
+      rows.push({mb: mb, id: ids[i], date: dates[i], subject: subjects ? subjects[i] : null,
+                 sender: senders ? senders[i] : null, read: read ? read[i] : null});
+    }
   }
   rows.sort((a, b) => b.date - a.date);
   const out = [];
-  for (const r of rows) {
-    if (out.length >= count) break;
-    const m = r.mb.messages.byId(r.id);
-    const read = m.readStatus();
-    if (unreadOnly && read) continue;
-    const subject = m.subject() || "", sender = m.sender() || "";
-    if (query && !(subject.toLowerCase().includes(query) || sender.toLowerCase().includes(query))) continue;
-    out.push({id: r.id, date: r.date.toISOString(), sender: sender, subject: subject, read: read});
+  for (const r of rows.slice(0, count)) {
+    let subject = r.subject, sender = r.sender, read = r.read;
+    if (subject === null || read === null) {
+      const m = r.mb.messages.byId(r.id);
+      if (subject === null) { subject = m.subject(); sender = m.sender(); }
+      if (read === null) read = m.readStatus();
+    }
+    out.push({id: r.id, date: r.date.toISOString(), sender: sender || "", subject: subject || "", read: read});
   }
   return JSON.stringify({messages: out, considered: rows.length, days: days});
 }
@@ -64,8 +76,8 @@ function run(argv) {
   const id = parseInt(argv[0]), limit = parseInt(argv[1]);
   const Mail = Application("Mail");
   let m = null;
-  for (const mb of Mail.inbox.mailboxes()) {
-    if (mb.messages.id().includes(id)) { m = mb.messages.byId(id); break; }
+  for (const mb of Mail.inbox.mailboxes()) {  // ask each inbox for the id: no full id lists
+    try { const c = mb.messages.byId(id); c.id(); m = c; break; } catch (e) {}
   }
   if (m === null) return JSON.stringify({error: "no inbox message with id " + id});
   const content = m.content() || "";
@@ -81,15 +93,16 @@ function run(argv) {
   const want = new Set(argv[0].split(",").map(x => parseInt(x))), limit = parseInt(argv[1]);
   const Mail = Application("Mail");
   const out = [];
-  for (const mb of Mail.inbox.mailboxes()) {
-    if (want.size === 0) break;
-    for (const id of mb.messages.id()) {
-      if (!want.has(id)) continue;
-      want.delete(id);
-      const m = mb.messages.byId(id);
+  const boxes = Mail.inbox.mailboxes();
+  for (const id of Array.from(want)) {  // ask each inbox for the id: no full id lists
+    for (const mb of boxes) {
+      let m;
+      try { m = mb.messages.byId(id); m.id(); } catch (e) { continue; }
       const content = m.content() || "";
       out.push({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
         body: content.slice(0, limit), truncated: content.length > limit});
+      want.delete(id);
+      break;
     }
   }
   return JSON.stringify({messages: out, missing: Array.from(want)});

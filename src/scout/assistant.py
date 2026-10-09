@@ -777,6 +777,7 @@ class Assistant:
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)", private))
         if said:
+            said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
             self._set_state("speaking")
             self.say(said)
             if tier is not None:
