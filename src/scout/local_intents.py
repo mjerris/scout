@@ -76,6 +76,7 @@ class Context:
     media: Callable[[str], Awaitable[str]] = mac.media
     events: Callable[..., Awaitable[dict[str, Any]]] = calendar_mac.event_data
     reminders: Callable[..., Awaitable[dict[str, Any]]] = reminders_mac.reminder_data
+    reminder_lists: Callable[[], Awaitable[list[str]]] = reminders_mac.list_names
     mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
     hours: Callable[[], freebusy.Hours] = freebusy.work_hours
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
@@ -295,7 +296,8 @@ async def _free_at(m: re.Match[str], c: Context) -> str | None:
     now = c.now()
     day, word = _day(m.group(1) or m.group(3), now)
     at = dt.datetime.combine(day, when, now.tzinfo)
-    spans = freebusy.timed(await _day_events(c, day))
+    events = await _day_events(c, day)
+    spans = freebusy.timed(events)
     suffix = f" {word}" if word else ""
     clash = [s for s in spans if s.start < at + dt.timedelta(minutes=30) and s.end > at]
     if clash:
@@ -303,6 +305,8 @@ async def _free_at(m: re.Match[str], c: Context) -> str | None:
         titles = join([t for s in clash for t in s.titles])
         return f"No, you have {titles} from {freebusy.span_words(block)}{suffix}."
     out = f"Yes, you're free at {_clock(at)}{suffix}."
+    if allday := freebusy.all_day(events, day):  # e.g. out of office: not busy, but worth knowing
+        out += f" You have {join(allday)} all day."
     later = [s for s in spans if at < s.start < at + dt.timedelta(hours=3)]
     if later:
         out += f" {later[0].titles[0]} starts at {_clock(later[0].start)}."
@@ -384,7 +388,12 @@ async def _reminder_list(m: re.Match[str], c: Context) -> str | None:
         items = (await c.reminders(name)).get("reminders", [])
     except ToolError as exc:
         if str(exc).startswith("no reminder list matches"):
-            return f"You don't have a reminder list called {name}."
+            try:
+                names = await c.reminder_lists()
+            except ToolError:
+                names = []
+            have = f" Your lists are {join(names)}." if names else ""
+            return f"You don't have a reminder list called {name}.{have}"
         raise
     if not items:
         return f"Your {name} list is empty."
