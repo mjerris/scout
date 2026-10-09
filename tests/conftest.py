@@ -31,3 +31,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     import shutil
 
     shutil.rmtree(_TEST_HOME, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _full_scan_mail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests that fake Mail's full-scan script get it; tests/test_mail.py covers the range path."""
+    import scout.mail_mac as mail_mac
+
+    monkeypatch.setattr(mail_mac, "USE_RANGES", False)

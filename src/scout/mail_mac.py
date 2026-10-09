@@ -92,6 +92,90 @@ function run(argv) {
 }
 """
 
+# The fast path: the NEWEST messages of each inbox, fetched as ranges ("subject of
+# messages 1 thru 500"): one Apple event per property per inbox instead of a full scan.
+# Measured on the user's 58,732-message Google inbox: the full bulk scan took 12-15 s.
+# Which end of a mailbox is newest is checked by comparing its first and last dates.
+# Dates come back as seconds since 2020-01-01 local (AppleScript integers stop at 2^29).
+_RECENT_AS = """
+on run argv
+  set n to (item 1 of argv) as integer
+  set unitSep to character id 31
+  set recSep to character id 30
+  set epoch to current date
+  set year of epoch to 2020
+  set month of epoch to January
+  set day of epoch to 1
+  set time of epoch to 0
+  set out to {}
+  tell application "Mail"
+    repeat with mb in (mailboxes of inbox)
+      set cnt to count messages of mb
+      if cnt > 0 then
+        set k to n
+        if k > cnt then set k to cnt
+        if (date received of message 1 of mb) >= (date received of message cnt of mb) then
+          set a to 1
+          set b to k
+        else
+          set a to cnt - k + 1
+          set b to cnt
+        end if
+        set ids to id of messages a thru b of mb
+        set ds to date received of messages a thru b of mb
+        set subs to subject of messages a thru b of mb
+        set froms to sender of messages a thru b of mb
+        set rds to read status of messages a thru b of mb
+        repeat with i from 1 to count ids
+          set subj to item i of subs
+          if subj is missing value then set subj to ""
+          set end of out to ((item i of ids) as text) & unitSep & (((item i of ds) - epoch) as integer as text) & unitSep & (item i of froms) & unitSep & subj & unitSep & ((item i of rds) as text)
+        end repeat
+      end if
+    end repeat
+  end tell
+  set AppleScript's text item delimiters to recSep
+  return out as text
+end run
+"""
+USE_RANGES = True  # the fast range path (tests that fake the full-scan script turn it off)
+SCAN_RECENT = 300  # newest messages per inbox for "recent"/"unread"
+SCAN_SEARCH = 1500  # newest messages per inbox a sender/subject search looks through
+
+
+def _parse_recent(text: str) -> list[dict[str, Any]]:
+    epoch = dt.datetime(2020, 1, 1).astimezone()
+    rows = []
+    for rec in text.split("\x1e"):
+        parts = rec.split("\x1f")
+        if len(parts) != 5 or not parts[0].strip().lstrip("-").isdigit():
+            continue
+        mid, secs, sender, subject, read = parts
+        try:
+            when = epoch + dt.timedelta(seconds=int(secs))
+        except ValueError:
+            continue
+        rows.append(
+            {
+                "id": int(mid),
+                "date": when.isoformat(),
+                "sender": sender.strip(),
+                "subject": subject.strip(),
+                "read": read.strip() == "true",
+            }
+        )
+    return rows
+
+
+async def _recent_by_range(scan: int, run: Runner | None = None) -> list[dict[str, Any]]:
+    out = await (run or _applescript)(_RECENT_AS, str(scan))
+    return _parse_recent(out)
+
+
+async def _applescript(script: str, *args: str, timeout: float = 30.0) -> str:
+    return await mac._run("/usr/bin/osascript", "-e", script, *args, timeout=timeout)
+
+
 _READ = r"""
 function run(argv) {
   const id = parseInt(argv[0]), limit = parseInt(argv[1]);
@@ -398,6 +482,26 @@ async def listing(
             )
             return data
     t0 = time.monotonic()
+    if run is _jxa and USE_RANGES:  # the real Mail: try the fast newest-first range path first
+        try:
+            rows = await _recent_by_range(SCAN_SEARCH if q else SCAN_RECENT)
+        except ToolError as exc:
+            log.warning("mail: the fast range listing failed (%s); scanning everything", exc)
+        else:
+            since = dt.datetime.now().astimezone() - dt.timedelta(days=days)
+            keep = [
+                r for r in rows
+                if dt.datetime.fromisoformat(r["date"]) >= since
+                and not (unread and r["read"])
+                and (not q or q.lower() in r["subject"].lower() or q.lower() in r["sender"].lower())
+            ]  # fmt: skip
+            keep.sort(key=lambda r: r["date"], reverse=True)
+            idx.forget([r["id"] for r in keep])
+            log.info(
+                "mail: listed the newest %d per inbox in %d ms (%d matched)",
+                SCAN_SEARCH if q else SCAN_RECENT, (time.monotonic() - t0) * 1000, len(keep),
+            )  # fmt: skip
+            return {"messages": keep[:n], "considered": len(rows), "days": days}
     data = _timed(await _call(run, _LIST, str(n), "true" if unread else "false", q, str(days)))
     idx.forget([int(m["id"]) for m in data.get("messages", []) if isinstance(m.get("id"), int)])
     took = time.monotonic() - t0
@@ -421,6 +525,10 @@ def _offer_setup(idx: Index, took: float) -> None:
     """A slow search because the helper can't read Mail's index: open the one-time
     setup (like the first messages question does) and say why, at most every 30 min."""
     if took < SLOW_S or idx.access not in ("denied", "missing") or not idx.ids_trusted:
+        return
+    from .config import load
+
+    if not load().messages.enabled:  # the helper (and its Full Disk Access) is turned off
         return
     now = idx.clock()
     if idx.offered_at is not None and now - idx.offered_at < OFFER_EVERY_S:
