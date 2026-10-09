@@ -138,7 +138,7 @@ on run argv
   return out as text
 end run
 """
-USE_RANGES = True  # the fast range path (tests that fake the full-scan script turn it off)
+USE_RANGES = False  # off: ranges timed out (>30 s) on the 58,732-message Google inbox too
 SCAN_RECENT = 300  # newest messages per inbox for "recent"/"unread"
 SCAN_SEARCH = 1500  # newest messages per inbox a sender/subject search looks through
 
