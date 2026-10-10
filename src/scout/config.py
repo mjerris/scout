@@ -232,6 +232,12 @@ class BriefingConfig:
 
 
 @dataclass
+class WeatherConfig:
+    # Where "what's the weather" means when no place is named, e.g. "Luther, Michigan".
+    home: str = ""
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -266,6 +272,7 @@ class Config:
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
     def path(self, p: str) -> Path:

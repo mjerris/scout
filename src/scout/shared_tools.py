@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, freebusy, mail_mac, messages_mac, privacy, reminders_mac
+from . import calendar_mac, freebusy, mail_mac, messages_mac, privacy, reminders_mac, weather
 
 
 @dataclass(frozen=True)
@@ -218,6 +218,18 @@ SHARED = (
         lambda a: messages_mac.chat(
             a.get("chat"), a.get("count"), a.get("days"), view=privacy.current().messages_view
         ),
+    ),
+)
+
+SHARED = (
+    *SHARED,
+    SharedTool(
+        "weather",
+        "Current weather, the next 24 hours and 7 days for a place (free Open-Meteo forecast, "
+        "no sign-in). place like 'Luther, Michigan' or 'Paris, France'; empty = the user's home "
+        "(weather.home). Exact values in °F and mph.",
+        _obj({"place": _STR}),
+        lambda a: weather.report_for(a.get("place")),
     ),
 )
 

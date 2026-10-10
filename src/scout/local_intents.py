@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac
+from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac, weather
 from .freebusy import clock as _clock
 from .freebusy import join
 from .mac import ToolError
@@ -77,6 +77,7 @@ class Context:
     events: Callable[..., Awaitable[dict[str, Any]]] = calendar_mac.event_data
     reminders: Callable[..., Awaitable[dict[str, Any]]] = reminders_mac.reminder_data
     reminder_lists: Callable[[], Awaitable[list[str]]] = reminders_mac.list_names
+    weather: Callable[[str], Awaitable[dict[str, Any]]] = weather.forecast
     mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
     hours: Callable[[], freebusy.Hours] = freebusy.work_hours
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
@@ -452,6 +453,46 @@ async def _repeat(m: re.Match[str], c: Context) -> str:
         return "I haven't said anything yet."
     who, text = last
     return text if who == "Scout" else f"{who.split('#')[0]} said: {text}"
+
+
+_PLACE = (
+    r"(?: (?:in|for|at|near) (?!(?:today|tonight|tomorrow|now|right now|this evening)\b)"
+    r"(?P<place>[a-z][a-z .'-]*?(?:, ?[a-z][a-z .'-]*?)?))?"
+)
+
+
+@_rule(
+    r"(?:what(?:'s| is) the |how(?:'s| is) the |)(?P<what>weather|forecast|wind|temperature)"
+    r"(?: forecast)?(?: like)?"
+    + _PLACE
+    + r"(?: (?:for |this )?(?P<when>today|tonight|tomorrow|right now|now|this evening|evening))?"
+    + _PLACE.replace("place", "place2")
+)
+async def _weather(m: re.Match[str], c: Context) -> str | None:
+    place = m.group("place") or m.group("place2") or ""
+    when = (
+        (m.group("when") or "now")
+        .replace("right now", "now")
+        .replace("this evening", "tonight")
+        .replace("evening", "tonight")
+    )
+    if m.group("what") == "wind" and when == "now":
+        when = "wind"
+    data = await c.weather(place.strip())
+    return weather.speak(data, when)
+
+
+@_rule(
+    r"(?:is it|will it|is it going to|are we going to get) (?:rain|snow)(?:ing)?"
+    + _PLACE
+    + r"(?: (?P<when>today|tonight|tomorrow))?"
+)
+async def _rain(m: re.Match[str], c: Context) -> str | None:
+    when = m.group("when") or "today"
+    data = await c.weather((m.group("place") or "").strip())
+    return weather.speak(
+        data, "tonight" if when == "tonight" else f"rain-{when}" if when == "tomorrow" else "rain"
+    )
 
 
 async def answer(text: str, ctx: Context) -> str | None:
