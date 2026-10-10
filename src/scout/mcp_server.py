@@ -367,6 +367,11 @@ async def messages_chat(chat: str, count: int = 20, days: int = 30) -> str:
     return await _tool("messages_chat", {"chat": chat, "count": count, "days": days})
 
 
+@mcp.tool(description=_doc("weather"))
+async def weather(place: str = "") -> str:
+    return await _tool("weather", {"place": place or None})
+
+
 def main() -> None:
     mcp.run("stdio")
 
