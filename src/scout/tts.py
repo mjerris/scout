@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import functools
 import logging
 import re
@@ -60,6 +61,8 @@ class Speaker:
         self._audio: asyncio.Queue[tuple[int, np.ndarray, str | None]] = asyncio.Queue()
         self._gen = 0  # bumped by stop() to discard queued work
         self._pending = 0  # items queued or in flight
+        self._kinds: collections.deque[bool] = collections.deque()  # per queued item: is it speech?
+        self._speech = 0  # speech items queued or in flight (chimes and ticks don't count)
         self._playing = False
         self._last_end = 0.0
         self._idle = asyncio.Event()
@@ -84,7 +87,15 @@ class Speaker:
         """True while speaking or within the echo tail after speaking."""
         return self._playing or self.busy or time.monotonic() - self._last_end < self.echo_tail
 
+    @property
+    def speaking(self) -> bool:
+        """Words queued or playing, not just a chime or a tick (barge-in is about words)."""
+        return self._speech > 0
+
     def _enqueue(self, item: _Item) -> None:
+        is_speech = not isinstance(item, np.ndarray)
+        self._kinds.append(is_speech)
+        self._speech += is_speech
         self._pending += 1
         self._idle.clear()
         self._text.put_nowait((self._gen, item))
@@ -154,6 +165,8 @@ class Speaker:
         await self._idle.wait()
 
     def _done_one(self) -> None:
+        if self._kinds and self._kinds.popleft():
+            self._speech = max(0, self._speech - 1)
         self._pending -= 1
         if self._pending <= 0:
             self._pending = 0

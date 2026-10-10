@@ -34,6 +34,11 @@ class FakeSpeaker:
         self.busy = False
         self.played: list[tuple[float, float, str]] = []  # (start, end, text)
         self.idle_delay = 0.0
+        self.words: bool | None = None  # None: words whenever busy
+
+    @property
+    def speaking(self) -> bool:
+        return self.busy if self.words is None else self.words
 
     def speak(self, text: str, voice: str | None = None) -> None:
         self.said.append(text)
@@ -551,6 +556,8 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
         spk._audio = asyncio.Queue()
         spk._gen = 0
         spk._pending = 0
+        spk._kinds = deque()
+        spk._speech = 0
         spk._playing = False
         spk._last_end = 0.0
         spk._idle = asyncio.Event()
@@ -831,3 +838,71 @@ def test_mcp_result_shows_replies_relayed_through_the_room() -> None:
 
     out = describe({"status": "ok", "spoke": True, "relayed": ["yes go ahead"]}, wait_for_response=False)
     assert out == '(spoken)\nThe user also answered you earlier, through the room (relayed): "yes go ahead"'
+
+
+# --- the cut-offs heard live on 2026-10-10 --------------------------------------------------
+
+
+def test_barge_in_ignores_the_heard_you_chime() -> None:
+    """Talking while only the 'heard you' chime or a working tick plays must not stop
+    anything: it cancelled the request that had just started."""
+
+    async def go() -> int:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.busy = True
+        r.spk.words = False  # a chime, not words
+        r.a.on_speech_onset(while_speaking=True)
+        await asyncio.sleep(0.05)
+        return r.spk.stopped
+
+    assert run(go()) == 0
+
+
+def test_talking_over_a_permission_question_answers_it() -> None:
+    """Barging into "Run curl...?" used to answer it "no"; now the speech is the answer."""
+
+    async def go() -> bool | str | None:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.idle_delay = 0.05  # the question is still being spoken
+        task = asyncio.create_task(r.a._confirm("Run the weather lookup?", "run: curl api.weather.gov"))
+        await asyncio.sleep(0.01)
+        r.spk.busy = True
+        r.a.on_speech_onset(while_speaking=True)  # "yes" begins over the question
+        onset = time.monotonic()
+        await asyncio.sleep(0.01)
+        r.spk.busy = False
+        assert not task.done()  # still waiting for the answer, not denied
+        await asyncio.sleep(0.06)
+        await hear(r, "Yes.", started=onset)
+        return await task
+
+    assert run(go()) is True
+
+
+def test_the_rest_of_a_split_request_is_rejoined(monkeypatch: pytest.MonkeyPatch) -> None:
+    """'What time do those winds...' / '...forecast to start' arrived as two utterances;
+    the second was dropped as 'busy' and Claude answered half a question."""
+
+    async def go() -> tuple[str | None, bool]:
+        r = make()
+        r.a.cfg.claude.local_first = False
+        gate = asyncio.Event()
+
+        async def slow_ask(text: str) -> AsyncIterator[tuple[str, Any]]:
+            await gate.wait()
+            if False:
+                yield "text", ""
+
+        monkeypatch.setattr(r.a.brain, "ask", slow_ask)
+        monkeypatch.setattr(r.a.brain, "interrupt", lambda: asyncio.sleep(0))
+        r.a.start_turn("What time do those winds...")
+        await asyncio.sleep(0.02)
+        await hear(r, "forecast to start.", started=time.monotonic())
+        queued, silenced = r.a._queued, r.a._silence_turn
+        gate.set()
+        return queued, silenced
+
+    queued, silenced = run(go())
+    assert queued == "What time do those winds forecast to start." and silenced
