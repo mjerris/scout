@@ -670,3 +670,37 @@ def test_mic_change_is_announced_plainly() -> None:
         _mic_change("USB Audio Device", "OBSBOT Tiny 3 Microphone", "OBSBOT")
         == "The OBSBOT Tiny 3 microphone is back."
     )
+
+
+def test_the_tv_falls_back_to_the_mac_speakers_and_its_delay_stays_with_it() -> None:
+    """Seen three times overnight: the TV switched off and Scout crashed until it returned."""
+    from scout.audio_plain import resolve_device
+
+    outs: list[dict[str, Any]] = [
+        {"name": "Mac mini Speakers", "max_input_channels": 0, "max_output_channels": 2},
+        {"name": "SAMSUNG", "max_input_channels": 0, "max_output_channels": 8},
+    ]
+    assert resolve_device("SAMSUNG|default|any", "output", outs, default=0) == 1
+    assert resolve_device("SAMSUNG|default|any", "output", outs[:1], default=0) == 0  # TV off
+
+    async def go() -> tuple[int, int]:
+        delays = []
+        for name in ("SAMSUNG", "Mac mini Speakers"):
+
+            class Named(FakeSound):
+                def resolve(self, spec: str, kind: str) -> int | None:
+                    return 0
+
+                def device_name(self, device: int | None, kind: str, out: str = name) -> str:
+                    return out
+
+            io = WebRTCAudioIO(
+                "3", "SAMSUNG|default|any", sound=Named(), watch_devices=False, output_delay_ms=200
+            )
+            await io.start(asyncio.get_running_loop(), lambda kind, info: None)
+            delays.append(io.stats()["delay_ms"])
+            await io.close()
+        return delays[0], delays[1]
+
+    on_tv, on_mac = asyncio.run(go())
+    assert on_tv == 210 and on_mac == 10  # the TV's 200 ms only on the TV

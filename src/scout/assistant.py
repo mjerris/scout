@@ -79,7 +79,10 @@ class Assistant:
         # so talk-over is real speech (barge-in) and text-based echo stripping is off.
         self.echo_cancelled = echo_cancelled
         self.echo_stats: Callable[[], dict[str, Any]] = dict  # the voice layer's stats(); set by the app
-        self._message_barged: float | None = None  # onset of a barge into a session's message
+        self._message_barged: float | None = None
+        self._confirm_barged: float | None = None  # onset of an answer said over the question
+        self._turn_text, self._turn_started, self._turn_spoke = "", 0.0, False
+        self._rejoined = False  # onset of a barge into a session's message
         self.asr = asr
         self.speaker = speaker
         self.pronounce = pronounce or Pronouncer(DATA / "pronounce.txt")
@@ -191,6 +194,7 @@ class Assistant:
 
     def say(self, text: str) -> None:
         """Speak where the current turn's replies go."""
+        self._turn_spoke = True
         if self._out["mini"]:
             self.speaker.speak(text)
         if self._out["client"]:
@@ -469,6 +473,21 @@ class Assistant:
                 self._queued_out = {"mini": speak, "client": client}
                 reply("Okay, I'll do that next.")
                 return None
+            if (
+                not self._turn_spoke
+                and self._turn_text
+                and time.monotonic() - self._turn_started < 6.0
+                and speak == self._out.get("mini", True)
+            ):
+                # The end of a request that a pause split off ("what time do those winds ..."
+                # / "... forecast to start"): drop the half-answered turn, ask the whole thing.
+                whole = f"{self._turn_text.rstrip(' .…')} {text}".strip()
+                log.info("rejoined a split request: %s", whole)
+                self.emit("heard", text=text, **via)
+                self._silence_turn, self._rejoined = True, True
+                self._spawn(self.brain.interrupt())
+                self._queued, self._queued_out = whole, {"mini": speak, "client": client}
+                return None
             return ignore("busy with another request (say the wake word to queue it)")
 
         if cmd is None:
@@ -682,7 +701,9 @@ class Assistant:
         speech while we're talking is the user talking over us: stop."""
         if not (while_speaking and self.echo_cancelled and self.cfg.audio.barge_in):
             return
-        if not self.speaker.busy or self.mic_muted:
+        # Words, not chimes: barging into the "heard you" chime or a working tick
+        # cancelled the request that had just started (heard live).
+        if not getattr(self.speaker, "speaking", self.speaker.busy) or self.mic_muted:
             return
         if not self.echo_settled():
             log.info("barge-in held: the echo canceller is still adapting (%s)", self._echo_note())
@@ -711,6 +732,12 @@ class Assistant:
             self._message_barged = onset
             self.speaker.stop()
             return
+        if self.state == "confirming":
+            # Talking over the question is the answer: stop the question, keep listening.
+            # (A full stop answered "no" for the user: heard live, it denied a weather lookup.)
+            self._confirm_barged = onset
+            self.speaker.stop()
+            return
         heard_in_room = self._out["mini"]
         await self.stop()
         if heard_in_room:
@@ -732,6 +759,7 @@ class Assistant:
     def start_turn(self, text: str, speak: bool = True, client: str | None = None) -> bool:
         if self.busy:
             return False
+        self._turn_text, self._turn_started, self._turn_spoke = text, time.monotonic(), False
         self._turn = asyncio.create_task(self._run_turn(text, speak, client))
         return True
 
@@ -951,7 +979,8 @@ class Assistant:
             self._out = {"mini": True, "client": None}
             queued, self._queued = self._queued, None
             out = self._queued_out
-            if queued and not self._silence_turn and queued.strip():
+            rejoined, self._rejoined = self._rejoined, False
+            if queued and (not self._silence_turn or rejoined) and queued.strip():
                 asyncio.get_running_loop().call_soon(self._start_queued, queued, out)
 
     def _start_queued(self, text: str, out: dict[str, Any]) -> None:
@@ -1000,7 +1029,9 @@ class Assistant:
                 self.emit("say", text=spoken, to=out["client"])
             await self.speaker.wait_idle()
             if not fut.done():
-                self._confirm_started = time.monotonic()
+                barged, self._confirm_barged = self._confirm_barged, None
+                # An answer begun over the question counts from when it began.
+                self._confirm_started = (barged - 0.2) if barged else time.monotonic()
             try:
                 ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
             except TimeoutError:

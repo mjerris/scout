@@ -80,10 +80,15 @@ async def _amain(cfg: config_mod.Config) -> None:
         else cfg.audio.input_device
     )
     await _wait_for_microphone(input_spec)
+    output_spec = (
+        "|".join([cfg.audio.output_device, *cfg.audio.output_fallback])
+        if cfg.audio.output_device and cfg.audio.output_fallback
+        else cfg.audio.output_device
+    )
     io = audio_io.create(
         cfg.audio.backend,
         input_spec,
-        cfg.audio.output_device,
+        output_spec,
         noise_suppression=cfg.audio.noise_suppression,
         output_delay_ms=cfg.audio.output_delay_ms,
     )

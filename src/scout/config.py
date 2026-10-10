@@ -40,6 +40,10 @@ class AudioConfig:
     # When that mic is gone, try these in order ("any" = any other mic except a nearby
     # iPhone's or iPad's), and switch back as soon as it returns. [] = wait for it.
     input_fallback: list[str] = field(default_factory=lambda: ["any"])
+    # When the output_device is gone (the TV switched off), play here instead, and switch
+    # back when it returns: "default" = the Mac's default output, "any" = any output.
+    # Before this, a TV turned off crashed Scout until it came back (seen three times).
+    output_fallback: list[str] = field(default_factory=lambda: ["default", "any"])
     output_device: str = ""
     vad_aggressiveness: int = 2  # 0-3, higher filters more non-speech
     silence_ms: int = 1200  # trailing silence that ends an utterance

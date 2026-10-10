@@ -119,7 +119,11 @@ class WebRTCAudioIO:
         # PortAudio can't see (a TV's sound processing: ~750 ms measured on a Samsung
         # over HDMI). It's added to the canceller's delay hint and to when playback
         # counts as finished.
-        self._extra_out = max(0.0, output_delay_ms) / 1000
+        self._delay_out = max(0.0, output_delay_ms) / 1000
+        self._extra_out = 0.0  # set per open: the delay belongs to the preferred device only
+        # The preferred output's name (the first part of a "TV|default" spec): its delay
+        # doesn't apply when playing on a fallback.
+        self._delay_for = output_device.split("|", 1)[0].strip().lower()
         self.frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
         self._sd: SoundAPI = sound if sound is not None else SoundDevice()
         self._watch = watch_devices
@@ -185,6 +189,8 @@ class WebRTCAudioIO:
             callback=self._callback,
         )
         self._latency = _total_latency(stream.latency)
+        out_name = self._sd.device_name(out_dev, "output").lower()
+        self._extra_out = self._delay_out if (not self._delay_for or self._delay_for in out_name) else 0.0
         # The reference block is processed when it is written; its echo comes
         # back after the output and input latencies of the stream.
         self._aec.set_delay_ms(1000 * (sum(self._latency) + self._extra_out))
