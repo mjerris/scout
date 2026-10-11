@@ -35,6 +35,12 @@ class FakeSpeaker:
         self.played: list[tuple[float, float, str]] = []  # (start, end, text)
         self.idle_delay = 0.0
         self.words: bool | None = None  # None: words whenever busy
+        self.ducked = False
+        self.ducks = 0
+
+    def duck(self, on: bool) -> None:
+        self.ducked = on
+        self.ducks += on
 
     @property
     def speaking(self) -> bool:
@@ -48,6 +54,7 @@ class FakeSpeaker:
 
     def stop(self) -> None:
         self.stopped += 1
+        self.ducked = False
 
     async def wait_idle(self) -> None:
         await asyncio.sleep(self.idle_delay)
@@ -584,12 +591,50 @@ def test_barge_in_stops_a_room_reply_and_opens_a_follow_up() -> None:
         r = make()
         r.a.echo_cancelled = True
         r.spk.busy = True  # a reply is playing
+        onset = time.monotonic()
         r.a.on_speech_onset(while_speaking=True)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
+        assert r.spk.ducked and r.spk.stopped == 0  # lowered until the words are heard
+        await hear(r, "wait, actually make it Saturday", started=onset)
         return r.spk.stopped, r.a.follow_up_until > time.monotonic()
 
     stopped, follow_up = run(go())
     assert stopped >= 1 and follow_up
+
+
+def test_our_own_voice_leaking_past_the_canceller_is_not_a_barge_in() -> None:
+    """Heard live on the TV: the reply's own words ("It's 58") started "speech" and
+    stopped the reply. Now playback ducks, the words are checked, and it resumes."""
+
+    async def go() -> tuple[int, bool, int, list[str]]:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.busy = True
+        now = time.monotonic()
+        r.spk.played = [(now - 1.0, now + 5.0, "In Luther it's 58 and mostly clear, wind southeast at 6.")]
+        r.a.on_speech_onset(while_speaking=True)
+        await asyncio.sleep(0.01)
+        await hear(r, "It's 58.", echo=True, started=now)
+        return r.spk.stopped, r.spk.ducked, r.spk.ducks, r.spk.said
+
+    stopped, ducked, ducks, said = run(go())
+    assert (stopped, ducked, ducks, said) == (0, False, 1, [])
+
+
+def test_a_ducked_reply_resumes_when_no_words_come(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scout import assistant
+
+    monkeypatch.setattr(assistant, "BARGE_WAIT_S", 0.02)
+
+    async def go() -> tuple[int, bool]:
+        r = make()
+        r.a.echo_cancelled = True
+        r.spk.busy = True
+        r.a.on_speech_onset(while_speaking=True)  # a cough
+        await asyncio.sleep(0.05)
+        return r.spk.stopped, r.spk.ducked
+
+    assert run(go()) == (0, False)
 
 
 @pytest.mark.parametrize(
@@ -610,7 +655,7 @@ def test_barge_in_waits_for_the_echo_canceller_to_adapt(stats: dict[str, Any], b
         r.spk.busy = True
         r.a.on_speech_onset(while_speaking=True)
         await asyncio.sleep(0.05)
-        return r.spk.stopped
+        return r.spk.ducks
 
     assert (run(go()) >= 1) is barges
 
@@ -621,7 +666,7 @@ def test_no_barge_in_without_an_echo_canceller() -> None:
         r.spk.busy = True
         r.a.on_speech_onset(while_speaking=True)  # plain backend: this is our own echo
         await asyncio.sleep(0.05)
-        return r.spk.stopped
+        return r.spk.stopped + r.spk.ducks
 
     assert run(go()) == 0
 
@@ -854,7 +899,7 @@ def test_barge_in_ignores_the_heard_you_chime() -> None:
         r.spk.words = False  # a chime, not words
         r.a.on_speech_onset(while_speaking=True)
         await asyncio.sleep(0.05)
-        return r.spk.stopped
+        return r.spk.stopped + r.spk.ducks
 
     assert run(go()) == 0
 

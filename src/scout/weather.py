@@ -224,6 +224,23 @@ def speak(data: dict[str, Any], when: str = "now") -> str:
             f"Tonight in {where}: down to {round(low)}, {CODES.get(int(night[0]['code']), 'unclear')}, "
             f"winds up to {round(wind)}, {rain} percent chance of rain."
         )
+    if when == "morning":
+        rows = _hours(data)
+        today = (c.get("time") or "")[:10]
+        # The next morning still ahead: this one if it's before 10, otherwise tomorrow's.
+        morning = [r for r in rows if "06" <= r["time"][11:13] <= "11"]
+        if morning:
+            day = morning[0]["time"][:10]
+            morning = [r for r in morning if r["time"][:10] == day]
+        if not morning:
+            return speak(data, "tomorrow")
+        temps = [r["temp"] for r in morning]
+        label = "This morning" if day == today else "Tomorrow morning"
+        return (
+            f"{label} in {where}: {round(min(temps))} to {round(max(temps))}, "
+            f"{CODES.get(int(morning[len(morning) // 2]['code']), 'unclear')}, winds up to "
+            f"{round(max(r['wind'] for r in morning))}, {max(r['rain'] for r in morning)} percent chance of rain."
+        )
     if when == "wind":
         rows = _hours(data)
         peak = max(rows, key=lambda r: r["gust"]) if rows else None

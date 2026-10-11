@@ -3,7 +3,7 @@
 import pytest
 
 from scout.config import WakeConfig
-from scout.speech import is_reset, is_stop, parse_yes_no, strip_own_speech, strip_wake, to_speech
+from scout.speech import is_reset, is_stop, mostly_ours, parse_yes_no, strip_own_speech, strip_wake, to_speech
 
 W = WakeConfig()
 
@@ -246,3 +246,18 @@ def test_web_address_senders_are_said_by_name(sender: str, name: str) -> None:
     from scout.summary import sender_name
 
     assert sender_name(sender) == name
+
+
+@pytest.mark.parametrize(
+    ("heard", "ours"),
+    [
+        ("It's 58.", True),  # heard live: the TV's echo of "In Luther it's 58 and mostly clear"
+        ("mostly clear, wind southeast at six", True),
+        ("stop", False),
+        ("what about tomorrow morning", False),
+        ("wait, is it 58 there now?", False),
+    ],
+)
+def test_a_clip_that_is_only_our_own_speech(heard: str, ours: bool) -> None:
+    said = "In Luther it's 58 and mostly clear, wind southeast at 6."
+    assert mostly_ours(heard, said) is ours

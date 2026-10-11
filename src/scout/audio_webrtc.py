@@ -136,6 +136,8 @@ class WebRTCAudioIO:
         self._assembler = FrameAssembler()
         self._ring = PlaybackRing()
         self._out_block = np.zeros(BLOCK, np.int16)
+        self._gain = 1.0  # playback volume now; ramps to _gain_target over one block
+        self._gain_target = 1.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._on_event: EventHandler = lambda _kind, _info: None
         self._stream: Stream | None = None
@@ -247,6 +249,11 @@ class WebRTCAudioIO:
                 return
             out = self._out_block
             finished = self._ring.read_into(out)
+            if self._gain != 1.0 or self._gain_target != 1.0:
+                # Ducked (or ramping back): the canceller gets the same scaled signal it plays.
+                ramp = np.linspace(self._gain, self._gain_target, BLOCK, dtype=np.float32)
+                out[:] = np.rint(out * ramp).astype(np.int16)
+                self._gain = self._gain_target
             outdata[:] = out[:, None]  # the same mono signal on every speaker channel
             cleaned = self._aec.process(indata[:, 0], out)
             pcm = np.clip(np.rint(self._decim.process(cleaned)), -32768, 32767).astype("<i2").tobytes()
@@ -306,6 +313,10 @@ class WebRTCAudioIO:
         self._handles[handle.id] = handle
         self._ring.push(handle.id, pcm)
         return handle
+
+    def set_gain(self, gain: float) -> None:
+        """Playback volume, 0..1, applied from the next audio block (ramped, no click)."""
+        self._gain_target = min(1.0, max(0.0, float(gain)))
 
     def stop_playback(self) -> None:
         self._ring.clear()
