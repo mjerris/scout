@@ -142,6 +142,15 @@ class Speaker:
         with self._play_lock:
             self._gen += 1
             self.io.stop_playback()
+        self.duck(False)
+
+    DUCK_GAIN = 0.2  # about -14 dB: quiet enough to talk over, loud enough to resume
+
+    def duck(self, on: bool) -> None:
+        """Lower (or restore) playback volume, where the audio backend can."""
+        set_gain = getattr(self.io, "set_gain", None)
+        if set_gain is not None:
+            set_gain(self.DUCK_GAIN if on else 1.0)
 
     async def synth_wav(self, text: str, voice: str | None = None) -> bytes:
         """Synthesize text to WAV bytes without playing it (for the web page)."""

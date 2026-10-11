@@ -67,6 +67,8 @@ def test_tonight_and_wind_use_the_hourly_forecast() -> None:
         ("what's the wind forecast for tonight", "", "Tonight in Luther"),
         ("will it rain tomorrow", "", "Tomorrow in Luther: 60 percent"),
         ("what's the weather like tomorrow", "", "Tomorrow in Luther: light rain"),
+        ("What's the weather in Luther, Michigan in the morning?", "luther michigan", "Tomorrow morning in Luther: "),  # heard live
+        ("what's the weather tomorrow morning", "", "Tomorrow morning in Luther: "),
     ],
 )  # fmt: skip
 def test_weather_questions_are_answered_locally(text: str, place: str, start: str) -> None:
@@ -135,3 +137,10 @@ def test_spoken_place_names_without_commas_find_their_state(
     monkeypatch.setattr(weather, "PLACES", tmp_path / "places.json")
     found = asyncio.run(weather.geocode("luther michigan", Session()))  # type: ignore[arg-type]
     assert seen[0]["name"] == "luther" and found["region"] == "Michigan" and found["latitude"] == 44.04
+
+
+def test_the_morning_forecast_is_the_next_morning_ahead() -> None:
+    # DATA is 1:30 PM on the 10th: the next morning is the 11th, 6 to 11 AM.
+    assert weather.speak(DATA, "morning") == (
+        "Tomorrow morning in Luther: 60 to 63, cloudy, winds up to 10, 1 percent chance of rain."
+    )

@@ -465,7 +465,7 @@ _PLACE = (
     r"(?:what(?:'s| is) the |how(?:'s| is) the |)(?P<what>weather|forecast|wind|temperature)"
     r"(?: forecast)?(?: like)?"
     + _PLACE
-    + r"(?: (?:for |this )?(?P<when>today|tonight|tomorrow|right now|now|this evening|evening))?"
+    + r"(?: (?:for |this |in the )?(?P<when>tomorrow morning|today|tonight|tomorrow|right now|now|this evening|evening|morning))?"
     + _PLACE.replace("place", "place2")
 )
 async def _weather(m: re.Match[str], c: Context) -> str | None:
@@ -474,6 +474,7 @@ async def _weather(m: re.Match[str], c: Context) -> str | None:
         (m.group("when") or "now")
         .replace("right now", "now")
         .replace("this evening", "tonight")
+        .replace("tomorrow morning", "morning")
         .replace("evening", "tonight")
     )
     if m.group("what") == "wind" and when == "now":

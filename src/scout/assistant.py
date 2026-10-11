@@ -31,6 +31,9 @@ from .tts import Speaker
 
 log = logging.getLogger(__name__)
 
+BARGE_WAIT_S = 12.0  # a ducked reply waits this long for the words before resuming
+BARGE_MATCH_S = 1.0  # an utterance starting this close to the onset is the one that barged
+
 # Requests whose answer needs the calendar or the inbox: prefetched into the context.
 _CALENDARISH = re.compile(
     r"\b(calendar|schedule|agenda|meetings?|appointments?|events?|busy|free at|free on|free this)\b"
@@ -81,6 +84,7 @@ class Assistant:
         self.echo_stats: Callable[[], dict[str, Any]] = dict  # the voice layer's stats(); set by the app
         self._message_barged: float | None = None
         self._confirm_barged: float | None = None  # onset of an answer said over the question
+        self._barge_pending: float | None = None  # onset of speech over a reply, until its words are heard
         self._turn_text, self._turn_started, self._turn_spoke = "", 0.0, False
         self._rejoined = False  # onset of a barge into a session's message
         self.asr = asr
@@ -290,6 +294,11 @@ class Assistant:
         t.text = self.pronounce.stt(t.text)
         self._save_utterance(utt, t)
         text = t.text
+        if self._barge_pending is not None and utt.started >= self._barge_pending - BARGE_MATCH_S:
+            words = await self._barge_check(utt, text)
+            if words is None:
+                return
+            text = words
         if not text:
             return
         a = utt.stats
@@ -708,7 +717,50 @@ class Assistant:
         if not self.echo_settled():
             log.info("barge-in held: the echo canceller is still adapting (%s)", self._echo_note())
             return
-        self._spawn(self._barge_in())
+        # Not a stop yet: on the TV our own voice leaks past the canceller loudly enough to
+        # start "speech" (heard live, twice). Duck, and decide when the words are heard.
+        if self._barge_pending is not None:
+            return
+        onset = time.monotonic()
+        self._barge_pending = onset
+        duck = getattr(self.speaker, "duck", None)
+        if duck is not None:
+            duck(True)
+        log.info("barge-in?: playback lowered until the words are heard")
+        asyncio.get_running_loop().call_later(BARGE_WAIT_S, self._barge_expire, onset)
+
+    def _barge_expire(self, onset: float) -> None:
+        """No words came of it (a cough, a door): back to full volume."""
+        if self._barge_pending == onset:
+            self._barge_resume("no words heard")
+
+    def _barge_resume(self, why: str) -> None:
+        self._barge_pending = None
+        duck = getattr(self.speaker, "duck", None)
+        if duck is not None:
+            duck(False)
+        log.info("barge-in cancelled (%s): back to full volume", why)
+
+    async def _barge_check(self, utt: Utterance, text: str) -> str | None:
+        """For the utterance that began over our reply: the user's words, after taking out
+        our own (barging in for them), or None when it was only our voice (resume)."""
+        onset = self._barge_pending or utt.started
+        spoken = self.speaker.recent_speech(since=utt.started)
+        alt = self.pronounce.tts(spoken)
+        if not text or gate.junk(text) or speech.mostly_ours(text, spoken, alt):
+            self._barge_resume(f"heard our own voice: {text!r}" if text else "no words heard")
+            return None
+        words = speech.strip_own_speech(text, spoken, alt) or text
+        self._barge_pending = None
+        if self.state == "agent" and self._listen is not None:
+            # The session's message finished and we're listening for the reply: just hear it.
+            log.info("barge-in: the message had finished; taking this as the reply")
+        else:
+            await self._barge_in(onset)
+        duck = getattr(self.speaker, "duck", None)
+        if duck is not None:
+            duck(False)
+        return words
 
     def echo_settled(self) -> bool:
         """Has the echo canceller adapted enough that speech during playback is the user?"""
@@ -723,8 +775,8 @@ class Assistant:
         st = self.echo_stats()
         return f"{st.get('erle_db')} dB removed after {st.get('echo_learned_s')} s of playback"
 
-    async def _barge_in(self) -> None:
-        onset = time.monotonic()
+    async def _barge_in(self, onset: float | None = None) -> None:
+        onset = onset or time.monotonic()
         log.info("barge-in: stopping playback")
         self.emit("barge")
         if self.state == "agent" and self._listen is None:

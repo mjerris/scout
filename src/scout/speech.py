@@ -663,6 +663,21 @@ def _strip(heard: str, spoken: str) -> tuple[str, int]:
     return " ".join(left), len(left)
 
 
+def mostly_ours(heard: str, spoken: str, spoken_alt: str = "", share: float = 0.75) -> bool:
+    """Is a clip (nearly) all our own speech? For deciding a barge-in: our voice leaking
+    past the echo canceller comes back as a fragment of what we just said ("It's 58"),
+    which strip_own_speech rightly keeps when the user might have said it as a reply."""
+    h, _ = _numbers_as_digits(words(heard))
+    if not h:
+        return False
+    best = 0
+    for said in {spoken, spoken_alt} - {""}:
+        sp, _ = _numbers_as_digits(words(said))
+        m = difflib.SequenceMatcher(None, sp, h, autojunk=False)
+        best = max(best, sum(b.size for b in m.get_matching_blocks()))
+    return best >= share * len(h)
+
+
 def strip_own_speech(heard: str, spoken: str, spoken_alt: str = "") -> str:
     """Remove the assistant's own words (picked up by the mic) from a transcript,
     returning whatever the user said before, between and after them.
