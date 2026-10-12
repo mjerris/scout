@@ -89,3 +89,11 @@ at = ""  # e.g. "07:30" to hear the briefing every day; "brief me" works either 
 # Read iMessage and SMS history (read-only) through the scout-messages helper,
 # the only program given Full Disk Access. false = the messages_* tools refuse.
 enabled = true
+
+[starlink]
+# The Starlink dish's local API: status, outages, data used. Off unless turned on.
+# enabled = true
+# announce = true                 # say outages, recoveries and new alerts
+# announce_outage_s = 60
+# quiet_hours = "22:00-08:00"     # only logged in these hours
+# ignore_alerts = ["is_heating"]

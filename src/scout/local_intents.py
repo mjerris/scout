@@ -20,7 +20,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac, weather
+from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac, starlink, weather
+from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
 from .mac import ToolError
@@ -78,6 +79,9 @@ class Context:
     reminders: Callable[..., Awaitable[dict[str, Any]]] = reminders_mac.reminder_data
     reminder_lists: Callable[[], Awaitable[list[str]]] = reminders_mac.list_names
     weather: Callable[[str], Awaitable[dict[str, Any]]] = weather.forecast
+    starlink_on: Callable[[], bool] = lambda: load().starlink.enabled
+    starlink: Callable[[], Awaitable[dict[str, Any]]] = starlink.status
+    starlink_usage: Callable[[], dict[str, float]] = lambda: starlink.Usage().summary()
     mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
     hours: Callable[[], freebusy.Hours] = freebusy.work_hours
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
@@ -494,6 +498,45 @@ async def _rain(m: re.Match[str], c: Context) -> str | None:
     return weather.speak(
         data, "tonight" if when == "tonight" else f"rain-{when}" if when == "tomorrow" else "rain"
     )
+
+
+_DISH = r"(?:the )?(?:starlink|internet|connection|dish|wi-?fi)"
+
+
+@_rule(
+    r"(?:(?:is|how(?:'s| is)|what(?:'s| is)(?: up with)?|check) "
+    + _DISH
+    + r"(?: (?:down|out|up|working|ok|okay|online|offline|status|doing))?"
+    + r"|(?:starlink|dish) status|are we (?:online|offline))"
+)
+async def _starlink(m: re.Match[str], c: Context) -> str | None:
+    if not c.starlink_on():
+        return None
+    if (
+        "starlink" not in m.group(0)
+        and "dish" not in m.group(0)
+        and "online" not in m.group(0)
+        and "out" not in m.group(0)
+        and "down" not in m.group(0)
+    ):
+        return None  # "how's the wifi" alone: leave it to Claude
+    return starlink.speak(await c.starlink())
+
+
+@_rule(r"why is " + _DISH + r" (?:so )?(?:slow|bad|laggy|spotty|choppy|dropping|cutting out)")
+async def _starlink_slow(m: re.Match[str], c: Context) -> str | None:
+    if not c.starlink_on():
+        return None
+    return starlink.speak(await c.starlink(), "slow")
+
+
+@_rule(
+    r"how much (?:data|internet|starlink(?: data)?) (?:have we|did we|have i|did i) used?(?: (?:today|this month))?"
+)
+async def _starlink_usage(m: re.Match[str], c: Context) -> str | None:
+    if not c.starlink_on():
+        return None
+    return starlink.speak({}, "usage", c.starlink_usage())
 
 
 async def answer(text: str, ctx: Context) -> str | None:

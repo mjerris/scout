@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, freebusy, mail_mac, messages_mac, privacy, reminders_mac, weather
+from . import calendar_mac, freebusy, mail_mac, messages_mac, privacy, reminders_mac, starlink, weather
 
 
 @dataclass(frozen=True)
@@ -230,6 +230,15 @@ SHARED = (
         "(weather.home). Exact values in °F and mph.",
         _obj({"place": _STR}),
         lambda a: weather.report_for(a.get("place")),
+    ),
+    SharedTool(
+        "starlink",
+        "The Starlink dish's status from its local API: online or the outage cause, latency, "
+        "dropped pings (now and 15-minute average), current traffic, obstruction, alerts, "
+        "bandwidth limits, dropouts in the last hour, data used today and this month. "
+        "Read-only; works only when [starlink] enabled = true.",
+        _obj({}),
+        lambda a: starlink.report_now(),
     ),
 )
 
