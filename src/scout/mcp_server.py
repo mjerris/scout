@@ -372,6 +372,21 @@ async def weather(place: str = "") -> str:
     return await _tool("weather", {"place": place or None})
 
 
+@mcp.tool(description=_doc("note_add"))
+async def note_add(text: str, title: str = "") -> str:
+    return await _tool("note_add", {"text": text, "title": title or None})
+
+
+@mcp.tool(description=_doc("notes_find"))
+async def notes_find(query: str = "", limit: int = 5) -> str:
+    return await _tool("notes_find", {"query": query, "limit": limit})
+
+
+@mcp.tool(description=_doc("note_delete"))
+async def note_delete(id: int) -> str:
+    return await _tool("note_delete", {"id": id})
+
+
 @mcp.tool(description=_doc("local_search"))
 async def local_search(query: str, kinds: list[str] | None = None, days: int = 0, limit: int = 8) -> str:
     return await _tool("local_search", {"query": query, "kinds": kinds or [], "days": days, "limit": limit})

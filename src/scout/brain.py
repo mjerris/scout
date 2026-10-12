@@ -164,6 +164,8 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
         return _describe_mail(args)
     if name in REMINDER_WRITE_TOOLS or name in ("reminder_add", "reminder_complete"):
         return _describe_reminder(name, args)
+    if name in NOTE_WRITE_TOOLS or name == "note_delete":
+        return f"Delete note {args.get('id')}?", f"delete note {args.get('id')}"
     if name.startswith("mcp__"):
         parts = name.split("__")
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
@@ -301,8 +303,10 @@ CALENDAR_WRITE_TOOLS = ("mcp__voice_app__calendar_create_event",)
 MAIL_SEND_TOOLS = ("mcp__voice_app__mail_send",)
 # Adding or completing a reminder asks every time too.
 REMINDER_WRITE_TOOLS = ("mcp__voice_app__reminder_add", "mcp__voice_app__reminder_complete")
+# Deleting a note asks every time (adding one doesn't: it only adds).
+NOTE_WRITE_TOOLS = ("mcp__voice_app__note_delete",)
 # Every shared tool marked asks=True (shared_tools.SHARED) is in one of the lists above.
-ALWAYS_ASK_TOOLS = (*CALENDAR_WRITE_TOOLS, *MAIL_SEND_TOOLS, *REMINDER_WRITE_TOOLS)
+ALWAYS_ASK_TOOLS = (*CALENDAR_WRITE_TOOLS, *MAIL_SEND_TOOLS, *REMINDER_WRITE_TOOLS, *NOTE_WRITE_TOOLS)
 ASKING_TOOLS = (*URL_TOOLS, *ALWAYS_ASK_TOOLS)
 
 

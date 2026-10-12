@@ -39,3 +39,18 @@ def _full_scan_mail(monkeypatch: pytest.MonkeyPatch) -> None:
     import scout.mail_mac as mail_mac
 
     monkeypatch.setattr(mail_mac, "USE_RANGES", False)
+
+
+@pytest.fixture(autouse=True)
+def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Each test gets a fresh local store (index.py), with no embedding model, and the
+    Mac's Reminders as the list backend unless a test opts into Scout's own lists."""
+    import scout.index as index_mod
+    import scout.reminders_mac as reminders_mac
+
+    ix = index_mod.Index(tmp_path / "scout.db", None)
+    monkeypatch.setattr(index_mod, "_index", ix)
+    monkeypatch.setattr(reminders_mac, "_backend", lambda: "reminders")
+    monkeypatch.setattr(reminders_mac, "_fallback_until", 0.0)
+    yield
+    ix.close()

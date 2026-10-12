@@ -169,6 +169,7 @@ class Index:
     path: Path = DB
     embedder: Embedder | None = None
     min_similarity: float = 0.5  # a match by meaning alone (no shared words) needs this cosine
+    last_rowid: int | None = field(init=False, default=None)
     _conn: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
@@ -259,6 +260,18 @@ class Index:
                 (*_filter_args(kinds, since), limit),
             ).fetchall()
         return [_hit(r) for r in rows]
+
+    def sql(self, statement: str, args: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        """Run one statement on the store (for modules keeping their own tables here)."""
+        with self._lock:
+            cur = self._conn.execute(statement, tuple(args))
+            rows = cur.fetchall()
+            self.last_rowid = cur.lastrowid
+            return rows
+
+    def script(self, statements: str) -> None:
+        with self._lock:
+            self._conn.executescript(statements)
 
     # --- searching ------------------------------------------------------------------
 
