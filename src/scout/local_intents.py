@@ -20,7 +20,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import briefing, calendar_mac, freebusy, mac, mail_mac, maps, notes, reminders_mac, starlink, weather
+from . import (
+    briefing,
+    calendar_mac,
+    freebusy,
+    mac,
+    mail_mac,
+    maps,
+    notes,
+    trust,
+    reminders_mac,
+    starlink,
+    weather,
+)
 from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
@@ -584,6 +596,32 @@ async def _near(m: re.Match[str], c: Context) -> str | None:
     if maps.category(m.group("what")) is None:
         return None  # a name or something unusual: Claude, with the places_near tool
     return maps.speak_near(await c.near(m.group("what"), m.group("place")))
+
+
+_ACTION = r"(?P<action>(?:adding |add |new |marking |mark |completing |complete |finishing |checking off |creating |deleting |delete |removing |sending |send )?[a-z -]+?)"
+
+
+@_rule(
+    r"(?:always allow|(?:you can )?stop asking (?:me )?(?:about|before)|don't ask (?:me )?(?:about|before)|just go ahead with) "
+    + _ACTION
+)
+async def _trust_on(m: re.Match[str], c: Context) -> str | None:
+    action = trust.action_for(m.group("action"))
+    return trust.default().promote(action) if action else None
+
+
+@_rule(
+    r"(?:always ask (?:me )?(?:about|before)|(?:start )?ask(?:ing)? me (?:again )?(?:about|before)) "
+    + _ACTION
+)
+async def _trust_off(m: re.Match[str], c: Context) -> str | None:
+    action = trust.action_for(m.group("action"))
+    return trust.default().demote(action) if action else None
+
+
+@_rule(r"what (?:do you|can you) do without asking(?: me)?|what(?:'s| is) (?:on )?auto(?:matic)?")
+async def _trust_status(m: re.Match[str], c: Context) -> str:
+    return trust.default().speak_status()
 
 
 async def answer(text: str, ctx: Context) -> str | None:

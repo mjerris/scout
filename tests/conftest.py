@@ -56,6 +56,9 @@ def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     monkeypatch.setattr(index_mod, "_index", ix)
     monkeypatch.setattr(appdb_mod, "_db", appdb_mod.AppDB(tmp_path / "scout.db"))
     monkeypatch.setattr(memory_client_mod, "_memory", memory_mod.Memory(tmp_path / "memory.json"))
+    import scout.trust as trust_mod
+
+    monkeypatch.setattr(trust_mod, "_trust", trust_mod.Trust(tmp_path / "trust.json"))
     monkeypatch.setattr(reminders_mac, "_backend", lambda: "reminders")
     monkeypatch.setattr(reminders_mac, "_fallback_until", 0.0)
     yield
