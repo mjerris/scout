@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install/uninstall a user LaunchAgent that starts scout at login and restarts it if it dies.
-#   scripts/launchd.sh install | uninstall | restart | status
+#   scripts/launchd.sh install | uninstall | restart | status [memory]
+# With "memory": the scout-memory service (memories and local search) instead.
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -10,6 +11,15 @@ DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"  # config, state, 
 # The paths go into XML: escape them so a folder like "R&D" can't break the plist.
 DATA_XML=$(printf '%s' "$DATA" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
 LABEL=com.local.scout
+PROGRAM=run.sh
+PROCESS=Interactive
+LOG=launchd
+if [ "${2:-}" = memory ]; then
+  LABEL=com.local.scout.memory
+  PROGRAM=run-memory.sh
+  PROCESS=Background  # embedding gives way to listening and speaking
+  LOG=memory
+fi
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
@@ -23,15 +33,15 @@ install)
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$ROOT_XML/scripts/run.sh</string></array>
+  <key>ProgramArguments</key><array><string>$ROOT_XML/scripts/$PROGRAM</string></array>
   <key>WorkingDirectory</key><string>$ROOT_XML</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ExitTimeOut</key><integer>15</integer>
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>$DATA_XML/logs/launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$DATA_XML/logs/launchd.err.log</string>
+  <key>ProcessType</key><string>$PROCESS</string>
+  <key>StandardOutPath</key><string>$DATA_XML/logs/$LOG.out.log</string>
+  <key>StandardErrorPath</key><string>$DATA_XML/logs/$LOG.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -60,5 +70,5 @@ uninstall)
   ;;
 restart) launchctl kickstart -k "$DOMAIN/$LABEL" ;;
 status) launchctl print "$DOMAIN/$LABEL" | grep -E "state|pid|last exit" ;;
-*) echo "usage: $0 install|uninstall|restart|status" >&2; exit 2 ;;
+*) echo "usage: $0 install|uninstall|restart|status [memory]" >&2; exit 2 ;;
 esac

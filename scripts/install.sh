@@ -74,6 +74,8 @@ if [ -x "$DATA/bin/scout-messages" ]; then
         echo "the Messages helper's login item didn't start; see logs/messages-helper.log"
 fi
 
+status installing "starting the memory service"
+"$DATA/current/scripts/launchd.sh" install memory >/dev/null
 status installing "starting the background app"
 "$DATA/current/scripts/launchd.sh" install >/dev/null
 status ready "running $(basename "$ROOT")"

@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 scout = "scout:main"
+scout-memory = "scout.memory_service:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]

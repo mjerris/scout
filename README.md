@@ -461,6 +461,15 @@ answers and tools. `[lists] backend` picks `auto`, `reminders` or `scout`.
 
 ## Local search
 
+Memories and the search index live in a separate local service, **scout-memory**
+(its own login item, `com.local.scout.memory`, at low CPU priority). It owns
+`state/memory.db`, the embedding model and your remembered facts, and serves them
+over HTTP on 127.0.0.1:8767 to Scout and any other local program holding the token
+in `state/memory.token`: `/v1/docs/*` (put, delete, sync, get, count, recent,
+prune), `/v1/search` and `/v1/memories/*` (add, forget, matching, relevant, newest,
+list). It keeps running while the voice app restarts; `scripts/launchd.sh status
+memory` shows it.
+
 Scout keeps a local store and search index on this Mac (`state/scout.db`): memories
 and every exchange with Scout so far, with notes, lists, mail and calendar to follow.
 Search runs cheap layers first: a filter by kind and date, then full text (SQLite

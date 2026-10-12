@@ -24,6 +24,7 @@ from . import (
     local_intents,
     mail_mac,
     mailindex,
+    memory_client,
     memory,
     privacy,
     shared_tools,
@@ -111,11 +112,9 @@ class Assistant:
         # the privacy mode allows.
         self.recent_local: deque[tuple[float, str, str, bool]] = deque(maxlen=10)
         self.privacy = privacy.configure(cfg.privacy.mode)
-        self.memory = memory.Memory(DATA / "state" / "memory.json")
-        # The local store and search (index.py): memories and conversations, searched here.
+        # Memories and the local store/search live in the scout-memory service.
+        self.memory = memory_client.memory()
         self.index = index.default()
-        self.memory.on_change = self._index_memories
-        self._index_memories()
         self.tier1: tier1.LocalModel | None = None  # loaded by start_tier1()
         # What Claude sessions said out loud (time, session, text, waited for a reply),
         # so the room knows who the user might be answering; and replies the room passed
@@ -213,12 +212,6 @@ class Assistant:
             if took:
                 self.floor.release("briefing")
 
-    def _index_memories(self) -> None:
-        try:
-            self.index.sync("memory", self.memory.as_documents())
-        except Exception:
-            log.exception("indexing memories failed")
-
     def _record_turn(self, request: str, reply: str, by: str, private: bool) -> None:
         """Keep the exchange in the local index, so "what did I ask about X" can find it."""
         now = time.time()
@@ -296,8 +289,6 @@ class Assistant:
         def idle() -> bool:
             return self.state == "idle" and not self.busy
 
-        if self.cfg.index.semantic and self.cfg.index.background_embed:
-            self._spawn(self.index.background(idle))
         if self.cfg.index.mail:
             self._spawn(mailindex.loop(idle, keep_days=self.cfg.index.mail_days))
         if self.cfg.starlink.enabled:
