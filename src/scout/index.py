@@ -135,9 +135,13 @@ class NomicEmbedder:
         out: np.ndarray = cut / (np.linalg.norm(cut, axis=1, keepdims=True) + 1e-9)
         return out
 
+    @property
+    def loaded(self) -> bool:
+        return self._m is not None
+
     def unload_if_idle(self) -> bool:
         with self._lock:
-            if self._m is not None and time.monotonic() - self._used > self.idle_s:
+            if self.idle_s > 0 and self._m is not None and time.monotonic() - self._used > self.idle_s:
                 self._m = None
                 log.info("embedder unloaded after %.0f s idle", self.idle_s)
                 return True
@@ -300,13 +304,16 @@ class Index:
         kinds: Sequence[str] | None = None,
         since: float | None = None,
         limit: int = 8,
-        semantic: bool = True,
+        semantic: bool | None = True,
         pool: int = 200,
     ) -> list[Hit]:
         """Best matches for `query`: full text, re-ranked by meaning when an embedder is
         available (the candidates are the text hits plus the `pool` newest items, so a
-        question that shares no words with the answer can still find it)."""
+        question that shares no words with the answer can still find it). semantic=None:
+        by meaning only if the model is already loaded (never wait ~25 s for it)."""
         text = self.text_search(query, kinds, since, limit=60)
+        if semantic is None:
+            semantic = bool(getattr(self.embedder, "loaded", True))
         if not semantic or self.embedder is None:
             return text[:limit]
         cands = {h.id: h for h in text}
@@ -394,6 +401,13 @@ class Index:
         """Embed new items ahead of time while Scout is idle; unload the model when unused.
         `idle()` says whether Scout is free (not listening to or answering anyone)."""
         loop = asyncio.get_running_loop()
+        if self.embedder is not None:  # warm up, so searches can rank by meaning right away
+            try:
+                await loop.run_in_executor(
+                    self._pool, lambda: self.embedder.embed(["warm up"]) if self.embedder else None
+                )
+            except Exception:
+                log.exception("loading the embedding model failed")
         while True:
             await asyncio.sleep(every_s)
             try:

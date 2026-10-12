@@ -466,6 +466,12 @@ async def listing(
     days = SEARCH_DAYS if q else RECENT_DAYS
     unread = bool(unread_only) and not q
     idx = index or INDEX
+    if q:  # Scout's own index of the inbox (mailindex.py): local, by words and meaning
+        from . import mailindex
+
+        found = mailindex.search(q, n, days)
+        if found is not None:
+            return found
     if await idx.usable():
         t0 = time.monotonic()
         try:
