@@ -87,7 +87,9 @@ def test_first_use_asks_for_reminders_access_not_calendars(tmp_path: Path) -> No
     assert _calls(tmp_path)[:2] == [["status", "--reminders"], ["request", "--reminders"]]
 
 
-def test_refused_reminders_access_names_the_reminders_pane(tmp_path: Path) -> None:
+def test_refused_reminders_access_names_the_reminders_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     exe = _fake(tmp_path, status="not_determined", granted=False)
     with pytest.raises(ToolError, match=r"Reminders access wasn.t allowed.*Privacy and Security, Reminders"):
         asyncio.run(reminders_mac.reminders(helper=exe))
@@ -215,3 +217,26 @@ def test_reminder_writes_always_ask_and_reading_is_preapproved(tmp_path: Path) -
     for name in ("reminder_add", "reminder_complete"):
         assert f"mcp__voice_app__{name}" in perms["ask"]
         assert f"mcp__voice_app__{name}" not in perms["allow"]
+
+
+def test_without_reminders_access_scout_keeps_the_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto: Reminders refused (or not a Mac) -> Scout's own lists, same answers."""
+    monkeypatch.setattr(reminders_mac, "_backend", lambda: "auto")
+    exe = _fake(tmp_path, status="denied")
+
+    async def go() -> tuple[str, str, list[str], str, str]:
+        added = await reminders_mac.add({"title": "Milk", "list": "Shopping"}, helper=exe)
+        listed = await reminders_mac.reminders("shopping", helper=exe)
+        names = await reminders_mac.list_names(helper=exe)
+        rid = listed.split("(id ")[1].split(")")[0]
+        done = await reminders_mac.complete({"id": rid, "title": "milk"}, helper=exe)
+        return added, listed, names, done, await reminders_mac.reminders("Shopping", helper=exe)
+
+    added, listed, names, done, after = asyncio.run(go())
+    assert added == "Added Milk to Shopping."
+    assert listed.startswith("Milk [Shopping] (id scout:")
+    assert "Shopping" in names
+    assert done == "Marked Milk done in Shopping." and after == "No reminders."
+    assert _calls(tmp_path) == [["status", "--reminders"]]  # asked once, then Scout's own for a while

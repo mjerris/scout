@@ -8,11 +8,45 @@ voice every time (see brain.REMINDER_WRITE_TOOLS)."""
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import time
 from pathlib import Path
 from typing import Any
 
+from . import locallists
 from .calendar_mac import ensure_access, iso, parse_time, text_arg, vcal
+from .config import load
 from .mac import ToolError
+
+log = logging.getLogger(__name__)
+_FALLBACK_S = 600.0  # after Reminders fails, use Scout's own lists this long before retrying
+_fallback_until = 0.0
+
+
+def _backend() -> str:
+    return load().lists.backend
+
+
+async def _apple(helper: Path | None) -> bool:
+    """Use the Mac's Reminders (True) or Scout's own lists (False)? `[lists] backend`:
+    "reminders", "scout", or "auto": Reminders when its access works, else Scout's own."""
+    global _fallback_until
+    backend = _backend()
+    if backend == "scout":
+        return False
+    if backend == "reminders":
+        await ensure_access(helper, reminders=True)
+        return True
+    if time.monotonic() < _fallback_until:
+        return False
+    try:
+        await ensure_access(helper, reminders=True)
+        return True
+    except (ToolError, OSError) as exc:
+        log.info("Reminders unavailable (%s); using Scout's own lists", exc)
+        _fallback_until = time.monotonic() + _FALLBACK_S
+        return False
+
 
 _LIMIT = 100
 
@@ -69,12 +103,14 @@ def format_reminders(data: dict[str, Any], now: dt.datetime | None = None) -> st
 
 async def list_names(helper: Path | None = None) -> list[str]:
     """The names of the Mac's reminder lists."""
-    await ensure_access(helper, reminders=True)
+    if not await _apple(helper):
+        return await locallists.list_names()
     return [str(c["title"]) for c in (await vcal("reminder-lists", helper=helper)).get("lists", [])]
 
 
 async def lists(helper: Path | None = None) -> str:
-    await ensure_access(helper, reminders=True)
+    if not await _apple(helper):
+        return await locallists.lists()
     found = (await vcal("reminder-lists", helper=helper)).get("lists", [])
     if not found:
         return "No reminder lists on this Mac."
@@ -101,7 +137,8 @@ async def reminder_data(
         args.append("--include-completed")
     if due_before:
         args += ["--due-before", iso(parse_time(due_before, "due_before"))]
-    await ensure_access(helper, reminders=True)
+    if not await _apple(helper):
+        return await locallists.reminder_data(list_name, include_completed, due_before)
     return await vcal(*args, helper=helper)
 
 
@@ -126,7 +163,8 @@ async def add(a: dict[str, Any], helper: Path | None = None) -> str:
         args += ["--due", due if "T" not in due and " " not in due else iso(t)]
     if notes := text_arg(a.get("notes"), "notes", 2000):
         args += ["--notes", notes]
-    await ensure_access(helper, reminders=True)
+    if not await _apple(helper):  # after the checks: bad arguments never touch either store
+        return await locallists.add(a)
     r = (await vcal(*args, helper=helper)).get("reminder", {})
     when = _when(r)
     return f"Added {r.get('title', title)} to {r.get('list') or 'Reminders'}" + (
@@ -135,10 +173,11 @@ async def add(a: dict[str, Any], helper: Path | None = None) -> str:
 
 
 async def complete(a: dict[str, Any], helper: Path | None = None) -> str:
+    if str(a.get("id") or "").startswith("scout:") or not await _apple(helper):
+        return await locallists.complete(a)
     rid = text_arg(a.get("id"), "id", 200)
     title = text_arg(a.get("title"), "title", 200)
     if not rid or not title:
         raise ToolError("id and title are required (both from reminders_list)")
-    await ensure_access(helper, reminders=True)
     r = (await vcal("reminder-complete", "--id", rid, "--title", title, helper=helper)).get("reminder", {})
     return f"Marked {r.get('title', title)} done" + (f" in {r['list']}." if r.get("list") else ".")

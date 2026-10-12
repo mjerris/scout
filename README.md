@@ -450,6 +450,15 @@ only when it shares words with the request (and not in strict mode); the room
 agent can also `remember`, `forget` and `recall`.
 
 
+## Notes and lists
+
+Notes live in Scout's store, searchable by words and meaning ("take a note: ...",
+"what are my notes about the generator"), with a copy in an Apple Notes folder
+called Scout when `[notes] apple = true` and you allow Notes access (macOS asks once,
+the first time a note is saved). Lists and tasks use the Mac's Reminders; when that
+isn't available (access refused, or not a Mac) Scout keeps them itself, with the same
+answers and tools. `[lists] backend` picks `auto`, `reminders` or `scout`.
+
 ## Local search
 
 Scout keeps a local store and search index on this Mac (`state/scout.db`): memories

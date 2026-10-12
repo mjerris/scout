@@ -21,7 +21,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import calendar_mac, freebusy, index, mail_mac, messages_mac, privacy, reminders_mac, starlink, weather
+from . import (
+    calendar_mac,
+    freebusy,
+    index,
+    mail_mac,
+    messages_mac,
+    notes,
+    privacy,
+    reminders_mac,
+    starlink,
+    weather,
+)
 from .mac import ToolError
 
 
@@ -244,6 +255,27 @@ SHARED = (
             {"query": _STR, "kinds": {"type": "array", "items": _STR}, "days": _INT, "limit": _INT}, ["query"]
         ),
         lambda a: _local_search(a),
+    ),
+    SharedTool(
+        "note_add",
+        "Save a note in Scout (searchable later; also copied to Apple Notes' Scout folder when "
+        "allowed). text is the note; title is optional (default: its first words).",
+        _obj({"text": _STR, "title": _STR}, ["text"]),
+        notes.add_text,
+    ),
+    SharedTool(
+        "notes_find",
+        "Find the user's notes by words or meaning, best first, with their full text and ids. "
+        "Empty query = the newest notes. limit 1-20 (default 5).",
+        _obj({"query": _STR, "limit": _INT}),
+        notes.find_text,
+    ),
+    SharedTool(
+        "note_delete",
+        "Delete a note by its id from notes_find (the user confirms by voice).",
+        _obj({"id": _INT}, ["id"]),
+        notes.delete,
+        asks=True,
     ),
     SharedTool(
         "starlink",

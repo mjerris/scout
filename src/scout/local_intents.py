@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import briefing, calendar_mac, freebusy, mac, mail_mac, reminders_mac, starlink, weather
+from . import briefing, calendar_mac, freebusy, mac, mail_mac, notes, reminders_mac, starlink, weather
 from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
@@ -80,6 +80,9 @@ class Context:
     reminder_lists: Callable[[], Awaitable[list[str]]] = reminders_mac.list_names
     weather: Callable[[str], Awaitable[dict[str, Any]]] = weather.forecast
     starlink_on: Callable[[], bool] = lambda: load().starlink.enabled
+    note_add: Callable[[str], Awaitable[dict[str, Any]]] = notes.add
+    request: str = ""  # the request as said (answer() sets it)
+    notes_find: Callable[[str], Awaitable[list[dict[str, Any]]]] = notes.find
     starlink: Callable[[], Awaitable[dict[str, Any]]] = starlink.status
     starlink_usage: Callable[[], dict[str, float]] = lambda: starlink.Usage().summary()
     mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
@@ -539,10 +542,32 @@ async def _starlink_usage(m: re.Match[str], c: Context) -> str | None:
     return starlink.speak({}, "usage", c.starlink_usage())
 
 
+_NOTE = r"(?:(?:take|make|add|write(?: down)?|save) (?:a )?note(?: (?:that|of|saying))?|note that) "
+
+
+@_rule(_NOTE + r"(?P<text>.+)")
+async def _note(m: re.Match[str], c: Context) -> str:
+    # The note's own words as said (case and punctuation kept), not the cleaned match.
+    said = re.sub(
+        r"^\W*" + _POLITE + r"\W*" + _NOTE.replace(" ", r"[\s,:]+"), "", c.request.strip(), flags=re.I
+    )
+    await c.note_add(said.strip() or m.group("text"))
+    return "Noted."
+
+
+@_rule(
+    r"(?:(?:what|which) (?:are |were |is )?my notes?|(?:read|find|check)(?: me)? my notes?|"
+    r"do i have (?:a |any )?notes?)(?: (?:about|on|for|from|regarding) (?P<about>.+))?"
+)  # one group: _rule anchors the whole pattern
+async def _notes(m: re.Match[str], c: Context) -> str:
+    return notes.speak(await c.notes_find((m.group("about") or "").strip()))
+
+
 async def answer(text: str, ctx: Context) -> str | None:
     """The spoken answer when tier 0 handles `text`, "" when it acted silently,
     or None to send it on to Claude."""
     t = _clean(text)
+    ctx.request = text
     for pattern, handler in _RULES:
         m = pattern.match(t)
         if m:

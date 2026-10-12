@@ -250,6 +250,21 @@ class IndexConfig:
 
 
 @dataclass
+class ListsConfig:
+    # Lists and tasks: "auto" uses the Mac's Reminders when its access works and Scout's
+    # own lists otherwise; "reminders" or "scout" to choose one.
+    backend: str = "auto"
+
+
+@dataclass
+class NotesConfig:
+    # Notes always live in Scout's store (searchable); with apple = true a copy also goes
+    # to an Apple Notes folder (asks for Notes automation access once).
+    apple: bool = True
+    apple_folder: str = "Scout"
+
+
+@dataclass
 class StarlinkConfig:
     # Read the Starlink dish's local API (no account, no sign-in): status, outages,
     # obstructions, data used. Off unless turned on.
@@ -300,6 +315,8 @@ class Config:
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
+    lists: ListsConfig = field(default_factory=ListsConfig)
+    notes: NotesConfig = field(default_factory=NotesConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
     def path(self, p: str) -> Path:
