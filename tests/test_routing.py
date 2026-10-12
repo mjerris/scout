@@ -951,3 +951,15 @@ def test_the_rest_of_a_split_request_is_rejoined(monkeypatch: pytest.MonkeyPatch
 
     queued, silenced = run(go())
     assert queued == "What time do those winds forecast to start." and silenced
+
+
+def test_conversations_are_kept_in_the_local_index() -> None:
+    async def go() -> list[str]:
+        r = make()
+        r.a._local.now = lambda: __import__("datetime").datetime(2026, 10, 12, 15, 4).astimezone()
+        assert await r.a._answer_locally("what time is it")
+        newest = r.a.index.recent(["turn"], 1)
+        return [h.body for h in newest]
+
+    bodies = run(go())
+    assert bodies and bodies[0].startswith("what time is it\nScout: It's 3:04")

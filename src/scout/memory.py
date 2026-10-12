@@ -8,11 +8,13 @@ the room agent can add or drop one with its remember / forget tools."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from .mac import ToolError
@@ -43,6 +45,7 @@ class Memory:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.facts: list[dict[str, Any]] = []
+        self.on_change: Callable[[], None] | None = None  # e.g. re-index (index.py)
         try:
             data = json.loads(path.read_text())
             self.facts = [f for f in data.get("facts", []) if isinstance(f, dict) and f.get("text")]
@@ -56,6 +59,19 @@ class Memory:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"facts": self.facts}, indent=1))
         tmp.replace(self.path)
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                log.exception("memory change hook failed")
+
+    def as_documents(self) -> list[dict[str, Any]]:
+        """The facts as index items (index.Index.sync)."""
+        return [
+            {"id": "memory:" + hashlib.blake2b(f["text"].encode(), digest_size=6).hexdigest(), "title": f["text"],
+             "body": f["text"], "ts": float(f.get("ts") or 0)}
+            for f in self.facts
+        ]  # fmt: skip
 
     def add(self, text: str) -> str:
         fact = " ".join(str(text or "").split()).strip().rstrip(".")

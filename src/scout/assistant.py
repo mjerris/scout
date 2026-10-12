@@ -17,7 +17,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import briefing, gate, local_intents, mail_mac, memory, privacy, shared_tools, speech, starlink, tier1
+from . import (
+    briefing,
+    gate,
+    index,
+    local_intents,
+    mail_mac,
+    memory,
+    privacy,
+    shared_tools,
+    speech,
+    starlink,
+    tier1,
+)
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -99,6 +111,10 @@ class Assistant:
         self.recent_local: deque[tuple[float, str, str, bool]] = deque(maxlen=10)
         self.privacy = privacy.configure(cfg.privacy.mode)
         self.memory = memory.Memory(DATA / "state" / "memory.json")
+        # The local store and search (index.py): memories and conversations, searched here.
+        self.index = index.default()
+        self.memory.on_change = self._index_memories
+        self._index_memories()
         self.tier1: tier1.LocalModel | None = None  # loaded by start_tier1()
         # What Claude sessions said out loud (time, session, text, waited for a reply),
         # so the room knows who the user might be answering; and replies the room passed
@@ -196,6 +212,23 @@ class Assistant:
             if took:
                 self.floor.release("briefing")
 
+    def _index_memories(self) -> None:
+        try:
+            self.index.sync("memory", self.memory.as_documents())
+        except Exception:
+            log.exception("indexing memories failed")
+
+    def _record_turn(self, request: str, reply: str, by: str, private: bool) -> None:
+        """Keep the exchange in the local index, so "what did I ask about X" can find it."""
+        now = time.time()
+        try:
+            self.index.put(
+                f"turn:{now:.3f}", "turn", title=request, body=f"{request}\nScout: {reply}",
+                ts=now, meta={"by": by, "private": private},
+            )  # fmt: skip
+        except Exception:
+            log.exception("recording the conversation failed")
+
     async def announce(self, text: str, who: str = "announce") -> None:
         """Say something unprompted (Starlink went down): it waits for the floor, like a timer."""
         took = await self.floor.acquire(who, wait=300)
@@ -258,6 +291,8 @@ class Assistant:
     async def run(self) -> None:
         if self.cfg.briefing.at:
             self._spawn(briefing.daily(self.cfg.briefing.at, self._announce_briefing))
+        if self.cfg.index.semantic and self.cfg.index.background_embed:
+            self._spawn(self.index.background(lambda: self.state == "idle" and not self.busy))
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         while True:
@@ -870,6 +905,7 @@ class Assistant:
         log.info("answered locally (tier %d): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)", private))
+        self._record_turn(text, said or "(done)", f"tier {tier}", private)
         if said:
             said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
             self._set_state("speaking")
@@ -991,6 +1027,7 @@ class Assistant:
         self.emit("you", text=text)
         self._set_state("thinking")
         ticks: asyncio.Task[None] | None = None
+        replies: list[str] = []
         try:
             if await self._answer_locally(text):
                 return
@@ -1009,9 +1046,11 @@ class Assistant:
                             self.say(said)
                     if kind == "text":
                         self.last_spoken = ("Scout", data)
+                        replies.append(data)
                 elif kind == "spoken":  # its sentences were spoken as they arrived
                     self.emit("claude", text=data)
                     self.last_spoken = ("Scout", data)
+                    replies.append(data)
                 elif kind == "tool":
                     name, args = data
                     self.emit("tool", name=name, input=_preview(args))
@@ -1035,6 +1074,8 @@ class Assistant:
         finally:
             if ticks:
                 ticks.cancel()
+            if replies:
+                self._record_turn(text, " ".join(replies), "claude", False)
             self._set_state("idle")
             # The follow-up window is for a reply the room heard; a phone-only turn opens none.
             heard_in_room = self._out["mini"]
