@@ -40,7 +40,6 @@ from .config import DATA
 
 log = logging.getLogger(__name__)
 
-DB = DATA / "state" / "scout.db"
 MODELS = DATA / "models" / "fastembed"
 
 _SCHEMA = """
@@ -170,10 +169,9 @@ def _sig(*parts: str) -> str:
 
 @dataclass
 class Index:
-    path: Path = DB
+    path: Path
     embedder: Embedder | None = None
     min_similarity: float = 0.5  # a match by meaning alone (no shared words) needs this cosine
-    last_rowid: int | None = field(init=False, default=None)
     _conn: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
@@ -265,17 +263,16 @@ class Index:
             ).fetchall()
         return [_hit(r) for r in rows]
 
-    def sql(self, statement: str, args: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
-        """Run one statement on the store (for modules keeping their own tables here)."""
+    def prune(self, kind: str, before: float) -> int:
+        """Remove `kind` items older than `before`; returns how many."""
         with self._lock:
-            cur = self._conn.execute(statement, tuple(args))
-            rows = cur.fetchall()
-            self.last_rowid = cur.lastrowid
-            return rows
-
-    def script(self, statements: str) -> None:
-        with self._lock:
-            self._conn.executescript(statements)
+            old = [
+                r[0]
+                for r in self._conn.execute("SELECT id FROM docs WHERE kind = ? AND ts < ?", (kind, before))
+            ]
+        for id in old:
+            self.delete(id)
+        return len(old)
 
     # --- searching ------------------------------------------------------------------
 
@@ -475,16 +472,35 @@ def format_hits(hits: Sequence[Hit], snippets: bool = True) -> str:
     return "\n".join(lines)
 
 
-_index: Index | None = None
+class Store(Protocol):
+    """What callers use: index.Index in the memory service, memory_client.Store elsewhere."""
+
+    def put(
+        self, id: str, kind: str, title: str = "", body: str = "", who: str = "",
+        ts: float | None = None, meta: dict[str, Any] | None = None,
+    ) -> bool: ...  # fmt: skip
+    def delete(self, id: str) -> None: ...
+    def sync(self, kind: str, items: Iterable[dict[str, Any]]) -> tuple[int, int]: ...
+    def get(self, id: str) -> Hit | None: ...
+    def count(self, kind: str | None = None) -> int: ...
+    def recent(
+        self, kinds: Sequence[str] | None = None, limit: int = 20, since: float | None = None
+    ) -> list[Hit]: ...
+    def prune(self, kind: str, before: float) -> int: ...
+    def search(
+        self, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
+        limit: int = 8, semantic: bool | None = True, pool: int = 200,
+    ) -> list[Hit]: ...  # fmt: skip
+    async def asearch(self, query: str, **kw: Any) -> list[Hit]: ...
 
 
-def default() -> Index:
-    """The app's index (created on first use, with the configured embedder)."""
-    global _index
-    if _index is None:
-        from .config import load
+_index: Store | None = None  # tests put a local Index here
 
-        cfg = load().index
-        emb = NomicEmbedder(cfg.model, cfg.dims, cfg.unload_after_s) if cfg.semantic else None
-        _index = Index(DB, emb, cfg.min_similarity)
-    return _index
+
+def default() -> Store:
+    """The store Scout uses: the scout-memory service."""
+    if _index is not None:
+        return _index
+    from . import memory_client
+
+    return memory_client.Store(memory_client.client())

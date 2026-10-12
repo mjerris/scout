@@ -11,7 +11,7 @@ import re
 import time
 from typing import Any
 
-from . import index, mac
+from . import appdb, index, mac
 from .config import load
 from .mac import ToolError
 
@@ -47,10 +47,10 @@ end run
 _apple_off_until = 0.0  # after Notes refuses, stop trying for a while
 
 
-def _ix() -> index.Index:
-    ix = index.default()
-    ix.script(_SCHEMA)
-    return ix
+def _ix() -> appdb.AppDB:
+    db = appdb.default()
+    db.script(_SCHEMA)
+    return db
 
 
 def _title(text: str) -> str:
@@ -94,7 +94,7 @@ async def add(text: Any, title: Any = None) -> dict[str, Any]:
     ix = _ix()
     ix.sql("INSERT INTO notes(title, body, created, updated) VALUES (?,?,?,?)", (name, body, now, now))
     nid = ix.last_rowid
-    ix.put(f"note:{nid}", "note", title=name, body=body, ts=now)
+    index.default().put(f"note:{nid}", "note", title=name, body=body, ts=now)
     apple = await _to_apple(name, body)
     if apple:
         ix.sql("UPDATE notes SET apple_id = ? WHERE id = ?", (apple, nid))
@@ -109,7 +109,12 @@ async def add_text(a: dict[str, Any]) -> str:
 async def find(query: Any, limit: int = 5) -> list[dict[str, Any]]:
     q = str(query or "").strip()
     ix = _ix()
-    hits = await ix.asearch(q, kinds=["note"], limit=limit) if q else ix.recent(["note"], limit)
+    store = index.default()
+    hits = (
+        await store.asearch(q, kinds=["note"], limit=limit, semantic=None)
+        if q
+        else store.recent(["note"], limit)
+    )
     out = []
     for h in hits:
         nid = int(h.id.split(":", 1)[1])
@@ -139,7 +144,7 @@ async def delete(a: dict[str, Any]) -> str:
     if not rows:
         raise ToolError(f"there's no note {nid}")
     ix.sql("DELETE FROM notes WHERE id = ?", (nid,))
-    ix.delete(f"note:{nid}")
+    index.default().delete(f"note:{nid}")
     if rows[0][1]:
         try:
             await mac._run("/usr/bin/osascript", "-e", _APPLE_DELETE, rows[0][1], timeout=30)

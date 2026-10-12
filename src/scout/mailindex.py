@@ -32,7 +32,7 @@ def _ts(iso: str) -> float:
 
 
 async def sync_pass(
-    ix: index.Index, run: mail_mac.Runner = mail_mac._jxa, keep_days: int = 90
+    ix: index.Store, run: mail_mac.Runner = mail_mac._jxa, keep_days: int = 90
 ) -> dict[str, Any]:
     """Store new inbox messages; returns what was done, with timings."""
     t0 = time.monotonic()
@@ -63,11 +63,9 @@ async def sync_pass(
                 meta={"mail_id": int(row["id"]), "read": bool(row.get("read")), "date": row.get("date")},
             )
             stored += 1
-    aged = ix.sql("SELECT id FROM docs WHERE kind = ? AND ts < ?", (KIND, cut))
-    for (old,) in aged:
-        ix.delete(old)
+    aged = ix.prune(KIND, cut)
     out = {
-        "listed": len(listed), "stored": stored, "aged_out": len(aged),
+        "listed": len(listed), "stored": stored, "aged_out": aged,
         "list_s": round(t_list, 1), "read_s": round(time.monotonic() - t1, 1), "total": ix.count(KIND),
     }  # fmt: skip
     log.info("mail index: %s", out)

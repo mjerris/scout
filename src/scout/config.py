@@ -267,6 +267,13 @@ class NotesConfig:
 
 
 @dataclass
+class MemoryServiceConfig:
+    # scout-memory: the local service holding memories and the search index.
+    host: str = "127.0.0.1"
+    port: int = 8767
+
+
+@dataclass
 class StarlinkConfig:
     # Read the Starlink dish's local API (no account, no sign-in): status, outages,
     # obstructions, data used. Off unless turned on.
@@ -317,6 +324,7 @@ class Config:
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
+    memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)
     lists: ListsConfig = field(default_factory=ListsConfig)
     notes: NotesConfig = field(default_factory=NotesConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)

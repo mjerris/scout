@@ -10,7 +10,7 @@ import datetime as dt
 import time
 from typing import Any
 
-from . import index
+from . import appdb, index
 from .calendar_mac import iso, parse_time, text_arg
 from .mac import ToolError
 
@@ -30,18 +30,18 @@ CREATE TABLE IF NOT EXISTS list_items (
 """
 
 
-def _ix() -> index.Index:
-    ix = index.default()
-    ix.script(_SCHEMA)
-    return ix
+def _ix() -> appdb.AppDB:
+    db = appdb.default()
+    db.script(_SCHEMA)
+    return db
 
 
-def _names(ix: index.Index) -> list[str]:
+def _names(ix: appdb.AppDB) -> list[str]:
     names = [str(r[0]) for r in ix.sql("SELECT name FROM lists ORDER BY created")]
     return names or [DEFAULT]
 
 
-def _resolve(ix: index.Index, name: str, create: bool) -> str:
+def _resolve(ix: appdb.AppDB, name: str, create: bool) -> str:
     """A list by name, case-insensitively ("shopping" finds "Shopping"); a missing one is
     created on add and an error on read."""
     for n in _names(ix):
@@ -113,7 +113,7 @@ async def add(a: dict[str, Any]) -> str:
         (lst, title, due, notes, now),
     )
     rid = ix.last_rowid
-    ix.put(
+    index.default().put(
         f"list:{rid}",
         "list",
         title=title,
@@ -135,5 +135,5 @@ async def complete(a: dict[str, Any]) -> str:
     if not rows or rows[0][1].lower() != title.lower():
         raise ToolError("that item isn't open on any list (list them again)")
     ix.sql("UPDATE list_items SET completed = 1, done_at = ? WHERE id = ?", (time.time(), int(rid)))
-    ix.delete(f"list:{rid}")
+    index.default().delete(f"list:{rid}")
     return f"Marked {rows[0][1]} done in {rows[0][0]}."
