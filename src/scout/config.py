@@ -238,6 +238,18 @@ class WeatherConfig:
 
 
 @dataclass
+class IndexConfig:
+    # Scout's local store and search (state/scout.db): memories, conversations, notes,
+    # lists, mail and calendar, searched on this Mac; only the best matches reach Claude.
+    semantic: bool = True  # also rank by meaning (a local embedding model, ~0.5 GB download)
+    model: str = "nomic-ai/nomic-embed-text-v1.5"
+    dims: int = 256
+    unload_after_s: float = 900.0  # free the model's memory after this long unused
+    background_embed: bool = True  # embed new items ahead of time while idle
+    min_similarity: float = 0.5  # a match by meaning alone needs at least this
+
+
+@dataclass
 class StarlinkConfig:
     # Read the Starlink dish's local API (no account, no sign-in): status, outages,
     # obstructions, data used. Off unless turned on.
@@ -287,6 +299,7 @@ class Config:
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
+    index: IndexConfig = field(default_factory=IndexConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
     def path(self, p: str) -> Path:

@@ -372,6 +372,11 @@ async def weather(place: str = "") -> str:
     return await _tool("weather", {"place": place or None})
 
 
+@mcp.tool(description=_doc("local_search"))
+async def local_search(query: str, kinds: list[str] | None = None, days: int = 0, limit: int = 8) -> str:
+    return await _tool("local_search", {"query": query, "kinds": kinds or [], "days": days, "limit": limit})
+
+
 @mcp.tool(name="starlink", description=_doc("starlink"))
 async def starlink_status() -> str:
     return await _tool("starlink", {})

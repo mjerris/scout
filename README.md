@@ -448,3 +448,15 @@ do you remember", or "forget my dentist". Plain code answers these, and the
 facts live in `state/memory.json` in Scout's data folder. Claude sees a memory
 only when it shares words with the request (and not in strict mode); the room
 agent can also `remember`, `forget` and `recall`.
+
+
+## Local search
+
+Scout keeps a local store and search index on this Mac (`state/scout.db`): memories
+and every exchange with Scout so far, with notes, lists, mail and calendar to follow.
+Search runs cheap layers first: a filter by kind and date, then full text (SQLite
+FTS5), then a re-rank by meaning with a local embedding model (nomic-embed-text,
+256 dimensions, CPU). Vectors are computed lazily: a search embeds only its
+candidates and caches them, and an idle pass embeds new items ahead of time. Only the
+best few matches reach Claude, through the `local_search` tool. `[index]` in
+config.toml tunes it; `semantic = false` keeps it to full text only.
