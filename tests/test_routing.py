@@ -742,20 +742,37 @@ def test_a_declined_send_never_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ran == []
 
 
-def test_always_is_just_once_for_a_session_add_event(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_always_promotes_a_session_add_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """'Yes, always' promotes adding events (trust.py): the next one runs without asking."""
     ran = _shared(monkeypatch, "calendar_create_event")
     event = {"title": "Dentist", "start": "2026-10-09T15:00"}
 
     async def go() -> list[str]:
         r = make()
-        for _ in range(2):  # the second call asks again
-            t = asyncio.create_task(r.a.run_shared_tool("proj#42", "calendar_create_event", event))
+        t = asyncio.create_task(r.a.run_shared_tool("proj#42", "calendar_create_event", event))
+        assert (await _answer(r, t, "yes, always"))["status"] == "ok"
+        assert (await r.a.run_shared_tool("proj#42", "calendar_create_event", event))["status"] == "ok"
+        return r.spk.said
+
+    said = run(go())
+    assert said.count("From proj: Add Dentist, Friday October 9, 3:00 PM, to your calendar?") == 1
+    assert any(s.startswith("Okay, I'll go ahead with adding calendar events without asking") for s in said)
+    assert len(ran) == 2
+
+
+def test_always_never_promotes_sending_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _shared(monkeypatch, "mail_send")
+    msg = {"to": ["pat@example.com"], "subject": "Hi", "body": "Hello"}
+
+    async def go() -> list[str]:
+        r = make()
+        for _ in range(2):  # the second one asks again
+            t = asyncio.create_task(r.a.run_shared_tool("proj#42", "mail_send", msg))
             assert (await _answer(r, t, "yes, always"))["status"] == "ok"
         return r.spk.said
 
     said = run(go())
-    assert said.count("From proj: Add Dentist, Friday October 9, 3:00 PM, to your calendar?") == 2
-    assert "Okay, just this once. That kind of action always asks." in said
+    assert said.count("Sending email always asks; that one can't be turned off.") == 2
     assert len(ran) == 2
 
 

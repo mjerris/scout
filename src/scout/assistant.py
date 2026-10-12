@@ -30,6 +30,7 @@ from . import (
     shared_tools,
     speech,
     starlink,
+    trust,
     tier1,
 )
 from .asr import Transcriber
@@ -1160,7 +1161,11 @@ class Assistant:
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
-        if t.asks:
+        tr = trust.default()
+        if t.asks and tr.tier(name) == "auto":  # promoted by the user (trust.py)
+            log.info("allowed by trust, for %s: %s", agent, name)
+            tr.record(name, "auto", True, describe_tool(name, args)[1], by=agent)
+        elif t.asks:
             spoken, detail = describe_tool(name, args)
             who = agent.split("#", 1)[0] or "a session"
             log.info("permission request from %s: %s", agent, detail.splitlines()[0])
@@ -1169,6 +1174,9 @@ class Assistant:
                 f"{detail}\n(requested by session {agent})",
                 {"mini": True, "client": None},
             )
+            offer = tr.record(name, "asked", None if answer is None else bool(answer), detail, by=agent)
+            if offer and answer and answer != "always":
+                self.speaker.speak(offer)
             if answer is None:
                 return {
                     "status": "no_answer",
@@ -1177,7 +1185,7 @@ class Assistant:
             if not answer:
                 return {"status": "declined", "error": "The user declined this by voice."}
             if answer == "always":
-                self.speaker.speak("Okay, just this once. That kind of action always asks.")
+                self.speaker.speak(tr.promote(name))
         try:
             return {"status": "ok", "text": await t.run(args)}
         except ToolError as exc:

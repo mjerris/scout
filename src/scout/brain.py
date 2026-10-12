@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
 )
 
 from .config import DATA, ROOT, ClaudeConfig
+from . import trust
 from .rules import Rules
 import contextlib
 
@@ -498,14 +499,27 @@ class Brain:
         if not always_ask and self.rules.matches(name, args):
             log.info("allowed by saved rule: %s %s", name, _preview(args))
             return True
+        tr = trust.default()
+        spoken, detail = describe_tool(name, args)
+        if name in ALWAYS_ASK_TOOLS and tr.tier(name) == "auto":  # promoted by the user (trust.py)
+            log.info("allowed by trust: %s %s", name, _preview(args))
+            tr.record(name, "auto", True, detail)
+            return True
         log.info("permission request: %s %s", name, _preview(args))
-        answer = await self.confirm(*describe_tool(name, args))
+        answer = await self.confirm(spoken, detail)
+        offer = None
+        if name in ALWAYS_ASK_TOOLS:
+            offer = tr.record(name, "asked", None if answer is None else bool(answer), detail)
         if answer == "always":
-            if not always_ask and self.rules.add(name, args) is not None:
+            if name in ALWAYS_ASK_TOOLS:
+                self.notify("rules", tr.promote(name))
+            elif not always_ask and self.rules.add(name, args) is not None:
                 self.notify("rules", "Okay, I won't ask about that again.")
             else:
                 self.notify("rules", "Okay, just this once. That kind of action always asks.")
             return True
+        if offer:
+            self.notify("rules", offer)
         return None if answer is None else bool(answer)
 
     async def _can_use_tool(

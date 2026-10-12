@@ -193,7 +193,7 @@ def test_adding_and_completing_are_asked_plainly() -> None:
     assert spoken == "Mark Milk done?" and "id r3" in detail
 
 
-def test_reminder_writes_always_ask_and_reading_is_preapproved(tmp_path: Path) -> None:
+def test_reminder_writes_ask_until_promoted_and_reading_is_preapproved(tmp_path: Path) -> None:
     from test_calendar import _brain
 
     async def go() -> tuple[list[str], list[dict[str, Any]]]:
@@ -210,7 +210,7 @@ def test_reminder_writes_always_ask_and_reading_is_preapproved(tmp_path: Path) -
         return asked, b.rules.listing()
 
     asked, rules = asyncio.run(go())
-    assert asked == ["Add milk to Shopping?"] * 2 and rules == []
+    assert asked == ["Add milk to Shopping?"] and rules == []  # "always" promoted adding reminders
     perms = json.loads(_brain(tmp_path)._options().settings)["permissions"]
     assert "mcp__voice_app__reminders_list" in perms["allow"]
     assert "mcp__voice_app__calendar_free" in perms["allow"]

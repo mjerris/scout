@@ -423,6 +423,15 @@ do. Drag `scout-messages` into the list (or click +, press Cmd-Shift-G and paste
 Scout says "Got it" a few seconds later. To take it back, turn it off or remove
 it in the same list.
 
+## Trust: what asks first
+
+Everything that changes something asks by voice first. One action at a time can earn
+"just do it": answer a confirmation with "yes, always", or say "always allow adding
+reminders"; "ask me before adding reminders" takes it back, and "what do you do
+without asking" lists them. Adding and completing reminders, adding calendar events
+and deleting notes can be promoted; sending email always asks. After five yeses in a
+row Scout mentions the option once. Every decision is logged in `state/trust.json`.
+
 ## Privacy: what Claude sees
 
 Scout keeps your private data on the Mac where a local model can do the job.

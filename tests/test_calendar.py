@@ -188,7 +188,9 @@ def test_reading_is_preapproved_and_adding_always_asks(tmp_path: Path) -> None:
         assert "mcp__voice_app__calendar_create_event" not in perms["allow"]
 
 
-def test_adding_an_event_is_spoken_plainly_and_never_saved_as_always(tmp_path: Path) -> None:
+def test_adding_an_event_is_spoken_plainly_and_always_promotes_just_that_action(tmp_path: Path) -> None:
+    """'Yes, always' promotes adding events (trust.py), never a blanket saved rule."""
+
     async def go() -> tuple[list[str], list[dict[str, Any]]]:
         asked: list[str] = []
         b = _brain(tmp_path)
@@ -204,7 +206,7 @@ def test_adding_an_event_is_spoken_plainly_and_never_saved_as_always(tmp_path: P
         return asked, b.rules.listing()
 
     asked, rules = asyncio.run(go())
-    assert asked == ["Add Dentist, Friday October 9, 3:00 PM, to Home?"] * 2
+    assert asked == ["Add Dentist, Friday October 9, 3:00 PM, to Home?"]  # the second one didn't ask
     assert rules == []
 
 
