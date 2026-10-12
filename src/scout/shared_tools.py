@@ -247,9 +247,9 @@ SHARED = (
     SharedTool(
         "local_search",
         "Search Scout's local index on this Mac (memories the user asked Scout to keep, past "
-        "conversations with Scout, notes and lists; more sources as they're added) by words and "
+        "conversations with Scout, notes, lists, and the inbox) by words and "
         "by meaning. Use it for 'what did I say about...', 'did we talk about...', 'where did I "
-        "note...'. kinds: any of memory, turn, note, list (empty = all); days: only the last N "
+        "note...'. kinds: any of memory, turn, note, list, mail (empty = all); days: only the last N "
         "days (0 = any time); limit 1-20 (default 8). Returns the best matches, newest context first.",
         _obj(
             {"query": _STR, "kinds": {"type": "array", "items": _STR}, "days": _INT, "limit": _INT}, ["query"]
@@ -299,10 +299,12 @@ async def _local_search(a: dict[str, Any]) -> str:
     since = time.time() - days * 86400 if days > 0 else None
     hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()
-    if pol.mode != "open":  # answers built from private data (mail gists) stay titles only
+    if pol.mode != "open":  # mail text, and answers built from it, stay out: titles only
         for h in hits:
-            if h.meta.get("private"):
+            if h.meta.get("private") or h.kind == "mail":
                 h.body = ""
+            if pol.mode == "strict" and h.kind == "mail":
+                h.title = "(subject withheld: strict privacy; mail_read shows it)"
     return index.format_hits(hits)
 
 

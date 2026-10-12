@@ -23,6 +23,7 @@ from . import (
     index,
     local_intents,
     mail_mac,
+    mailindex,
     memory,
     privacy,
     shared_tools,
@@ -291,8 +292,14 @@ class Assistant:
     async def run(self) -> None:
         if self.cfg.briefing.at:
             self._spawn(briefing.daily(self.cfg.briefing.at, self._announce_briefing))
+
+        def idle() -> bool:
+            return self.state == "idle" and not self.busy
+
         if self.cfg.index.semantic and self.cfg.index.background_embed:
-            self._spawn(self.index.background(lambda: self.state == "idle" and not self.busy))
+            self._spawn(self.index.background(idle))
+        if self.cfg.index.mail:
+            self._spawn(mailindex.loop(idle, keep_days=self.cfg.index.mail_days))
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         while True:
