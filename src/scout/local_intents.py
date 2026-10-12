@@ -33,6 +33,7 @@ from . import (
     starlink,
     weather,
 )
+from . import ledger
 from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
@@ -622,6 +623,17 @@ async def _trust_off(m: re.Match[str], c: Context) -> str | None:
 @_rule(r"what (?:do you|can you) do without asking(?: me)?|what(?:'s| is) (?:on )?auto(?:matic)?")
 async def _trust_status(m: re.Match[str], c: Context) -> str:
     return trust.default().speak_status()
+
+
+@_rule(
+    r"(?:how much (?:have you|did you|has claude|did claude) (?:spent|cost|used)|how much (?:claude )?usage|"
+    r"how many (?:requests|questions) (?:did you|have you) (?:answer|handle)(?:ed)?(?: yourself| locally)?|"
+    r"(?:what(?:'s| is) (?:the|my) )?(?:claude )?(?:usage|cost)(?: report)?)"
+    r"(?: (?P<period>today|this week|this month))?"
+)
+async def _ledger(m: re.Match[str], c: Context) -> str:
+    period = (m.group("period") or "today").removeprefix("this ")
+    return ledger.speak(period, ledger.summary(ledger.start_of(period, c.now())))
 
 
 async def answer(text: str, ctx: Context) -> str | None:

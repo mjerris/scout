@@ -59,6 +59,9 @@ def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     import scout.trust as trust_mod
 
     monkeypatch.setattr(trust_mod, "_trust", trust_mod.Trust(tmp_path / "trust.json"))
+    import scout.ledger as ledger_mod
+
+    monkeypatch.setattr(ledger_mod, "PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(reminders_mac, "_backend", lambda: "reminders")
     monkeypatch.setattr(reminders_mac, "_fallback_until", 0.0)
     yield

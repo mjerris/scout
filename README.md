@@ -432,6 +432,35 @@ without asking" lists them. Adding and completing reminders, adding calendar eve
 and deleting notes can be promoted; sending email always asks. After five yeses in a
 row Scout mentions the option once. Every decision is logged in `state/trust.json`.
 
+## Usage: what answered
+
+Every request is logged in `state/ledger.jsonl`: which tier answered (0 plain code,
+1 the local model, or Claude), how long it took, and for Claude the cost, turns and
+tokens. "How much have you spent today / this week?" answers from it locally.
+
+## Pulse
+
+Every 15 minutes Scout checks, in plain code, for an event about to start, a timed
+reminder coming due, and (once each morning) today's overlapping events, and says each
+once. Quiet hours (22:00-08:00) only log. `[pulse]` tunes or turns it off.
+
+## Car stereo (Kenwood DNR1008RVS)
+
+The Kenwood has no network or remote-control API (CarPlay, Android Auto and
+Bluetooth only), so the one way in is audio: pair the Mac mini with it over Bluetooth
+(Kenwood: Bluetooth setup, add a device; Mac: System Settings, Bluetooth). If the
+Kenwood shows up as a sound output on the Mac, put it first in Scout's output list
+and keep the TV as the fallback; Scout switches when one comes or goes:
+
+```toml
+[audio]
+output_device = "KENWOOD"
+output_fallback = ["SAMSUNG", "default", "any"]
+```
+
+Untested: some head units only accept phones; if the Mac never appears as an audio
+device there, this route isn't available.
+
 ## Privacy: what Claude sees
 
 Scout keeps your private data on the Mac where a local model can do the job.
