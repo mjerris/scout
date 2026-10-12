@@ -17,6 +17,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 import statistics
 import threading
 import time
@@ -41,6 +42,9 @@ class Dish:
         self._req: Any = None
 
     def _connect(self) -> None:
+        # Scout's subprocesses (osascript, the Claude CLI) exec right after fork, so gRPC's
+        # fork handlers aren't needed; with them on, every fork logs warnings.
+        os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "false")
         import grpc
         from google.protobuf import descriptor_pb2, descriptor_pool
         from google.protobuf.message_factory import GetMessageClass

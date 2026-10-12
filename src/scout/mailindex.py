@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 
 KIND = "mail"
 NEWEST = 100  # messages listed per pass
-BODIES = 50  # message texts read per pass (in chunks of 25)
+BODIES = 50  # message texts read per pass
+CHUNK = 10  # per call to Mail (25 at a time ran past 30 s live)
+TIMEOUT_S = 90.0  # background work: Mail can be slow on a big inbox
 
 
 def _ts(iso: str) -> float:
@@ -31,9 +33,11 @@ def _ts(iso: str) -> float:
         return time.time()
 
 
-async def sync_pass(
-    ix: index.Store, run: mail_mac.Runner = mail_mac._jxa, keep_days: int = 90
-) -> dict[str, Any]:
+async def _slow_jxa(script: str, *args: str) -> str:
+    return await mail_mac._jxa(script, *args, timeout=TIMEOUT_S)
+
+
+async def sync_pass(ix: index.Store, run: mail_mac.Runner = _slow_jxa, keep_days: int = 90) -> dict[str, Any]:
     """Store new inbox messages; returns what was done, with timings."""
     t0 = time.monotonic()
     data = await mail_mac._call(run, mail_mac._LIST, str(NEWEST), "false", "", str(mail_mac.RECENT_DAYS))
@@ -46,8 +50,8 @@ async def sync_pass(
     ][:BODIES]  # fmt: skip
     stored = 0
     t1 = time.monotonic()
-    for i in range(0, len(new), 25):
-        chunk = new[i : i + 25]
+    for i in range(0, len(new), CHUNK):
+        chunk = new[i : i + CHUNK]
         got = await mail_mac.bodies([int(m["id"]) for m in chunk], run)
         for row in chunk:
             m = got.get(int(row["id"]))

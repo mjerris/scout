@@ -43,7 +43,7 @@ def test_a_pass_stores_new_mail_once_and_ages_out_old_mail() -> None:
     assert (first["listed"], first["stored"], first["total"]) == (3, 2, 2)  # the 200-day-old one skipped
     again = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls), keep_days=90))
     assert (again["stored"], again["total"]) == (0, 2)
-    assert calls == ["list", "read 2", "list"]  # nothing read twice
+    assert calls == ["list", "read 2", "list"]  # nothing read twice (2 fit in one chunk)
     ix.put("mail:7", "mail", title="Stale", ts=0)
     assert asyncio.run(mailindex.sync_pass(ix, fake_mail(calls), keep_days=90))["aged_out"] == 1
     rover = ix.get("mail:41")
