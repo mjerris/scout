@@ -27,6 +27,7 @@ from . import (
     memory_client,
     memory,
     privacy,
+    pulse,
     shared_tools,
     speech,
     starlink,
@@ -290,6 +291,15 @@ class Assistant:
         def idle() -> bool:
             return self.state == "idle" and not self.busy
 
+        if self.cfg.pulse.enabled:
+            p = self.cfg.pulse
+            self._spawn(
+                pulse.run(
+                    lambda text: self.announce(text, "pulse"),
+                    pulse.Pulse(p.event_lead_min, p.every_min),
+                    p.quiet_hours,
+                )
+            )
         if self.cfg.index.mail:
             self._spawn(mailindex.loop(idle, keep_days=self.cfg.index.mail_days))
         if self.cfg.starlink.enabled:
