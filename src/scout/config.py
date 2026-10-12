@@ -238,6 +238,19 @@ class WeatherConfig:
 
 
 @dataclass
+class StarlinkConfig:
+    # Read the Starlink dish's local API (no account, no sign-in): status, outages,
+    # obstructions, data used. Off unless turned on.
+    enabled: bool = False
+    address: str = "192.168.100.1:9200"
+    announce: bool = True  # say outages, recoveries and new alerts out loud
+    announce_outage_s: float = 60.0  # only outages at least this long are announced
+    quiet_hours: str = "22:00-08:00"  # announcements are only logged in these hours ("" = never quiet)
+    ignore_alerts: list[str] = field(default_factory=lambda: ["is_heating"])  # never announced
+    poll_s: float = 30.0
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -273,6 +286,7 @@ class Config:
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
+    starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
     def path(self, p: str) -> Path:

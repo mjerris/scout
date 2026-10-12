@@ -352,6 +352,29 @@ prompt on the Mac's screen (System Settings → Privacy & Security → Automatio
   `MAIL INDEX ID MISMATCH`, and goes back to scripting Mail for the session.
   `mail_mac.verify_index_ids()` compares the two directly (ids and counts only).
 
+## Weather
+
+A built-in `weather` tool (Open-Meteo: free, no API key, nothing to sign in to): current
+conditions, 24 hourly steps and 7 days, with wind speed, gusts and direction. Everyday
+questions ("what's the weather in Luther, Michigan", "... tonight / tomorrow / in the
+morning", "what's the wind forecast for tonight", "will it rain tomorrow") are answered
+locally without Claude. `[weather] home` sets the place used when none is named.
+
+## Starlink
+
+Off unless turned on; it reads the dish's own local API (no account, no sign-in):
+
+```toml
+[starlink]
+enabled = true
+quiet_hours = "22:00-08:00"   # announcements are only logged in these hours
+```
+
+"Is Starlink down?", "why is the internet so slow?" and "how much data have we used
+today?" are answered locally. Scout announces outages longer than a minute, when it's
+back, and new dish alerts; it tallies data used per day. Claude and other sessions get
+the read-only `starlink` tool with exact values.
+
 ## Messages (iMessage and SMS)
 
 Scout can read your texts, never send them. Messages keeps its history in

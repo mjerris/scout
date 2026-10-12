@@ -372,6 +372,11 @@ async def weather(place: str = "") -> str:
     return await _tool("weather", {"place": place or None})
 
 
+@mcp.tool(name="starlink", description=_doc("starlink"))
+async def starlink_status() -> str:
+    return await _tool("starlink", {})
+
+
 def main() -> None:
     mcp.run("stdio")
 

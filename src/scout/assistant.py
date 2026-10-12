@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import briefing, gate, local_intents, mail_mac, memory, privacy, shared_tools, speech, tier1
+from . import briefing, gate, local_intents, mail_mac, memory, privacy, shared_tools, speech, starlink, tier1
 from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, describe_tool
@@ -196,6 +196,18 @@ class Assistant:
             if took:
                 self.floor.release("briefing")
 
+    async def announce(self, text: str, who: str = "announce") -> None:
+        """Say something unprompted (Starlink went down): it waits for the floor, like a timer."""
+        took = await self.floor.acquire(who, wait=300)
+        try:
+            self.speaker.chime("wake")
+            self.speaker.speak(text)
+            self.last_spoken = ("Scout", text)
+            await self.speaker.wait_idle()
+        finally:
+            if took:
+                self.floor.release(who)
+
     def say(self, text: str) -> None:
         """Speak where the current turn's replies go."""
         self._turn_spoke = True
@@ -246,6 +258,8 @@ class Assistant:
     async def run(self) -> None:
         if self.cfg.briefing.at:
             self._spawn(briefing.daily(self.cfg.briefing.at, self._announce_briefing))
+        if self.cfg.starlink.enabled:
+            self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         while True:
             utt = await self.utterances.get()
             if self.mic_muted:
