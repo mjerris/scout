@@ -274,6 +274,16 @@ class MemoryServiceConfig:
 
 
 @dataclass
+class PulseConfig:
+    # A check every few minutes, in plain code, that speaks only when something needs you:
+    # an event about to start, a timed reminder coming due, today's overlapping events.
+    enabled: bool = True
+    every_min: float = 15.0
+    event_lead_min: float = 10.0
+    quiet_hours: str = "22:00-08:00"  # only logged in these hours
+
+
+@dataclass
 class StarlinkConfig:
     # Read the Starlink dish's local API (no account, no sign-in): status, outages,
     # obstructions, data used. Off unless turned on.
@@ -324,6 +334,7 @@ class Config:
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
+    pulse: PulseConfig = field(default_factory=PulseConfig)
     memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)
     lists: ListsConfig = field(default_factory=ListsConfig)
     notes: NotesConfig = field(default_factory=NotesConfig)
