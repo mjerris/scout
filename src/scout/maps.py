@@ -93,11 +93,24 @@ def miles_between(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 3958.8 * 2 * math.asin(math.sqrt(h))
 
 
+def _ql(text: str) -> str:
+    """Text inside an Overpass QL "string" (re.escape leaves quotes alone)."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+class _Refused(ToolError):
+    """The service refused the request itself (a 4xx other than 429): retrying won't help."""
+
+
 async def _json(s: aiohttp.ClientSession, method: str, url: str, **kw: Any) -> Any:
     try:
         async with s.request(method, url, headers=HEADERS, **kw) as r:
             r.raise_for_status()
             return await r.json(content_type=None)
+    except aiohttp.ClientResponseError as exc:
+        if 400 <= exc.status < 500 and exc.status != 429:
+            raise _Refused(f"the map service refused the request: {exc.status} {exc.message}") from None
+        raise ToolError(f"the map service didn't answer: {exc}") from None
     except (aiohttp.ClientError, TimeoutError) as exc:
         raise ToolError(f"the map service didn't answer: {exc}") from None
 
@@ -106,6 +119,8 @@ async def _overpass(s: aiohttp.ClientSession, query: str) -> Any:
     for n, url in enumerate(OVERPASS):
         try:
             return await _json(s, "POST", url, data={"data": query}, timeout=TRY)
+        except _Refused:
+            raise
         except ToolError:
             if n == 0:
                 await asyncio.sleep(2)
@@ -159,7 +174,7 @@ async def near(
     where = _check(place, "near")
     radius = max(1.0, min(float(radius_miles or 25), 60.0)) * MILES
     cat = category(w)
-    filters = CATEGORIES[cat] if cat else [f'["name"~"{re.escape(w)}",i]']
+    filters = CATEGORIES[cat] if cat else [f'["name"~"{_ql(re.escape(w))}",i]']
     own = session is None
     s = session or aiohttp.ClientSession(timeout=TIMEOUT)
     try:

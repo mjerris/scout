@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any
 
-from . import index, mail_mac
+from . import appdb, index, mail_mac
 from .summary import essential
 
 log = logging.getLogger(__name__)
@@ -37,8 +37,14 @@ async def _slow_jxa(script: str, *args: str) -> str:
     return await mail_mac._jxa(script, *args, timeout=TIMEOUT_S)
 
 
+def _mail_id(m: dict[str, Any]) -> int:
+    """Mail's own id for a message: a message found by subject and date (mail_mac._find)
+    carries it as mail_id, its "id" being the index row's, which Mail may not know."""
+    return int(m.get("mail_id") or m["id"])
+
+
 def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
-    mid = int(m["id"])
+    mid = _mail_id(m)
     meta = {"mail_id": mid, "read": bool(m.get("read")), "date": m.get("date")}
     if body is None:
         meta["partial"] = True  # sender and subject only, until its text is read
@@ -64,7 +70,7 @@ def remember(messages: list[dict[str, Any]], with_body: bool) -> int:
                 continue
             if with_body:
                 _put(ix, m, str(m.get("body") or ""))
-            elif ix.get(f"mail:{m['id']}") is None:
+            elif ix.get(f"mail:{_mail_id(m)}") is None:
                 _put(ix, m, None)
             else:
                 continue
@@ -84,21 +90,40 @@ def remember_soon(messages: list[dict[str, Any]], with_body: bool) -> None:
         remember(messages, with_body)
 
 
+_MARKS = "CREATE TABLE IF NOT EXISTS mail_sync (name TEXT PRIMARY KEY, ts REAL NOT NULL);"
+
+
+def _mark(ts: float | None = None) -> float | None:
+    """The sync watermark: every listed message newer than this has been stored. Set
+    with ts; read without."""
+    db = appdb.default()
+    db.script(_MARKS)
+    if ts is not None:
+        db.sql("INSERT OR REPLACE INTO mail_sync(name, ts) VALUES ('inbox', ?)", (ts,))
+        return ts
+    rows = db.sql("SELECT ts FROM mail_sync WHERE name = 'inbox'")
+    return float(rows[0][0]) if rows else None
+
+
 async def sync_pass(
     ix: index.Store, run: mail_mac.Runner = _slow_jxa, first_days: float = 2.0
 ) -> dict[str, Any]:
-    """Index mail that arrived since the newest indexed message (the first time, the last
-    `first_days`), then fill in the text of a few remembered search results."""
+    """Index mail that arrived since the last pass stored everything (the first time, the
+    last `first_days`), then fill in the text of a few remembered search results.
+
+    The watermark only moves past messages actually stored: not the newest indexed one,
+    which may be a search result remembered ahead of older mail this pass never got to."""
     t0 = time.monotonic()
-    newest = ix.recent([KIND], 1)
-    since = newest[0].ts - 60 if newest else time.time() - first_days * 86400
+    mark = _mark()
+    since = mark - 60 if mark is not None else time.time() - first_days * 86400
     data = await mail_mac._call(run, mail_mac._LIST, str(NEWEST), "false", "", str(mail_mac.RECENT_DAYS))
     listed = data.get("messages", [])
     t_list = time.monotonic() - t0
-    new = [
+    due = [
         m for m in listed
         if isinstance(m.get("id"), int) and _ts(str(m.get("date") or "")) > since and ix.get(f"mail:{m['id']}") is None
-    ][:BODIES]  # fmt: skip
+    ]  # fmt: skip
+    new = due[:BODIES]
     partial = [h for h in ix.recent([KIND], 300) if h.meta.get("partial")][:CHUNK]
     todo = [
         *new,
@@ -108,6 +133,7 @@ async def sync_pass(
         ),
     ]
     stored = 0
+    done: set[int] = set()
     t1 = time.monotonic()
     for i in range(0, len(todo), CHUNK):
         chunk = todo[i : i + CHUNK]
@@ -116,7 +142,15 @@ async def sync_pass(
             m = got.get(int(row["id"]))
             if m is not None:
                 _put(ix, {**row, **m}, str(m.get("body") or ""))
+                if _mail_id({**row, **m}) != int(row["id"]):  # stored under Mail's own id
+                    ix.delete(f"mail:{row['id']}")
+                done.add(int(row["id"]))
                 stored += 1
+    left = [_ts(str(m.get("date") or "")) for m in due if int(m["id"]) not in done]
+    if left:  # next pass starts at the oldest message not stored yet
+        _mark(min(left))
+    elif listed:
+        _mark(max([_ts(str(m.get("date") or "")) for m in listed] + ([mark] if mark is not None else [])))
     out = {
         "listed": len(listed), "new": len(new), "filled": len(partial), "stored": stored,
         "list_s": round(t_list, 1), "read_s": round(time.monotonic() - t1, 1), "total": ix.count(KIND),

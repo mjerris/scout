@@ -83,7 +83,9 @@ class Floor:
                 waits: list[asyncio.Task[Any]] = [asyncio.ensure_future(me.wake.wait())]
                 if cancel is not None:
                     waits.append(asyncio.ensure_future(cancel.wait()))
-                _, pending = await asyncio.wait(waits, timeout=min(0.5, left))
+                _, pending = await asyncio.wait(
+                    waits, timeout=min(0.5, left), return_when=asyncio.FIRST_COMPLETED
+                )
                 for t in pending:
                     t.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

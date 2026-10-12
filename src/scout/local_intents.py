@@ -80,14 +80,30 @@ def _duration(seconds: float) -> str:
     return " and ".join(parts) or "0 seconds"
 
 
+_PLAYERS = ("Spotify", "Music")
+
+
+async def _media(action: str) -> str:
+    """mac.media, plus an explicit play or pause for Spotify and Music, so "play"
+    never pauses music that is already playing. No browser space bar for these: it
+    would type into whatever page is in front."""
+    if action not in ("play", "pause"):
+        return await mac.media(action)
+    for app in _PLAYERS:
+        if await mac.is_running(app):
+            await mac.osascript(f'tell application "{app}" to {action}')
+            return f"{app}: {action}."
+    raise ToolError(f"nothing to {action}: Spotify and Music aren't running")
+
+
 @dataclass
 class Context:
     """What tier 0 can reach: the app's timers, and the Mac and calendar tools."""
 
     timers: Any  # tools.Timers
-    now: Callable[[], dt.datetime] = lambda: dt.datetime.now().astimezone()
+    now: Callable[[], dt.datetime] = briefing.local_now  # a real zone: other days get their own offset
     volume: Callable[..., Awaitable[str]] = mac.volume
-    media: Callable[[str], Awaitable[str]] = mac.media
+    media: Callable[[str], Awaitable[str]] = _media
     events: Callable[..., Awaitable[dict[str, Any]]] = calendar_mac.event_data
     reminders: Callable[..., Awaitable[dict[str, Any]]] = reminders_mac.reminder_data
     reminder_lists: Callable[[], Awaitable[list[str]]] = reminders_mac.list_names
@@ -189,9 +205,12 @@ async def _mute(m: re.Match[str], c: Context) -> str:
     return "Okay."
 
 
-@_rule(r"(pause|play|resume|unpause)(?: (?:the )?(?:music|song|video|show|it))?")
+@_rule(r"(pause|play|resume|unpause)(?: (?:the )?(music|song|video|show|it))?")
 async def _play_pause(m: re.Match[str], c: Context) -> str:
-    await c.media("play_pause")
+    if m.group(2) in ("video", "show"):
+        await c.media("play_pause")  # a web player: the browser's space bar toggles it
+    else:
+        await c.media("pause" if m.group(1) == "pause" else "play")
     return ""  # the sound itself is the answer
 
 
@@ -277,10 +296,13 @@ def parse_clock(text: str) -> dt.time | None:
     1 to 6 is the afternoon."""
     if text in ("noon", "midnight"):
         return dt.time(12 if text == "noon" else 0)
-    m = re.fullmatch(r"(\w+)(?:[ :](\d{2}|o'clock|fifteen|thirty|forty-five))?(?: ?(.+))?", text)
+    # The hour stops before a letter, so "3pm" is 3 and "pm".
+    m = re.fullmatch(r"(\d{1,2}|[a-z]+)(?:[ :](\d{2}|o'clock|fifteen|thirty|forty-five))?(?: ?(.+))?", text)
     if not m:
         return None
     word, mins, suffix = m.groups()
+    if not word.isdigit() and word not in _HOURS:
+        return None
     h = int(word) if word.isdigit() else _HOURS.index(word) + 1
     minute = int(mins) if mins and mins.isdigit() else _MINUTE_WORDS.get(mins or "", 0)
     if h > 23 or minute > 59:
@@ -410,13 +432,10 @@ async def _reminder_list(m: re.Match[str], c: Context) -> str | None:
     try:
         items = (await c.reminders(name)).get("reminders", [])
     except ToolError as exc:
-        if str(exc).startswith("no reminder list matches"):
-            try:
-                names = await c.reminder_lists()
-            except ToolError:
-                names = []
-            have = f" Your lists are {join(names)}." if names else ""
-            return f"You don't have a reminder list called {name}.{have}"
+        # No list by that name (helper or local lists): it may be a guest list in a
+        # note or a doc, so Claude takes it.
+        if re.match(r"no reminder list matches|there's no .* list", str(exc), re.I):
+            return None
         raise
     if not items:
         return f"Your {name} list is empty."
@@ -478,7 +497,8 @@ async def _repeat(m: re.Match[str], c: Context) -> str:
 
 
 _PLACE = (
-    r"(?: (?:in|for|at|near) (?!(?:today|tonight|tomorrow|now|right now|this evening)\b)"
+    r"(?: (?:in|for|at|near) (?!(?:today|tonight|tomorrow|now|right now|this evening|here|"
+    r"the (?:morning|afternoon|evening|night|weekend|week)|this (?:morning|afternoon|weekend|week))\b)"
     r"(?P<place>[a-z][a-z .'-]*?(?:, ?[a-z][a-z .'-]*?)?))?"
 )
 
@@ -492,6 +512,8 @@ _PLACE = (
 )
 async def _weather(m: re.Match[str], c: Context) -> str | None:
     place = m.group("place") or m.group("place2") or ""
+    if place.strip() == "home":
+        place = ""  # weather.home
     when = (
         (m.group("when") or "now")
         .replace("right now", "now")
@@ -564,7 +586,10 @@ _NOTE = r"(?:(?:take|make|add|write(?: down)?|save) (?:a )?note(?: (?:that|of|sa
 async def _note(m: re.Match[str], c: Context) -> str:
     # The note's own words as said (case and punctuation kept), not the cleaned match.
     said = re.sub(
-        r"^\W*" + _POLITE + r"\W*" + _NOTE.replace(" ", r"[\s,:]+"), "", c.request.strip(), flags=re.I
+        r"^\W*" + _POLITE.replace(" ", r"[\s,:]+") + r"\W*" + _NOTE.replace(" ", r"[\s,:]+"),
+        "",
+        c.request.strip(),
+        flags=re.I,
     )
     await c.note_add(said.strip() or m.group("text"))
     return "Noted."
@@ -579,13 +604,15 @@ async def _notes(m: re.Match[str], c: Context) -> str:
 
 
 @_rule(
-    r"(?:how far (?:is it )?(?:from )?(?P<a>.+?) to (?P<b>.+)|how far is (?P<b2>.+?) from (?P<a2>.+)|"
+    r"(?:how far (?:is it )?from (?P<a>.+?) to (?P<b>.+)|how far is (?P<b2>.+?) from (?P<a2>.+)|"
     r"how long (?:does it take |is the drive |will it take )?to (?:drive|get) from (?P<a3>.+?) to (?P<b3>.+)|"
     r"(?:what(?:'s| is) the )?(?:driving )?distance (?:from|between) (?P<a4>.+?) (?:to|and) (?P<b4>.+))"
 )
-async def _route(m: re.Match[str], c: Context) -> str:
+async def _route(m: re.Match[str], c: Context) -> str | None:
     a = m.group("a") or m.group("a2") or m.group("a3") or m.group("a4")
     b = m.group("b") or m.group("b2") or m.group("b3") or m.group("b4")
+    if {a, b} & {"here", "home", "me", "us", "where i am", "where we are", "my location"}:
+        return None  # maps can't place "here": Claude works out where that is
     return maps.speak_route(await c.route(a, b))
 
 

@@ -64,22 +64,29 @@ def token(path: Path = TOKEN) -> str:
 
 
 def migrate(ix: index.Index, old: Path = OLD_DB) -> int:
-    """Once: bring documents and vectors over from the app's old store."""
-    if ix.count() or not old.exists():
+    """Once: bring documents over from the app's old store. The old tables go only after
+    the copy, so a run cut short resumes next start (skipping what already came over)."""
+    if not old.exists():
         return 0
     src = sqlite3.connect(old)
     try:
         if not src.execute("SELECT name FROM sqlite_master WHERE name = 'docs'").fetchone():
             return 0
-        rows = src.execute("SELECT id, kind, title, body, who, ts, meta FROM docs").fetchall()
-        for id, kind, title, body, who, ts, meta in rows:
-            ix.put(id, kind, title, body, who, ts, index._hit((id, kind, title, body, who, ts, meta)).meta)
+        moved = 0
+        for id, kind, title, body, who, ts, meta in src.execute(
+            "SELECT id, kind, title, body, who, ts, meta FROM docs"
+        ).fetchall():
+            if ix.get(id) is None:  # what's here already may be newer than the old copy
+                ix.put(
+                    id, kind, title, body, who, ts, index._hit((id, kind, title, body, who, ts, meta)).meta
+                )
+                moved += 1
         src.execute("DROP TABLE IF EXISTS docs_fts")
         src.execute("DROP TABLE IF EXISTS docs")
         src.execute("DROP TABLE IF EXISTS vecs")
         src.commit()
-        log.info("moved %d documents from the app's store", len(rows))
-        return len(rows)
+        log.info("moved %d documents from the app's store", moved)
+        return moved
     finally:
         src.close()
 

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]  # the code: the plugin folder, or a checkout
 # Everything that must survive a plugin update: config.toml, state/, logs/, models/
@@ -121,6 +125,10 @@ class TtsConfig:
     speed: float = 1.1
     chimes: bool = True
     working_sound: bool = True  # soft tick while tools run with nothing to say
+    # A long lookup with nothing said yet: a short spoken line ("Checking your mail.")
+    progress_speech: bool = True
+    progress_delay_s: float = 2.0  # ...after this long
+    progress_again_s: float = 12.0  # "Still working on it." this much later (0 = never)
 
 
 @dataclass
@@ -390,10 +398,39 @@ def _merge(obj: Any, data: dict[str, Any], where: str) -> None:
         raise ValueError(f"unknown config keys: {', '.join(where + k for k in data)}")
 
 
+def _quiet_hours_ok(spec: str) -> bool:
+    """'HH:MM-HH:MM' (may wrap midnight), or empty for never quiet."""
+    if not spec:
+        return True
+    parts = spec.split("-")
+    if len(parts) != 2 or not all(":" in p for p in parts):
+        return False
+    try:
+        for p in parts:
+            dt.time.fromisoformat(p.strip())
+    except ValueError:
+        return False
+    return True
+
+
+def _check(cfg: Config) -> None:
+    """Values a section can't use: warn and keep the default (a bad quiet_hours once
+    stopped the Starlink watcher for good)."""
+    for name, section in (("pulse", cfg.pulse), ("starlink", cfg.starlink)):
+        if not _quiet_hours_ok(section.quiet_hours):
+            default = type(section)().quiet_hours
+            log.warning(
+                "config %s.quiet_hours = %r is not HH:MM-HH:MM; using %r",
+                name, section.quiet_hours, default,
+            )  # fmt: skip
+            section.quiet_hours = default
+
+
 def load(path: Path | None = None) -> Config:
     cfg = Config()
     path = path or DATA / "config.toml"
     if path.exists():
         with path.open("rb") as fh:
             _merge(cfg, tomllib.load(fh), "")
+    _check(cfg)
     return cfg

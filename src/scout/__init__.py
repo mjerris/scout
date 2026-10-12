@@ -69,10 +69,8 @@ async def _amain(cfg: config_mod.Config) -> None:
     def on_audio_event(kind: str, data: dict[str, Any]) -> None:
         log.info("voice layer %s: %s", kind, data)
         events.put_nowait((kind, data))
-        if kind == "device_changed" and data.get("input") and data["input"] != mic["name"]:
-            before, mic["name"] = mic["name"], str(data["input"])
-            if before:  # say it: otherwise a switch to a worse mic just looks like deafness
-                speaker.speak(_mic_change(before, mic["name"], cfg.audio.input_device))
+        if kind == "device_changed" and (said := _mic_switch(mic, data, cfg.audio.input_device)):
+            speaker.speak(said)  # otherwise a switch to a worse mic just looks like deafness
 
     input_spec = (
         "|".join([cfg.audio.input_device, *cfg.audio.input_fallback])
@@ -85,6 +83,8 @@ async def _amain(cfg: config_mod.Config) -> None:
         if cfg.audio.output_device and cfg.audio.output_fallback
         else cfg.audio.output_device
     )
+    if cfg.audio.backend == "apple":  # its helper takes one device name, not a fallback list
+        input_spec, output_spec = device_name(input_spec, "input"), device_name(output_spec, "output")
     io = audio_io.create(
         cfg.audio.backend,
         input_spec,
@@ -94,6 +94,7 @@ async def _amain(cfg: config_mod.Config) -> None:
     )
     await io.start(loop, on_audio_event)
     log.info("voice layer: %s", io.name)
+    mic["name"] = _input_name(io)  # so the first switch away from it is announced too
     speaker = Speaker(
         str(cfg.path(cfg.tts.model)),
         str(cfg.path(cfg.tts.voices)),
@@ -177,18 +178,47 @@ async def _amain(cfg: config_mod.Config) -> None:
         raise SystemExit(1)
 
 
+def _devices(kind: str) -> tuple[Any, int | None]:
+    """The current device list and the system default for `kind`."""
+    import sounddevice as sd
+
+    sd._terminate()  # PortAudio only reads the device list when it starts
+    sd._initialize()
+    d = sd.default.device[0 if kind == "input" else 1]
+    return sd.query_devices(), d if isinstance(d, int) else None
+
+
+def device_name(spec: str, kind: str, devices: Any = None, default: int | None = None) -> str:
+    """The one device a fallback spec ("OBSBOT|any") means right now, by name; "" is
+    the system default. For the apple backend, whose helper matches a single name."""
+    from .audio_plain import resolve_device
+
+    if "|" not in spec:
+        return spec
+    if devices is None:
+        devices, default = _devices(kind)
+    try:
+        idx = resolve_device(spec, kind, devices, default)
+    except ValueError:
+        return ""
+    return "" if idx is None else str(devices[idx]["name"])
+
+
+def _input_name(io: Any) -> str:
+    """The microphone the voice layer opened (plain and webrtc stats; apple's ready message)."""
+    try:
+        name = io.stats().get("input") or getattr(io, "ready_info", {}).get("input_device")
+    except Exception:
+        return ""
+    return str(name or "")
+
+
 def microphone_present(spec: str = "", devices: Any = None, default: int | None = None) -> bool:
     """Does the input spec (with its fallbacks) resolve to a microphone right now?"""
     from .audio_plain import resolve_device
 
     if devices is None:
-        import sounddevice as sd
-
-        sd._terminate()  # PortAudio only reads the device list when it starts
-        sd._initialize()
-        devices = sd.query_devices()
-        d = sd.default.device[0]
-        default = d if isinstance(d, int) else None
+        devices, default = _devices("input")
     if not any(dev["max_input_channels"] > 0 for dev in devices):
         return False
     try:
@@ -196,6 +226,15 @@ def microphone_present(spec: str = "", devices: Any = None, default: int | None 
     except ValueError:
         return False
     return idx is None or devices[idx]["max_input_channels"] > 0
+
+
+def _mic_switch(mic: dict[str, str], data: dict[str, Any], preferred: str) -> str | None:
+    """What to say when the voice layer moved to another microphone (and remember it)."""
+    name = data.get("input") or data.get("input_device")  # the apple helper says input_device
+    if not name or name == mic["name"]:
+        return None
+    before, mic["name"] = mic["name"], str(name)
+    return _mic_change(before, mic["name"], preferred) if before else None
 
 
 def _mic_change(before: str, now: str, preferred: str) -> str:

@@ -327,13 +327,16 @@ def _under(path: str, roots: list[str], cwd: Path) -> bool:
 
 
 _ASK_PATTERN = re.compile(r"^Bash\((.+?)(?::\*)?\)$")
+_COMMAND_SPLIT = re.compile(r"&&|\|\||[;|\n`()]|\$\(|\b(?:bash|sh|zsh|eval)\b(?:\s+-\w*c\b)?")
 
 
 def matches_always_ask(command: str, patterns: list[str]) -> bool:
     """Does a Bash command match an always-ask rule like "Bash(git push:*)", in any
     of its usual spellings (with -C/-R options, env, sudo)? Every simple command in
-    a chain is checked ("cd x && git push")."""
-    for piece in re.split(r"&&|\|\||;|\|", command):
+    a chain is checked ("cd x && git push"), and so is each line, $(...) or backtick
+    substitution, subshell and `bash -c "..."` / eval payload."""
+    for piece in _COMMAND_SPLIT.split(command):
+        piece = piece.strip().strip("'\"")
         plain = " ".join(piece.split())
         words = " ".join(_argv_words(piece))
         for pat in patterns:

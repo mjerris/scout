@@ -253,7 +253,18 @@ _PAUSE = re.compile(
     r"\b(?:hold on|hang on|hold up|one (?:sec|second|moment|minute)|(?:a|just a) (?:sec|second|moment|minute|bit)|"
     r"give me|gimme)\b"
 )
-_LATER = re.compile(r"\b(?:later|in a (?:minute|bit|moment|sec|second|while)|tomorrow)\b")
+_WEEKDAY_WORDS = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_LATER = re.compile(
+    r"\b(?:later|in a (?:minute|bit|moment|sec|second|while)|tomorrow|tonight|after|before|noon|"
+    r"this (?:morning|afternoon|evening|weekend)|next (?:week|month|time)|" + _WEEKDAY_WORDS + r"|"
+    r"at (?:\d|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)|\d{1,2} ?(?:am|pm|a m|p m))\b"
+)
+# A yes that asks for something different ("yes, but change the subject first",
+# "fine, but make it shorter", "correct the typo"): unclear, so the caller asks again.
+_CHANGE = re.compile(
+    r"\b(?:but \w|instead|first|only|change|changed|fix|edit|update|rewrite|reword|shorter|longer|"
+    r"make (?:it|that|this)|correct (?:the|it|that|this|my)|go back)\b"
+)
 _NO = re.compile(
     r"\b(?:no|nope|nah|nay|don't|dont|do not|deny|denied|negative|stop|cancel|skip|never|never mind|"
     r"wait|abort|reject|rejected|decline|declined|refuse|hold off|go away|"
@@ -294,6 +305,8 @@ def _decide(r: _Reply) -> bool | None:
         return False
     if _LATER.search(w):
         return False  # "do it later", "sure, in a minute": not now
+    if _CHANGE.search(w):
+        return None
     if _PAUSE.search(w):
         return None
     if len(_YES.sub("y", w).split()) > _MAX_ANSWER_WORDS:  # "go ahead" counts as one

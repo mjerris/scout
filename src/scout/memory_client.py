@@ -21,6 +21,13 @@ from .mac import ToolError
 
 DOWN = "Scout's memory service isn't running (it restarts on its own; scripts/launchd.sh status memory)."
 
+TIMEOUT = 5.0  # a down or stuck service fails fast; the voice app waits on these
+SLOW_TIMEOUT = 120.0  # syncing many items, or a search by meaning (loading the model takes ~25 s)
+
+# Never through a proxy: HTTP_PROXY doesn't exempt 127.0.0.1, and the token and the
+# payloads (facts, mail) must not leave the Mac.
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 class Client:
     def __init__(self, url: str, token_path: Path) -> None:
@@ -28,7 +35,9 @@ class Client:
         self.token_path = token_path
         self._token = ""
 
-    def call(self, path: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
+    def call(
+        self, path: str, payload: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
         if not self._token:
             try:
                 self._token = self.token_path.read_text().strip()
@@ -42,7 +51,7 @@ class Client:
             headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (as above)
+            with _opener.open(req, timeout=timeout or TIMEOUT) as resp:
                 out: dict[str, Any] = json.loads(resp.read() or b"{}")
                 return out
         except urllib.error.HTTPError as exc:
@@ -94,7 +103,7 @@ class Store:
         self.c.call("/v1/docs/delete", {"id": id})
 
     def sync(self, kind: str, items: Iterable[dict[str, Any]]) -> tuple[int, int]:
-        out = self.c.call("/v1/docs/sync", {"kind": kind, "items": list(items)})
+        out = self.c.call("/v1/docs/sync", {"kind": kind, "items": list(items)}, timeout=SLOW_TIMEOUT)
         return int(out["changed"]), int(out["removed"])
 
     def get(self, id: str) -> index.Hit | None:
@@ -129,7 +138,9 @@ class Store:
             "limit": limit,
             "semantic": semantic,
         }
-        return [_hit(h) for h in self.c.call("/v1/search", args)["hits"]]
+        # By meaning it may load the model, or wait for it to finish a background batch.
+        timeout = None if semantic is False else SLOW_TIMEOUT
+        return [_hit(h) for h in self.c.call("/v1/search", args, timeout=timeout)["hits"]]
 
     async def asearch(self, query: str, **kw: Any) -> list[index.Hit]:
         return await asyncio.get_running_loop().run_in_executor(None, lambda: self.search(query, **kw))

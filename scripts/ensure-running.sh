@@ -11,16 +11,22 @@ DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"
 LABEL=com.local.scout
 
 current="$(cd "$DATA/current" 2>/dev/null && pwd -P || true)"
-if [ "$current" = "$ROOT" ] && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+# Up to date only if the last install of this code finished: one that failed part way
+# (DATA/current already moved, the old app still loaded) is run again.
+finished() {
+    grep -qF '"status": "ready"' "$DATA/state/install.json" 2>/dev/null &&
+        grep -qF "\"code\": \"$ROOT\"" "$DATA/state/install.json"
+}
+if [ "$current" = "$ROOT" ] && finished && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
     exit 0
 fi
 if launchctl print "gui/$(id -u)/com.local.claude-voice" >/dev/null 2>&1; then
     echo "Scout is installed but waiting: the old claude-voice app still holds the microphone (retire it to switch over)."
     exit 0
 fi
-if [ -d "$DATA/.install.lock" ]; then
+if [ -d "$DATA/.install.lock" ] && kill -0 "$(cat "$DATA/.install.lock/pid" 2>/dev/null)" 2>/dev/null; then
     exit 0                                    # setup already under way
-fi
+fi                                            # (a stale lock: install.sh takes it over)
 mkdir -p "$DATA/logs"
 nohup "$ROOT/scripts/install.sh" "$ROOT" >>"$DATA/logs/install.log" 2>&1 </dev/null &
 echo "Scout is setting up its background app (progress: scout status; log: $DATA/logs/install.log)."

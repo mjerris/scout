@@ -57,6 +57,33 @@ _CALENDARISH = re.compile(
 )
 _MAILISH = re.compile(r"\b(e-?mails?|inbox|mail|messages? from)\b")
 ROOM = "room"
+PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
+SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
+
+# What to say while a long lookup runs, by the tool running (or the request).
+_PROGRESS = [
+    (re.compile(r"\b(e-?mails?|mail|inbox)\b"), "Checking your mail."),
+    (re.compile(r"\b(calendar|schedule|agenda|meetings?|events?)\b"), "Looking at your calendar."),
+    (re.compile(r"\b(weather|forecast|rain|winds?|temperature)\b"), "Getting the weather."),
+    (
+        re.compile(r"\b(maps?|places?|route|directions|drive|driving|near|nearest|nearby)\b"),
+        "Looking that up on the map.",
+    ),
+    (re.compile(r"web|search|fetch|look up"), "Searching."),
+]
+STILL_WORKING = "Still working on it."
+
+
+def progress_phrase(what: str) -> str:
+    """A short line for a lookup: `what` is a tool name or the request."""
+    low = what.lower().replace("_", " ")
+    return next((said for pattern, said in _PROGRESS if pattern.search(low)), "One moment.")
+
+
+def _retrieve(task: asyncio.Task[Any]) -> None:
+    """Read a background prefetch's error, so asyncio doesn't warn about it."""
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        log.debug("context prefetch failed: %s", exc)
 
 
 def _transcript_log() -> logging.Logger:
@@ -125,6 +152,8 @@ class Assistant:
         self.session_said: deque[tuple[float, str, str, bool]] = deque(maxlen=20)
         self.session_inbox: dict[str, list[tuple[float, str]]] = {}
         self.last_spoken: tuple[str, str] | None = None  # (who, text) for "say that again"
+        self.last_private = False  # the last local answer came from private data (a repeat is too)
+        self._turn_tool = ""  # the tool the current room turn is running, for the progress line
         server, names = build_server(self.timers, self.relay, self.memory)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
@@ -215,14 +244,18 @@ class Assistant:
             if took:
                 self.floor.release("briefing")
 
-    def _record_turn(self, request: str, reply: str, by: str, private: bool) -> None:
+    async def _record_turn(self, request: str, reply: str, by: str, private: bool) -> None:
         """Keep the exchange in the local index, so "what did I ask about X" can find it."""
         now = time.time()
         try:
-            self.index.put(
+            # The store may be the memory service: off the event loop.
+            await asyncio.to_thread(
+                self.index.put,
                 f"turn:{now:.3f}", "turn", title=request, body=f"{request}\nScout: {reply}",
                 ts=now, meta={"by": by, "private": private},
             )  # fmt: skip
+        except (ToolError, OSError) as exc:  # the memory service is down: only this record is lost
+            log.warning("recording the conversation failed: %s", exc)
         except Exception:
             log.exception("recording the conversation failed")
 
@@ -431,7 +464,7 @@ class Assistant:
                     self._reject("request", text, "talked over the reply without the wake word")
                     return
                 self.emit("heard", text=text)
-                self._queued = cmd
+                self._queued, self._queued_out = cmd, {"mini": True, "client": None}  # heard in the room
                 return
 
         checked: dict[str, str | None] = {}
@@ -549,6 +582,9 @@ class Assistant:
             ):
                 # The end of a request that a pause split off ("what time do those winds ..."
                 # / "... forecast to start"): drop the half-answered turn, ask the whole thing.
+                # No wake word, so it passes the same checks as a follow-up (not the TV).
+                if self._reject("follow-up", text, check("followup")):
+                    return "gate"
                 whole = f"{self._turn_text.rstrip(' .…')} {text}".strip()
                 log.info("rejoined a split request: %s", whole)
                 self.emit("heard", text=text, **via)
@@ -885,6 +921,34 @@ class Assistant:
                 self.speaker.chime("tick")
                 quiet_since = time.monotonic()
 
+    def _may_say_progress(self) -> bool:
+        """Nothing said yet, not stopped, not asking a question, nothing playing."""
+        return (
+            not self._turn_spoke
+            and not self._silence_turn
+            and self.state == "thinking"
+            and self._confirm_fut is None
+            and not self.speaker.busy
+        )
+
+    async def _progress_speech(self, text: str) -> None:
+        """A long lookup with nothing said yet: say what's happening, once (and once more
+        if it drags on), instead of a long silence. Ticks carry on after that."""
+        tts = self.cfg.tts
+        await asyncio.sleep(tts.progress_delay_s)
+        if self._turn_spoke:
+            return  # the answer is already being spoken
+        if self._may_say_progress():
+            said = progress_phrase(self._turn_tool or text)
+            log.info("progress: %s", said)
+            self.speaker.speak(said)  # not the answer: leaves _turn_spoke and last_spoken alone
+        if tts.progress_again_s <= 0:
+            return
+        await asyncio.sleep(tts.progress_again_s)
+        if self._may_say_progress():
+            log.info("progress: %s", STILL_WORKING)
+            self.speaker.speak(STILL_WORKING)
+
     async def _answer_locally(self, text: str) -> bool:
         """Tier 0: answer in plain code when the request clearly fits. True if handled."""
         if not self.cfg.claude.local_first:
@@ -895,8 +959,15 @@ class Assistant:
             private = False  # worked out from private data (a memory, an email's text)
             if said is not None and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
+                private = self.last_private  # ...and is as private as what it repeats
             if said is None:
-                said = memory.answer(text, self.memory)
+                # The memory may be the memory service: off the event loop, and while it's
+                # down Claude takes the request.
+                try:
+                    said = await asyncio.to_thread(memory.answer, text, self.memory)
+                except (ToolError, OSError) as exc:
+                    log.warning("memory unavailable for a local answer: %s", exc)
+                    said = None
                 private = said is not None
             if said is None and self.tier1 is not None:
                 now = datetime.now().astimezone()
@@ -912,20 +983,25 @@ class Assistant:
             return False
         if said is None:
             return False
-        log.info("answered locally (tier %d): %s -> %s", tier, text, said or "(done)")
+        log.info("answered locally (tier %s): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)", private))
-        ledger.record(str(tier), time.monotonic() - self._turn_started if self._turn_started else 0.0)
-        self._record_turn(text, said or "(done)", f"tier {tier}", private)
-        if said:
-            said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
-            self._set_state("speaking")
-            self.say(said)
-            if tier is not None:
-                self.last_spoken = ("Scout", said)
-        if hint := mail_mac.take_setup_hint():  # a slow mail search: offer the one-time fix
-            self.say(hint)
-        await self.speaker.wait_idle()
+        if tier is not None:  # a repeat isn't a request of its own
+            ledger.record(str(tier), time.monotonic() - self._turn_started if self._turn_started else 0.0)
+        if self._silence_turn:
+            log.info("stopped before the local answer was ready; not saying it")
+        else:
+            if said:
+                said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
+                self._set_state("speaking")
+                self.say(said)
+                if tier is not None:
+                    self.last_spoken = ("Scout", said)
+                    self.last_private = private
+            if hint := mail_mac.take_setup_hint():  # a slow mail search: offer the one-time fix
+                self.say(hint)
+            await self.speaker.wait_idle()
+        await self._record_turn(text, said or "(done)", f"tier {tier}", private)
         return True
 
     def relay(self, session: str, text: str) -> str:
@@ -988,26 +1064,48 @@ class Assistant:
                 when = datetime.fromtimestamp(ts).strftime("%-I:%M %p")
                 note = "it waited for a reply" if waited else "it did not wait for a reply"
                 lines.append(f"  [{when}, session {agent}, {note}] {msg}")
-        if facts := self.privacy.memories(self.memory, text):
+        try:
+            # The memory service: off the event loop, and its outage only costs the memories.
+            facts = await asyncio.to_thread(self.privacy.memories, self.memory, text)
+        except Exception as exc:
+            log.warning("memories unavailable, asking without them: %s", exc)
+            facts = []
+        if facts:
             lines.append("The user told Scout (memories that may bear on this request):")
             lines += [f"  - {f}" for f in facts]
         low = text.lower()
         try:
             if _CALENDARISH.search(low):
                 start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                listing = await self.privacy.calendar_events(
-                    start.isoformat(), (start + timedelta(days=2)).isoformat()
+                listing = await self._prefetch(
+                    "the calendar",
+                    self.privacy.calendar_events(start.isoformat(), (start + timedelta(days=2)).isoformat()),
                 )
-                lines.append(
-                    "Calendar, today and tomorrow (fetched just now; use it rather than calling the tool):\n"
-                    + listing
-                )
+                if listing is not None:
+                    lines.append(
+                        "Calendar, today and tomorrow (fetched just now; use it rather than calling the tool):\n"
+                        + listing
+                    )
             if _MAILISH.search(low):
-                listing = await self.privacy.mail_list(5, budget_s=privacy.PREFETCH_BUDGET_S)
-                lines.append("Newest email (fetched just now):\n" + listing)
+                listing = await self._prefetch(
+                    "mail", self.privacy.mail_list(5, budget_s=privacy.PREFETCH_BUDGET_S)
+                )
+                if listing is not None:
+                    lines.append("Newest email (fetched just now):\n" + listing)
         except ToolError as exc:
             log.info("context prefetch skipped: %s", exc)
         return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
+
+    async def _prefetch(self, what: str, fetch: Coroutine[Any, Any, str]) -> str | None:
+        """A context fetch, or None if it takes longer than PREFETCH_DEADLINE_S (a big
+        inbox can take 15 s to list); it then finishes in the background."""
+        task = self._spawn(fetch)
+        task.add_done_callback(_retrieve)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), PREFETCH_DEADLINE_S)
+        except TimeoutError:
+            log.info("context prefetch of %s is slow; asking without it", what)
+            return None
 
     async def _run_turn(self, text: str, speak: bool, client: str | None = None) -> None:
         self._out = {"mini": speak, "client": client}
@@ -1032,12 +1130,21 @@ class Assistant:
                     client,
                 )
             self._queued = None
+            self._queued_out = {"mini": True, "client": None}
+            self._silence_turn = False  # it's over: later confirmations aren't this turn's
             self._out = {"mini": True, "client": None}
             self._set_state("idle")
             return
         self.emit("you", text=text)
         self._set_state("thinking")
+        self._turn_tool = ""
         ticks: asyncio.Task[None] | None = None
+        # Started before the local tiers: a weather or route lookup there can take seconds too.
+        progress = (
+            asyncio.create_task(self._progress_speech(text))
+            if speak and self.cfg.tts.progress_speech
+            else None
+        )
         replies: list[str] = []
         try:
             if await self._answer_locally(text):
@@ -1050,6 +1157,7 @@ class Assistant:
                 if kind in ("speak", "text"):
                     if kind == "text":
                         self.emit("claude", text=data)
+                        self.last_private = False
                     if not self._silence_turn:
                         said = speech.to_speech(data)
                         if said:
@@ -1060,10 +1168,11 @@ class Assistant:
                         replies.append(data)
                 elif kind == "spoken":  # its sentences were spoken as they arrived
                     self.emit("claude", text=data)
-                    self.last_spoken = ("Scout", data)
+                    self.last_spoken, self.last_private = ("Scout", data), False
                     replies.append(data)
                 elif kind == "tool":
                     name, args = data
+                    self._turn_tool = name
                     self.emit("tool", name=name, input=_preview(args))
                     if self.state == "speaking" and not self.speaker.busy:
                         self._set_state("thinking")
@@ -1087,8 +1196,10 @@ class Assistant:
         finally:
             if ticks:
                 ticks.cancel()
+            if progress:
+                progress.cancel()
             if replies:
-                self._record_turn(text, " ".join(replies), "claude", False)
+                self._spawn(self._record_turn(text, " ".join(replies), "claude", False))
             self._set_state("idle")
             # The follow-up window is for a reply the room heard; a phone-only turn opens none.
             heard_in_room = self._out["mini"]
@@ -1098,10 +1209,11 @@ class Assistant:
             self.floor.release(ROOM, hold=follow > 0, ttl=follow)
             self._out = {"mini": True, "client": None}
             queued, self._queued = self._queued, None
-            out = self._queued_out
+            out, self._queued_out = self._queued_out, {"mini": True, "client": None}
             rejoined, self._rejoined = self._rejoined, False
             if queued and (not self._silence_turn or rejoined) and queued.strip():
                 asyncio.get_running_loop().call_soon(self._start_queued, queued, out)
+            self._silence_turn = False  # it's over: later confirmations aren't this turn's
 
     def _start_queued(self, text: str, out: dict[str, Any]) -> None:
         if speech.is_reset(text):
@@ -1129,7 +1241,7 @@ class Assistant:
     async def _confirm_one(
         self, spoken: str, description: str, out: dict[str, Any] | None = None
     ) -> bool | str | None:
-        if self._silence_turn:  # the turn was stopped; don't ask about its tools
+        if self._silence_turn and out is None:  # the room turn was stopped; don't ask about its tools
             return False
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
@@ -1183,14 +1295,30 @@ class Assistant:
             spoken, detail = describe_tool(name, args)
             who = agent.split("#", 1)[0] or "a session"
             log.info("permission request from %s: %s", agent, detail.splitlines()[0])
-            answer = await self._confirm(
-                f"From {who}: {spoken}",
-                f"{detail}\n(requested by session {agent})",
-                {"mini": True, "client": None},
-            )
-            offer = tr.record(name, "asked", None if answer is None else bool(answer), detail, by=agent)
-            if offer and answer and answer != "always":
-                self.speaker.speak(offer)
+            # Ask with the floor, like any speaker: otherwise the "yes" can go to a session
+            # that is listening for the answer to its own question.
+            stop_ev = self._stop_event
+            held = self.floor.owner() == agent  # its hold between exchanges: give it back after
+            if not await self.floor.acquire(agent, SHARED_FLOOR_WAIT_S, cancel=stop_ev):
+                if stop_ev.is_set():
+                    return {
+                        "status": "stopped",
+                        "error": "The user said stop, so this was not asked or done.",
+                    }
+                return {"status": "floor_busy", "error": "The voice was busy, so this was not asked or done."}
+            try:
+                answer = await self._confirm(
+                    f"From {who}: {spoken}",
+                    f"{detail}\n(requested by session {agent})",
+                    {"mini": True, "client": None},
+                )
+                offer = tr.record(name, "asked", None if answer is None else bool(answer), detail, by=agent)
+                if offer and answer and answer != "always":
+                    self.speaker.speak(offer)
+                if answer == "always":
+                    self.speaker.speak(tr.promote(name))
+            finally:
+                self.floor.release(agent, hold=held)
             if answer is None:
                 return {
                     "status": "no_answer",
@@ -1198,8 +1326,6 @@ class Assistant:
                 }
             if not answer:
                 return {"status": "declined", "error": "The user declined this by voice."}
-            if answer == "always":
-                self.speaker.speak(tr.promote(name))
         try:
             return {"status": "ok", "text": await t.run(args)}
         except ToolError as exc:

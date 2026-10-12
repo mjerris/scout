@@ -400,9 +400,12 @@ async def watch(announce: Any) -> None:
         except Exception:
             log.exception("starlink watch")
             f = None
-        for text in w.update(f, time.time()):
-            if cfg.announce and not in_quiet_hours(cfg.quiet_hours, dt.datetime.now()):
-                await announce(text)
-            else:
-                log.info("starlink (not announced): %s", text)
+        try:  # a bad quiet_hours or a failed announce must not end the watch
+            for text in w.update(f, time.time()):
+                if cfg.announce and not in_quiet_hours(cfg.quiet_hours, dt.datetime.now()):
+                    await announce(text)
+                else:
+                    log.info("starlink (not announced): %s", text)
+        except Exception:
+            log.exception("starlink announce")
         await asyncio.sleep(cfg.poll_s)

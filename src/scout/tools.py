@@ -59,11 +59,14 @@ class Timers:
 
     def cancel(self, which: str) -> list[str]:
         which = (which or "").strip().lower()
-        hits = [
-            tid
-            for tid, (label, _, _) in self.active.items()
-            if which in ("all", "") or which == str(tid) or which in label.lower()
-        ]
+        if which.isdigit() and int(which) in self.active:
+            hits = [int(which)]  # timer 1, not also "pasta 10 min"
+        else:
+            hits = [
+                tid
+                for tid, (label, _, _) in self.active.items()
+                if which in ("all", "") or which in label.lower()
+            ]
         names = []
         for tid in hits:
             label, _, task = self.active.pop(tid)

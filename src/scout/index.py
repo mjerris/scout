@@ -153,7 +153,7 @@ class NomicEmbedder:
         return False
 
 
-_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9']*")
+_WORD = re.compile(r"[^\W_][\w']*")  # any script: "José", "Müller", "café" (FTS folds the accents)
 _STOP = frozenset({"a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "for", "with", "about", "from", "by", "is", "are", "was", "were", "be", "been", "am", "do", "does", "did", "what", "whats", "who", "where", "when", "how", "which", "that", "this", "it", "its", "my", "me", "i", "you", "your", "we", "our", "they", "their", "there", "have", "has", "had", "not", "no", "so", "just", "can", "could", "would", "will", "any", "some"})  # fmt: skip
 
 
@@ -202,11 +202,14 @@ class Index:
         ts: float | None = None,
         meta: dict[str, Any] | None = None,
     ) -> bool:
-        """Add or update one item. Returns False when it was already stored unchanged."""
+        """Add or update one item. Returns False when it was already stored unchanged.
+        `sig` covers only the embedded text, so a change to meta, ts or kind updates the
+        row but keeps its vector."""
         sig = _sig(title, body, who)
+        meta = meta or {}
         with self._lock:
-            row = self._conn.execute("SELECT sig FROM docs WHERE id = ?", (id,)).fetchone()
-            if row and row[0] == sig:
+            row = self._conn.execute("SELECT kind, ts, meta, sig FROM docs WHERE id = ?", (id,)).fetchone()
+            if row and (row[0], row[3]) == (kind, sig) and ts in (None, row[1]) and _meta(row[2]) == meta:
                 return False
             self._conn.execute(
                 "INSERT INTO docs(id, kind, title, body, who, ts, meta, sig) VALUES (?,?,?,?,?,?,?,?) "
@@ -219,7 +222,7 @@ class Index:
                     body,
                     who,
                     ts if ts is not None else time.time(),
-                    json.dumps(meta or {}),
+                    json.dumps(meta),
                     sig,
                 ),
             )
@@ -392,11 +395,14 @@ class Index:
             raise RuntimeError("no embedder")
         with self._lock:
             for h, v in zip(hits, vecs, strict=True):
+                # Keyed by the sig of the text that was embedded; if the item changed while
+                # it was being embedded, drop the stale vector (the next pass redoes it).
+                sig = _sig(h.title, h.body, h.who)
                 row = self._conn.execute("SELECT sig FROM docs WHERE id = ?", (h.id,)).fetchone()
-                if row:
+                if row and row[0] == sig:
                     self._conn.execute(
                         "INSERT OR REPLACE INTO vecs(id, model, sig, vec) VALUES (?,?,?,?)",
-                        (h.id, self.embedder.model, row[0], np.asarray(v, dtype=np.float32).tobytes()),
+                        (h.id, self.embedder.model, sig, np.asarray(v, dtype=np.float32).tobytes()),
                     )
 
     def embed_pending(self, limit: int = 64) -> int:
@@ -468,11 +474,15 @@ def _filter_args(kinds: Sequence[str] | None, since: float | None) -> tuple[Any,
 
 def _hit(row: Sequence[Any]) -> Hit:
     id, kind, title, body, who, ts, meta = row
+    return Hit(id, kind, title, body, who, float(ts), _meta(meta))
+
+
+def _meta(text: str | None) -> dict[str, Any]:
     try:
-        m = json.loads(meta) if meta else {}
+        m = json.loads(text) if text else {}
     except ValueError:
-        m = {}
-    return Hit(id, kind, title, body, who, float(ts), m)
+        return {}
+    return m if isinstance(m, dict) else {}
 
 
 EMBED_CHARS = 1000  # what gets embedded: subject, who and the opening (long mail embeds slowly)

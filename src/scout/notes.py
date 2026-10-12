@@ -73,7 +73,7 @@ async def _to_apple(title: str, body: str) -> str | None:
     try:
         # 120 s: the first time, macOS asks whether Scout may control Notes.
         return await mac._run(
-            "/usr/bin/osascript", "-e", _APPLE_ADD, cfg.apple_folder, title, rich, timeout=120
+            "/usr/bin/osascript", "-e", _APPLE_ADD, "--", cfg.apple_folder, title, rich, timeout=120
         )
     except (ToolError, OSError) as exc:
         log.info("Apple Notes copy skipped (%s); notes stay in Scout", exc)
@@ -94,7 +94,11 @@ async def add(text: Any, title: Any = None) -> dict[str, Any]:
     ix = _ix()
     ix.sql("INSERT INTO notes(title, body, created, updated) VALUES (?,?,?,?)", (name, body, now, now))
     nid = ix.last_rowid
-    index.default().put(f"note:{nid}", "note", title=name, body=body, ts=now)
+    try:  # notes are found through the index: without it the add is undone, not half-done
+        index.default().put(f"note:{nid}", "note", title=name, body=body, ts=now)
+    except Exception:
+        ix.sql("DELETE FROM notes WHERE id = ?", (nid,))
+        raise
     apple = await _to_apple(name, body)
     if apple:
         ix.sql("UPDATE notes SET apple_id = ? WHERE id = ?", (apple, nid))
@@ -143,11 +147,11 @@ async def delete(a: dict[str, Any]) -> str:
     rows = ix.sql("SELECT title, apple_id FROM notes WHERE id = ?", (nid,))
     if not rows:
         raise ToolError(f"there's no note {nid}")
+    index.default().delete(f"note:{nid}")  # first: if the index is down, nothing changes
     ix.sql("DELETE FROM notes WHERE id = ?", (nid,))
-    index.default().delete(f"note:{nid}")
     if rows[0][1]:
         try:
-            await mac._run("/usr/bin/osascript", "-e", _APPLE_DELETE, rows[0][1], timeout=30)
+            await mac._run("/usr/bin/osascript", "-e", _APPLE_DELETE, "--", rows[0][1], timeout=30)
         except (ToolError, OSError) as exc:
             log.info("Apple Notes copy of note %d not deleted: %s", nid, exc)
     return f"Deleted note {nid}: {rows[0][0]}."

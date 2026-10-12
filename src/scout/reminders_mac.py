@@ -101,11 +101,25 @@ def format_reminders(data: dict[str, Any], now: dt.datetime | None = None) -> st
     return "\n".join(lines)
 
 
+async def _kept_by_scout(list_name: Any, include_completed: Any, due_before: Any) -> dict[str, Any]:
+    """auto: items added to Scout's own lists while Reminders couldn't be used. They stay
+    there, so Reminders reads show them too (empty when there are none)."""
+    if _backend() != "auto":
+        return {"reminders": [], "total": 0}
+    try:
+        return await locallists.reminder_data(list_name, include_completed, due_before)
+    except ToolError:  # no Scout list by that name
+        return {"reminders": [], "total": 0}
+
+
 async def list_names(helper: Path | None = None) -> list[str]:
     """The names of the Mac's reminder lists."""
     if not await _apple(helper):
         return await locallists.list_names()
-    return [str(c["title"]) for c in (await vcal("reminder-lists", helper=helper)).get("lists", [])]
+    names = [str(c["title"]) for c in (await vcal("reminder-lists", helper=helper)).get("lists", [])]
+    if (await _kept_by_scout(None, False, None))["reminders"]:
+        names += [n for n in await locallists.list_names() if n.lower() not in {x.lower() for x in names}]
+    return names
 
 
 async def lists(helper: Path | None = None) -> str:
@@ -139,7 +153,20 @@ async def reminder_data(
         args += ["--due-before", iso(parse_time(due_before, "due_before"))]
     if not await _apple(helper):
         return await locallists.reminder_data(list_name, include_completed, due_before)
-    return await vcal(*args, helper=helper)
+    kept = await _kept_by_scout(list_name, include_completed, due_before)
+    try:
+        data = await vcal(*args, helper=helper)
+    except ToolError:
+        if not kept["reminders"]:
+            raise
+        return kept  # a list only Scout has
+    if not kept["reminders"]:
+        return data
+    return {
+        **data,
+        "reminders": [*data.get("reminders", []), *kept["reminders"]],
+        "total": int(data.get("total", len(data.get("reminders", [])))) + kept["total"],
+    }
 
 
 async def reminders(
@@ -173,8 +200,15 @@ async def add(a: dict[str, Any], helper: Path | None = None) -> str:
 
 
 async def complete(a: dict[str, Any], helper: Path | None = None) -> str:
-    if str(a.get("id") or "").startswith("scout:") or not await _apple(helper):
+    if str(a.get("id") or "").startswith("scout:"):
         return await locallists.complete(a)
+    if not await _apple(helper):
+        if _backend() == "scout":
+            return await locallists.complete(a)
+        raise ToolError(  # a Reminders item: Scout's own lists don't have it
+            "Reminders can't be reached right now, so that reminder can't be marked done yet. "
+            "Try again in a few minutes."
+        )
     rid = text_arg(a.get("id"), "id", 200)
     title = text_arg(a.get("title"), "title", 200)
     if not rid or not title:

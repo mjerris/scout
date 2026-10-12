@@ -10,10 +10,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
 import re
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import freebusy, reminders_mac
 from .freebusy import clock, join
@@ -101,6 +105,27 @@ async def build(
     return " ".join([greeting(now), *parts])
 
 
+def local_now() -> dt.datetime:
+    """Now in this Mac's time zone, with its daylight saving rules: other days then get
+    their own offset (datetime.now().astimezone() has only today's). Read each time,
+    so a zone change on the road is picked up."""
+    try:
+        if tz := os.environ.get("TZ"):
+            return dt.datetime.now(ZoneInfo(tz.removeprefix(":")))
+        with Path("/etc/localtime").open("rb") as f:
+            return dt.datetime.now(ZoneInfo.from_file(f))
+    except (OSError, ValueError, ZoneInfoNotFoundError):
+        return dt.datetime.now().astimezone()
+
+
+async def _wall_sleep(seconds: float) -> None:
+    """Sleep until the wall clock has moved on `seconds`. asyncio's clock stops while
+    the Mac sleeps, so one long sleep would wake hours late after the lid was closed."""
+    end = time.time() + seconds
+    while (left := end - time.time()) > 0:
+        await asyncio.sleep(min(left, 60.0))
+
+
 def next_at(at: str, now: dt.datetime) -> dt.datetime:
     """The next time the clock reads `at` ("07:30"), strictly after now."""
     t = freebusy.parse_clock(at, "briefing.at")
@@ -111,8 +136,8 @@ def next_at(at: str, now: dt.datetime) -> dt.datetime:
 async def daily(
     at: str,
     run: Callable[[], Awaitable[None]],
-    now: Callable[[], dt.datetime] = lambda: dt.datetime.now().astimezone(),
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], dt.datetime] = local_now,
+    sleep: Callable[[float], Awaitable[None]] = _wall_sleep,
 ) -> None:
     """Call `run` every day at `at`, forever. A failed run is logged and skipped."""
     try:
@@ -121,7 +146,7 @@ async def daily(
         log.error("no scheduled briefing: %s", exc)
         return
     while True:
-        await sleep(max((when - now()).total_seconds(), 0.0))
+        await sleep(max(when.timestamp() - now().timestamp(), 0.0))  # real seconds, across a DST change
         try:
             await run()
         except Exception:
