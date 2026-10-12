@@ -98,3 +98,15 @@ def test_hits_format_for_claude(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("text", "q"), [("What's Pat's number?", '"pat" OR "number"'), ("the and of", "")])
 def test_fts_query(text: str, q: str) -> None:
     assert index.fts_query(text) == q
+
+
+def test_a_search_embeds_only_a_few_new_items_itself(tmp_path: Path) -> None:
+    """The background pass embeds the backlog; a search adds at most a few, and text
+    matches still waiting for a vector are kept by their text rank."""
+    emb = FakeEmbedder()
+    ix = make(tmp_path, emb)
+    ix.max_new_per_search = 1
+    hits = ix.search("starlink manager campsite")
+    assert emb.calls == [1, 1]  # one item embedded, then the query
+    assert {h.id for h in hits} == {"m1", "m2", "t1"}
+    assert sum(h.how == "text" for h in hits) == 2  # the two still waiting rank by text

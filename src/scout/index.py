@@ -106,9 +106,14 @@ class NomicEmbedder:
     Loads on first use; `unload_if_idle` frees its ~1.8 GB after `idle_s`."""
 
     def __init__(
-        self, name: str = "nomic-ai/nomic-embed-text-v1.5", dims: int = 256, idle_s: float = 900
+        self,
+        name: str = "nomic-ai/nomic-embed-text-v1.5",
+        dims: int = 256,
+        idle_s: float = 900,
+        threads: int = 2,
     ) -> None:
         self.name = name
+        self.threads = threads
         self.dims = dims
         self.idle_s = idle_s
         self.model = f"{name}@{dims}"
@@ -123,7 +128,8 @@ class NomicEmbedder:
 
                 t0 = time.perf_counter()
                 MODELS.mkdir(parents=True, exist_ok=True)
-                self._m = TextEmbedding(self.name, cache_dir=str(MODELS))
+                # Few threads: embedding never takes the cores listening and speaking need.
+                self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
                 log.info("embedder loaded in %.1fs", time.perf_counter() - t0)
             self._used = time.monotonic()
             prefix = "search_query: " if query else "search_document: "
@@ -172,6 +178,7 @@ class Index:
     path: Path
     embedder: Embedder | None = None
     min_similarity: float = 0.5  # a match by meaning alone (no shared words) needs this cosine
+    max_new_per_search: int = 32  # items a search may embed itself; the background does the rest
     _conn: sqlite3.Connection = field(init=False, repr=False)
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
@@ -318,8 +325,9 @@ class Index:
             cands.setdefault(h.id, h)
         if not cands:
             return []
-        hits = list(cands.values())
-        vecs = self._vectors(hits)
+        # Rank by meaning what has a vector, embedding at most a few new ones here (the
+        # background pass embeds the rest); text matches without one keep their text rank.
+        vecs, hits, unranked = self._vectors(list(cands.values()), self.max_new_per_search)
         q = self.embedder.embed([query], query=True)[0]
         sims = vecs @ q
         # Meaning decides; sharing the query's words adds a little (more for the best text
@@ -335,6 +343,11 @@ class Index:
                 continue
             h.how = "text+meaning" if t is not None else "meaning"
             ranked.append(h)
+        waiting = {h.id for h in unranked}
+        for t, h in enumerate(text):
+            if h.id in waiting:
+                h.score, h.how = self.min_similarity + TEXT_BONUS / (1 + t), "text"
+                ranked.append(h)
         ranked.sort(key=lambda h: -h.score)
         return ranked[:limit]
 
@@ -343,8 +356,11 @@ class Index:
 
     # --- vectors (lazy) ---------------------------------------------------------------
 
-    def _vectors(self, hits: Sequence[Hit]) -> np.ndarray:
-        """Each hit's vector: from the cache, else embedded now and cached."""
+    def _vectors(
+        self, hits: Sequence[Hit], max_new: int | None = None
+    ) -> tuple[np.ndarray, list[Hit], list[Hit]]:
+        """(vectors, the hits they belong to, hits left without one): cached vectors plus
+        up to `max_new` embedded now (all when None), which are cached too."""
         if self.embedder is None:
             raise RuntimeError("no embedder")
         model = self.embedder.model
@@ -357,6 +373,8 @@ class Index:
             ):
                 have[id] = np.frombuffer(blob, dtype=np.float32)
         missing = [h for h in hits if h.id not in have]
+        skipped = missing[max_new:] if max_new is not None else []
+        missing = missing[:max_new] if max_new is not None else missing
         if missing:
             t0 = time.perf_counter()
             new = self.embedder.embed([_doc_text(h) for h in missing])
@@ -364,7 +382,10 @@ class Index:
             for h, v in zip(missing, new, strict=True):
                 have[h.id] = v
             log.info("embedded %d items in %.2fs", len(missing), time.perf_counter() - t0)
-        return np.stack([have[h.id] for h in hits])
+        kept = [h for h in hits if h.id in have]
+        dims = next(iter(have.values())).shape[0] if have else 1
+        vecs = np.stack([have[h.id] for h in kept]) if kept else np.zeros((0, dims), np.float32)
+        return vecs, kept, skipped
 
     def _store_vectors(self, hits: Sequence[Hit], vecs: np.ndarray) -> None:
         if self.embedder is None:
@@ -454,8 +475,11 @@ def _hit(row: Sequence[Any]) -> Hit:
     return Hit(id, kind, title, body, who, float(ts), m)
 
 
+EMBED_CHARS = 1000  # what gets embedded: subject, who and the opening (long mail embeds slowly)
+
+
 def _doc_text(h: Hit) -> str:
-    return " ".join(p for p in (h.title, h.who, h.body[:2000]) if p)
+    return " ".join(p for p in (h.title, h.who, h.body[:EMBED_CHARS]) if p)
 
 
 def format_hits(hits: Sequence[Hit], snippets: bool = True) -> str:
