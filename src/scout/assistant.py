@@ -21,6 +21,7 @@ from . import (
     briefing,
     gate,
     index,
+    ledger,
     local_intents,
     mail_mac,
     mailindex,
@@ -914,6 +915,7 @@ class Assistant:
         log.info("answered locally (tier %d): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)", private))
+        ledger.record(str(tier), time.monotonic() - self._turn_started if self._turn_started else 0.0)
         self._record_turn(text, said or "(done)", f"tier {tier}", private)
         if said:
             said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
@@ -1066,6 +1068,8 @@ class Assistant:
                     if self.state == "speaking" and not self.speaker.busy:
                         self._set_state("thinking")
                 elif kind == "result":
+                    took = time.monotonic() - self._turn_started if self._turn_started else 0.0
+                    ledger.record("claude", took, **ledger.from_result(data))
                     self.emit(
                         "result",
                         cost=data.total_cost_usd,
