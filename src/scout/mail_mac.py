@@ -510,6 +510,7 @@ async def listing(
             return {"messages": keep[:n], "considered": len(rows), "days": days}
     data = _timed(await _call(run, _LIST, str(n), "true" if unread else "false", q, str(days)))
     idx.forget([int(m["id"]) for m in data.get("messages", []) if isinstance(m.get("id"), int)])
+    _remember(data.get("messages", []), with_body=False)
     took = time.monotonic() - t0
     log.info(
         "mail: listed by Mail scripting in %d ms (%d messages)", took * 1000, len(data.get("messages", []))
@@ -614,14 +615,25 @@ async def message(message_id: Any, run: Runner = _jxa, index: Index | None = Non
     if row is None:  # an id from Mail scripting: Mail's answer is the message
         if m is None:
             raise ToolError(f"no inbox message with id {mid}")
+        _remember([m], with_body=True)
         return m
     if m is not None and not _same(row, m):
+        _remember([m], with_body=True)
         return m
     idx.mismatch(mid, row, m)
     return await _find(run, mid, row)
 
 
-async def bodies(ids: list[int], run: Runner = _jxa, index: Index | None = None) -> dict[int, dict[str, Any]]:
+def _remember(messages: list[dict[str, Any]], with_body: bool) -> None:
+    """Mail touched for a task goes into Scout's index (mailindex.py), off the request path."""
+    from . import mailindex
+
+    mailindex.remember_soon(messages, with_body)
+
+
+async def bodies(
+    ids: list[int], run: Runner = _jxa, index: Index | None = None, remember: bool = True
+) -> dict[int, dict[str, Any]]:
     """Several messages with their text, by id, in one call to Mail. Missing ids are left out.
     Ids from the index are checked like message()'s."""
     if not ids:
@@ -642,6 +654,8 @@ async def bodies(ids: list[int], run: Runner = _jxa, index: Index | None = None)
             got[mid] = await _find(run, mid, row)
         except ToolError as exc:
             log.warning("mail: message %d left out: %s", mid, exc)
+    if remember:
+        _remember(list(got.values()), with_body=True)
     return got
 
 

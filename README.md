@@ -523,9 +523,10 @@ FTS5), then a re-rank by meaning with a local embedding model (nomic-embed-text,
 256 dimensions, CPU). Vectors are computed lazily: a search embeds only its
 candidates and caches them, and an idle pass embeds new items ahead of time. Only the
 best few matches reach Claude, through the `local_search` tool.
-The inbox is indexed too: while Scout is idle, a pass every 20 minutes reads new
-messages through Mail.app (the access Scout already has) into the store, keeping
-`mail_days` (default 90). Mail searches then match message text, by words and
-meaning, locally; they fall back to asking Mail when the index has nothing yet. Mail
-text never reaches Claude through search outside open privacy mode. `[index]` in
+The inbox is indexed too, lazily: while Scout is idle, a pass every 20 minutes reads
+mail that arrived since the newest indexed message (Mail.app, the access Scout already
+has). Older mail joins the index only when Scout touches it for a task: a Mail search
+result (sender and subject, its text filled in on a later pass) or a message read or
+summarized. Mail searches use the index first, by words and meaning, and fall back to
+asking Mail. Mail text never reaches Claude through search outside open privacy mode. `[index]` in
 config.toml tunes it; `semantic = false` keeps it to full text only.

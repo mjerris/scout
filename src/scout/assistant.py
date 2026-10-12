@@ -302,7 +302,7 @@ class Assistant:
                 )
             )
         if self.cfg.index.mail:
-            self._spawn(mailindex.loop(idle, keep_days=self.cfg.index.mail_days))
+            self._spawn(mailindex.loop(idle))
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         while True:

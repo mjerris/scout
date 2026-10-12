@@ -36,23 +36,58 @@ def fake_mail(calls: list[str]) -> Any:
     return run
 
 
-def test_a_pass_stores_new_mail_once_and_ages_out_old_mail() -> None:
+def test_passes_index_only_new_mail() -> None:
+    """The first pass takes the last two days; later ones only what's newer than the
+    newest indexed message. Older mail isn't backfilled."""
     calls: list[str] = []
     ix = index.default()
-    first = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls), keep_days=90))
-    assert (first["listed"], first["stored"], first["total"]) == (3, 2, 2)  # the 200-day-old one skipped
-    again = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls), keep_days=90))
-    assert (again["stored"], again["total"]) == (0, 2)
-    assert calls == ["list", "read 2", "list"]  # nothing read twice (2 fit in one chunk)
-    ix.put("mail:7", "mail", title="Stale", ts=0)
-    assert asyncio.run(mailindex.sync_pass(ix, fake_mail(calls), keep_days=90))["aged_out"] == 1
+    first = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls)))
+    assert (first["listed"], first["new"], first["stored"], first["total"]) == (
+        3,
+        1,
+        1,
+        1,
+    )  # only the 1-hour-old one
+    again = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls)))
+    assert (again["new"], again["stored"]) == (0, 0)
+    assert calls == ["list", "read 1", "list"]  # nothing read twice
     rover = ix.get("mail:41")
     assert rover is not None and rover.title == "New message from Catherine" and rover.who.startswith("Rover")
     assert "unsubscribe" not in rover.body  # footers dropped, like spoken summaries
 
 
+def test_older_mail_is_remembered_when_touched_and_filled_in_later() -> None:
+    """A Mail search result is stored as sender and subject; the next pass reads its text."""
+    ix = index.default()
+    assert mailindex.remember([INBOX[1]], with_body=False) == 1  # found by a search
+    assert mailindex.remember([INBOX[1]], with_body=False) == 0  # already known
+    sam = ix.get("mail:40")
+    assert sam is not None and sam.body == "" and sam.meta["partial"] is True
+    calls: list[str] = []
+    out = asyncio.run(mailindex.sync_pass(ix, fake_mail(calls)))
+    assert out["filled"] == 1
+    sam = ix.get("mail:40")
+    assert sam is not None and "taco place" in sam.body and not sam.meta.get("partial")
+    mailindex.remember([{**INBOX[2], "body": BODIES[39]}], with_body=True)  # read in full for a task
+    assert ix.get("mail:39") is not None  # old mail stays: it mattered
+
+
+def test_mail_read_for_a_task_lands_in_the_index() -> None:
+    async def run(script: str, *args: str) -> str:
+        assert script == mail_mac._READ
+        return json.dumps({**INBOX[1], "body": BODIES[40]})
+
+    async def go() -> None:
+        await mail_mac.message(40, run=run)
+        await asyncio.sleep(0.05)  # remembered off the request path
+
+    asyncio.run(go())
+    hit = index.default().get("mail:40")
+    assert hit is not None and "taco place" in hit.body
+
+
 def test_mail_search_uses_the_index_and_matches_message_text() -> None:
-    asyncio.run(mailindex.sync_pass(index.default(), fake_mail([]), keep_days=90))
+    asyncio.run(mailindex.sync_pass(index.default(), fake_mail([])))
 
     async def mail_must_not_be_asked(script: str, *args: str) -> str:
         raise AssertionError("searched Mail instead of the index")
