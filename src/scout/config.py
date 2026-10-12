@@ -245,8 +245,9 @@ class IndexConfig:
     model: str = "nomic-ai/nomic-embed-text-v1.5"
     dims: int = 256
     unload_after_s: float = 0.0  # free the model's ~1.8 GB after this long unused (0 = keep it loaded)
-    mail: bool = True  # index the inbox through Mail.app in the background (fast local mail search)
-    mail_days: int = 90  # keep this many days of mail in the index
+    # Index new mail through Mail.app in the background, and older mail lazily as Scout
+    # touches it for a task (search results, messages read): fast local mail search.
+    mail: bool = True
     background_embed: bool = True  # embed new items ahead of time while idle
     min_similarity: float = 0.5  # a match by meaning alone needs at least this
 

@@ -37,39 +37,88 @@ async def _slow_jxa(script: str, *args: str) -> str:
     return await mail_mac._jxa(script, *args, timeout=TIMEOUT_S)
 
 
-async def sync_pass(ix: index.Store, run: mail_mac.Runner = _slow_jxa, keep_days: int = 90) -> dict[str, Any]:
-    """Store new inbox messages; returns what was done, with timings."""
+def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
+    mid = int(m["id"])
+    meta = {"mail_id": mid, "read": bool(m.get("read")), "date": m.get("date")}
+    if body is None:
+        meta["partial"] = True  # sender and subject only, until its text is read
+    ix.put(
+        f"mail:{mid}",
+        KIND,
+        title=str(m.get("subject") or ""),
+        body=essential(body)[:4000] if body else "",
+        who=str(m.get("sender") or ""),
+        ts=_ts(str(m.get("date") or "")),
+        meta=meta,
+    )
+
+
+def remember(messages: list[dict[str, Any]], with_body: bool) -> int:
+    """Lazily index mail Scout touched for a task: search results (sender and subject,
+    their text filled in later) or messages read in full. Never fails the caller."""
+    n = 0
+    try:
+        ix = index.default()
+        for m in messages:
+            if not isinstance(m.get("id"), int):
+                continue
+            if with_body:
+                _put(ix, m, str(m.get("body") or ""))
+            elif ix.get(f"mail:{m['id']}") is None:
+                _put(ix, m, None)
+            else:
+                continue
+            n += 1
+    except Exception as exc:  # the memory service is down: the task still works
+        log.info("mail not remembered in the index: %s", exc)
+    return n
+
+
+def remember_soon(messages: list[dict[str, Any]], with_body: bool) -> None:
+    """remember(), off the request path."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop().run_in_executor(None, remember, list(messages), with_body)
+    except RuntimeError:
+        remember(messages, with_body)
+
+
+async def sync_pass(
+    ix: index.Store, run: mail_mac.Runner = _slow_jxa, first_days: float = 2.0
+) -> dict[str, Any]:
+    """Index mail that arrived since the newest indexed message (the first time, the last
+    `first_days`), then fill in the text of a few remembered search results."""
     t0 = time.monotonic()
+    newest = ix.recent([KIND], 1)
+    since = newest[0].ts - 60 if newest else time.time() - first_days * 86400
     data = await mail_mac._call(run, mail_mac._LIST, str(NEWEST), "false", "", str(mail_mac.RECENT_DAYS))
     listed = data.get("messages", [])
     t_list = time.monotonic() - t0
-    cut = time.time() - keep_days * 86400
     new = [
         m for m in listed
-        if isinstance(m.get("id"), int) and _ts(str(m.get("date") or "")) >= cut and ix.get(f"mail:{m['id']}") is None
+        if isinstance(m.get("id"), int) and _ts(str(m.get("date") or "")) > since and ix.get(f"mail:{m['id']}") is None
     ][:BODIES]  # fmt: skip
+    partial = [h for h in ix.recent([KIND], 300) if h.meta.get("partial")][:CHUNK]
+    todo = [
+        *new,
+        *(
+            {"id": int(h.meta["mail_id"]), "date": h.meta.get("date"), "read": h.meta.get("read")}
+            for h in partial
+        ),
+    ]
     stored = 0
     t1 = time.monotonic()
-    for i in range(0, len(new), CHUNK):
-        chunk = new[i : i + CHUNK]
-        got = await mail_mac.bodies([int(m["id"]) for m in chunk], run)
+    for i in range(0, len(todo), CHUNK):
+        chunk = todo[i : i + CHUNK]
+        got = await mail_mac.bodies([int(m["id"]) for m in chunk], run, remember=False)
         for row in chunk:
             m = got.get(int(row["id"]))
-            if m is None:
-                continue
-            ix.put(
-                f"mail:{row['id']}",
-                KIND,
-                title=str(m.get("subject") or row.get("subject") or ""),
-                body=essential(str(m.get("body") or ""))[:4000],
-                who=str(m.get("sender") or row.get("sender") or ""),
-                ts=_ts(str(m.get("date") or row.get("date") or "")),
-                meta={"mail_id": int(row["id"]), "read": bool(row.get("read")), "date": row.get("date")},
-            )
-            stored += 1
-    aged = ix.prune(KIND, cut)
+            if m is not None:
+                _put(ix, {**row, **m}, str(m.get("body") or ""))
+                stored += 1
     out = {
-        "listed": len(listed), "stored": stored, "aged_out": aged,
+        "listed": len(listed), "new": len(new), "filled": len(partial), "stored": stored,
         "list_s": round(t_list, 1), "read_s": round(time.monotonic() - t1, 1), "total": ix.count(KIND),
     }  # fmt: skip
     log.info("mail index: %s", out)
@@ -96,7 +145,7 @@ def search(query: str, count: int, days: int) -> dict[str, Any] | None:
     return {"messages": msgs, "days": days, "source": "Scout's local index"}
 
 
-async def loop(idle: Any, every_s: float = 1200.0, keep_days: int = 90) -> None:
+async def loop(idle: Any, every_s: float = 1200.0) -> None:
     """Keep the index current: a pass every `every_s` while Scout is idle."""
     import asyncio
 
@@ -104,7 +153,7 @@ async def loop(idle: Any, every_s: float = 1200.0, keep_days: int = 90) -> None:
     while True:
         try:
             if idle():
-                await sync_pass(index.default(), keep_days=keep_days)
+                await sync_pass(index.default())
         except Exception as exc:
             log.warning("mail index pass failed: %s", exc)
         await asyncio.sleep(every_s)
