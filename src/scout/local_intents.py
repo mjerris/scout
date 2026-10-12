@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import briefing, calendar_mac, freebusy, mac, mail_mac, notes, reminders_mac, starlink, weather
+from . import briefing, calendar_mac, freebusy, mac, mail_mac, maps, notes, reminders_mac, starlink, weather
 from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
@@ -81,6 +81,8 @@ class Context:
     weather: Callable[[str], Awaitable[dict[str, Any]]] = weather.forecast
     starlink_on: Callable[[], bool] = lambda: load().starlink.enabled
     note_add: Callable[[str], Awaitable[dict[str, Any]]] = notes.add
+    near: Callable[[str, str], Awaitable[dict[str, Any]]] = maps.near
+    route: Callable[[str, str], Awaitable[dict[str, Any]]] = maps.route
     request: str = ""  # the request as said (answer() sets it)
     notes_find: Callable[[str], Awaitable[list[dict[str, Any]]]] = notes.find
     starlink: Callable[[], Awaitable[dict[str, Any]]] = starlink.status
@@ -561,6 +563,27 @@ async def _note(m: re.Match[str], c: Context) -> str:
 )  # one group: _rule anchors the whole pattern
 async def _notes(m: re.Match[str], c: Context) -> str:
     return notes.speak(await c.notes_find((m.group("about") or "").strip()))
+
+
+@_rule(
+    r"(?:how far (?:is it )?(?:from )?(?P<a>.+?) to (?P<b>.+)|how far is (?P<b2>.+?) from (?P<a2>.+)|"
+    r"how long (?:does it take |is the drive |will it take )?to (?:drive|get) from (?P<a3>.+?) to (?P<b3>.+)|"
+    r"(?:what(?:'s| is) the )?(?:driving )?distance (?:from|between) (?P<a4>.+?) (?:to|and) (?P<b4>.+))"
+)
+async def _route(m: re.Match[str], c: Context) -> str:
+    a = m.group("a") or m.group("a2") or m.group("a3") or m.group("a4")
+    b = m.group("b") or m.group("b2") or m.group("b3") or m.group("b4")
+    return maps.speak_route(await c.route(a, b))
+
+
+@_rule(
+    r"(?:where(?:'s| is) |find |what(?:'s| is) )?(?:the |a )?(?:nearest|closest) (?P<what>.+?) "
+    r"(?:near|to|in|around|by) (?P<place>.+)"
+)
+async def _near(m: re.Match[str], c: Context) -> str | None:
+    if maps.category(m.group("what")) is None:
+        return None  # a name or something unusual: Claude, with the places_near tool
+    return maps.speak_near(await c.near(m.group("what"), m.group("place")))
 
 
 async def answer(text: str, ctx: Context) -> str | None:

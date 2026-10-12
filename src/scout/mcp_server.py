@@ -387,6 +387,18 @@ async def note_delete(id: int) -> str:
     return await _tool("note_delete", {"id": id})
 
 
+@mcp.tool(description=_doc("places_near"))
+async def places_near(what: str, near: str, radius_miles: int = 25, limit: int = 5) -> str:
+    return await _tool(
+        "places_near", {"what": what, "near": near, "radius_miles": radius_miles, "limit": limit}
+    )
+
+
+@mcp.tool(description=_doc("drive_route"))
+async def drive_route(origin: str, destination: str) -> str:
+    return await _tool("drive_route", {"origin": origin, "destination": destination})
+
+
 @mcp.tool(description=_doc("local_search"))
 async def local_search(query: str, kinds: list[str] | None = None, days: int = 0, limit: int = 8) -> str:
     return await _tool("local_search", {"query": query, "kinds": kinds or [], "days": days, "limit": limit})

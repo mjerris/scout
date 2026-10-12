@@ -360,6 +360,14 @@ questions ("what's the weather in Luther, Michigan", "... tonight / tomorrow / i
 morning", "what's the wind forecast for tonight", "will it rain tomorrow") are answered
 locally without Claude. `[weather] home` sets the place used when none is named.
 
+## Maps
+
+Nearby places and driving distances from OpenStreetMap (free, no key, no sign-in):
+"where's the nearest dump station near Cadillac", "how far is Traverse City from
+Luther" are answered locally; Claude gets `places_near` and `drive_route`. Searches are
+cached for a day; the public map server is sometimes busy, and Scout says so. Drive
+times are for a car: they don't know an RV's height or weight.
+
 ## Starlink
 
 Off unless turned on; it reads the dish's own local API (no account, no sign-in):

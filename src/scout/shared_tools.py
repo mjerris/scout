@@ -26,6 +26,7 @@ from . import (
     freebusy,
     index,
     mail_mac,
+    maps,
     messages_mac,
     notes,
     privacy,
@@ -276,6 +277,24 @@ SHARED = (
         _obj({"id": _INT}, ["id"]),
         notes.delete,
         asks=True,
+    ),
+    SharedTool(
+        "places_near",
+        "Find places near a town or address from OpenStreetMap (free, no sign-in), closest by "
+        "driving time first: name, address, miles, minutes, hours, phone. what is a kind of place "
+        "(dump station, water, campground, rv park, gas, diesel, truck stop, grocery, hardware, "
+        "laundromat, pharmacy, hospital, urgent care, vet, restaurant, coffee, rest area, post "
+        "office, library, atm, dog park) or a name (Walmart). near is a place like 'Cadillac, "
+        "Michigan'. radius_miles 1-60 (default 25). Drive times are for a car.",
+        _obj({"what": _STR, "near": _STR, "radius_miles": _INT, "limit": _INT}, ["what", "near"]),
+        maps.near_text,
+    ),
+    SharedTool(
+        "drive_route",
+        "Driving distance and time between two places (OpenStreetMap routing for a car; it does "
+        "not know RV height or weight limits). origin and destination are towns or addresses.",
+        _obj({"origin": _STR, "destination": _STR}, ["origin", "destination"]),
+        maps.route_text,
     ),
     SharedTool(
         "starlink",
