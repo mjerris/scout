@@ -227,8 +227,8 @@ def test_shared_tools_go_through_the_policy(monkeypatch: pytest.MonkeyPatch) -> 
     fake = FakeMail()
 
     async def fake_run(*argv: str, timeout: float = 30.0) -> str:
-        assert argv[:4] == ("/usr/bin/osascript", "-l", "JavaScript", "-e")
-        return await fake(argv[4], *argv[5:])
+        assert argv[:4] == ("/usr/bin/osascript", "-l", "JavaScript", "-e") and argv[5] == "--"
+        return await fake(argv[4], *argv[6:])
 
     monkeypatch.setattr(mac, "_run", fake_run)
     model = FakeModel()
@@ -288,7 +288,7 @@ def _room(mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     fake = FakeMail()
 
     async def fake_run(*argv: str, timeout: float = 30.0) -> str:
-        return await fake(argv[4], *argv[5:])
+        return await fake(argv[4], *argv[6:])  # argv[5] is "--"
 
     monkeypatch.setattr(mac, "_run", fake_run)
     return r

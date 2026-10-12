@@ -5,7 +5,8 @@ needs the user. No AI, nothing sent anywhere.
     a timed reminder coming due  "Reminder: call Sam, due at 3:00 PM."
     today's overlapping events   "Today, Dentist overlaps Team sync at 3:00 PM." (once, morning)
 
-Each thing is said once; nothing is said in quiet hours (it's logged). Checks that
+Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
+when they end (the morning's overlaps, an event just after) is said then. Checks that
 can't run (no calendar access) are skipped quietly.
 """
 
@@ -115,10 +116,9 @@ async def run(
     while True:
         try:
             t = now()
-            for text in await pulse.check(t):
-                if in_quiet_hours(quiet_hours, t):
-                    log.info("pulse (quiet hours, not said): %s", text)
-                else:
+            # No check in quiet hours: checking marks things said, and they'd never be.
+            if not in_quiet_hours(quiet_hours, t):
+                for text in await pulse.check(t):
                     await say(text)
         except Exception:
             log.exception("pulse check failed")

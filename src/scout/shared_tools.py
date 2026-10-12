@@ -318,12 +318,12 @@ async def _local_search(a: dict[str, Any]) -> str:
     since = time.time() - days * 86400 if days > 0 else None
     hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()
+    if pol.mode == "strict":  # a hit on mail would say its text holds the words: none at all
+        hits = [h for h in hits if h.kind != "mail"]
     if pol.mode != "open":  # mail text, and answers built from it, stay out: titles only
         for h in hits:
             if h.meta.get("private") or h.kind == "mail":
                 h.body = ""
-            if pol.mode == "strict" and h.kind == "mail":
-                h.title = "(subject withheld: strict privacy; mail_read shows it)"
     return index.format_hits(hits)
 
 

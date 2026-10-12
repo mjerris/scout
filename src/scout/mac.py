@@ -86,7 +86,8 @@ async def _run(*argv: str, timeout: float = 10.0) -> str:
 
 
 async def osascript(script: str, *args: str) -> str:
-    return await _run("/usr/bin/osascript", "-e", script, *args)
+    # "--" ends osascript's options: an argument starting with "-e" is data, not more script.
+    return await _run("/usr/bin/osascript", "-e", script, "--", *args)
 
 
 async def is_running(process_name: str) -> bool:

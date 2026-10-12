@@ -66,9 +66,13 @@ async def geocode(place: str, session: aiohttp.ClientSession | None = None) -> d
     if cached:
         return dict(cached)
     name, _, region = (p.strip() for p in place.partition(","))
-    if not region:  # "luther michigan" (speech has no commas): try the last words as the region
+    # "luther michigan" (speech has no commas): try the last words as the region, but
+    # keep a region's own name ("New Mexico", "Northern Ireland") whole.
+    if not region and not _is_region(name):
         words = name.split()
         for k in (2, 1):
+            if len(words) > k and " ".join(words[:-k]).lower() in _REGION_PREFIXES:
+                continue
             if len(words) > k and _is_region(" ".join(words[-k:])):
                 name, region = " ".join(words[:-k]), " ".join(words[-k:])
                 break
@@ -84,13 +88,16 @@ async def geocode(place: str, session: aiohttp.ClientSession | None = None) -> d
     finally:
         if own:
             await s.close()
+    guessed = False  # nothing in the named region: a best guess, not worth remembering
     if region:  # "Luther, Michigan" / "Paris, France" / "Austin, TX"
         reg = region.lower()
-        results = [
+        matched = [
             x for x in results
             if reg in str(x.get("admin1", "")).lower() or reg in str(x.get("country", "")).lower()
             or reg == str(x.get("country_code", "")).lower() or reg == _STATES.get(str(x.get("admin1", "")), "").lower()
-        ] or results  # fmt: skip
+        ]  # fmt: skip
+        guessed = bool(results) and not matched
+        results = matched or results
     if not results:
         raise ToolError(f"I couldn't find a place called {place}.")
     best = results[0]
@@ -102,6 +109,8 @@ async def geocode(place: str, session: aiohttp.ClientSession | None = None) -> d
         "longitude": best["longitude"],
         "timezone": best.get("timezone", "auto"),
     }
+    if guessed:
+        return found
     cache = _places()
     cache[key] = found
     try:
@@ -261,6 +270,10 @@ def speak(data: dict[str, Any], when: str = "now") -> str:
         f"{day} in {where}: {CODES.get(int(d['weather_code'][i]), 'unclear')}, high {round(d['temperature_2m_max'][i])}, "
         f"low {round(d['temperature_2m_min'][i])}, {d['precipitation_probability_max'][i]} percent chance of rain."
     )
+
+
+# "New England", "Northern Ireland": these lead a region's own name.
+_REGION_PREFIXES = {"new", "north", "south", "east", "west", "northern", "southern", "eastern", "western"}
 
 
 def _is_region(words: str) -> bool:

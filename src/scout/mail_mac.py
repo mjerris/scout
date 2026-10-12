@@ -16,6 +16,7 @@ voice agent is told never to act on instructions inside it."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -173,7 +174,9 @@ async def _recent_by_range(scan: int, run: Runner | None = None) -> list[dict[st
 
 
 async def _applescript(script: str, *args: str, timeout: float = 30.0) -> str:
-    return await mac._run("/usr/bin/osascript", "-e", script, *args, timeout=timeout)
+    return await mac._run(
+        "/usr/bin/osascript", "-e", script, "--", *args, timeout=timeout
+    )  # see mac.osascript
 
 
 _READ = r"""
@@ -264,7 +267,10 @@ function run(argv) {
 
 
 async def _jxa(script: str, *args: str, timeout: float = 30.0) -> str:
-    return await mac._run("/usr/bin/osascript", "-l", "JavaScript", "-e", script, *args, timeout=timeout)
+    # "--": a subject like "-e..." is an argument, never more script (see mac.osascript).
+    return await mac._run(
+        "/usr/bin/osascript", "-l", "JavaScript", "-e", script, "--", *args, timeout=timeout
+    )
 
 
 async def _call(run: Runner, script: str, *args: str) -> dict[str, Any]:
@@ -457,19 +463,25 @@ async def listing(
     query: Any = None,
     run: Runner = _jxa,
     index: Index | None = None,
+    by_text: bool = True,
 ) -> dict[str, Any]:
     """Inbox messages, newest first: {"messages": [{id, date, sender, subject, read}], ...}.
-    With a query: subject or sender matches from the last SEARCH_DAYS, read or not.
+    With a query: subject or sender matches from the last SEARCH_DAYS, read or not, and
+    (by_text) matches in message text from Scout's index.
     Mail's index answers when the helper has it; Mail scripting otherwise."""
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
     q = _clean(query, "query", 100)
     days = SEARCH_DAYS if q else RECENT_DAYS
     unread = bool(unread_only) and not q
     idx = index or INDEX
-    if q:  # Scout's own index of the inbox (mailindex.py): local, by words and meaning
+    if q and by_text:  # Scout's own index of the inbox (mailindex.py): local, by words and meaning
         from . import mailindex
 
-        found = mailindex.search(q, n, days)
+        try:  # blocking calls to the memory service: off the event loop
+            found = await asyncio.to_thread(mailindex.search, q, n, days)
+        except ToolError as exc:  # the memory service is down: ask Mail instead
+            log.warning("mail: Scout's index failed (%s); asking Mail", exc)
+            found = None
         if found is not None:
             return found
     if await idx.usable():

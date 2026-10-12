@@ -64,6 +64,10 @@ STRICT_MESSAGES = (
     "[Strict privacy mode: the text of messages isn't shared with Claude. Tell the user what you "
     "can see (who and when); they can ask Scout to read or summarize their texts aloud.]"
 )
+STRICT_SEARCH = (
+    "[Strict privacy mode: searching the text of messages isn't available to Claude, since the matches "
+    "would show what the texts say. The user can ask Scout directly to find a text.]"
+)
 _NO_MODEL_MESSAGES = "[No summaries: Scout's local model isn't loaded, so the texts are withheld.]"
 
 
@@ -95,7 +99,9 @@ class Policy:
         """Claude's view of mail_recent / mail_search (query set). `budget_s`: give up
         waiting for summaries after this long (they finish in the background)."""
         q = mail_mac.search_query(query) if query is not None else ""
-        data = await mail_mac.listing(count, unread_only, q or None, run)
+        # Strict: match senders and subjects only. Which messages match words in their text
+        # would tell Claude what the text says.
+        data = await mail_mac.listing(count, unread_only, q or None, run, by_text=self.mode != "strict")
         what = (
             f"recent inbox messages matching {q!r}"
             if q
@@ -195,12 +201,15 @@ class Policy:
         }
         listing = messages_mac.format_messages(bare, what).replace("(no text)", "(text withheld)")
         if self.mode == "strict":
+            if "scanned" in data:  # a search of the texts: which ones matched says what they say
+                return STRICT_SEARCH
             return STRICT_MESSAGES + "\n" + listing
         if not self.summaries.available:
             return _NO_MODEL_MESSAGES + "\n" + listing
         people: dict[str, list[dict[str, Any]]] = {}
-        if data.get("conversation"):  # one thread: summarize both sides together
-            people[f"the conversation with {data['conversation']}"] = [m for m in msgs if m.get("text")]
+        texts = [m for m in msgs if m.get("text")]  # photos only: nothing to summarize
+        if data.get("conversation") and texts:  # one thread: summarize both sides together
+            people[f"the conversation with {data['conversation']}"] = texts
         for m in msgs:
             if not data.get("conversation") and not m.get("from_me") and m.get("text"):
                 people.setdefault(messages_mac._person(m), []).append(m)

@@ -123,7 +123,7 @@ def test_volume_and_media() -> None:
     assert say("pause the music", calls) == ""  # the action is the answer
     assert say("next song", calls) == ""
     assert calls.volume == [{"change": 10}, {"level": 30}, {"mute": True}]
-    assert calls.media == ["play_pause", "next"]
+    assert calls.media == ["pause", "next"]  # an explicit pause, not a toggle
     assert say("set the volume to 300") == "Volume goes from 0 to 100."
 
 
@@ -295,7 +295,7 @@ def test_reminder_lists_are_read_aloud() -> None:
     from scout.mac import ToolError
 
     calls.reminder_reply = ToolError("no reminder list matches bucket")
-    assert say("what's on my bucket list", calls) == "You don't have a reminder list called bucket."
+    assert say("what's on my bucket list", calls) is None  # no such list: Claude takes it
 
 
 def test_reminders_due() -> None:

@@ -48,7 +48,14 @@ _ACTION = re.compile(
     r"\b(send|sent|reply|respond|answer|forward|email (?:him|her|them|my|the)|write|draft|tell|text|message|call|"
     r"add|put|schedule|book|create|make|move|reschedule|change|update|edit|rename|cancel|delete|remove|"
     r"archive|mark|accept|decline|invite|order|buy|purchase|pay|remind|reminder|run|open|close|install|"
-    r"fix|build|deploy|push|commit|merge|start|stop|turn|set|play|share|upload|download|save|print)\b"
+    r"fix|build|deploy|push|commit|merge|start|stop|turn|set|play|share|upload|download|save|print|"
+    r"sending|forwarding|forwarded|replying|replied|deleting|cancell?ing|cancell?ed|unsubscribe|rsvp|"
+    r"clear (?:my|the|out|off)|block (?:off|out|my|the|some|time)|let \w+(?: \w+)? know)\b"
+)
+# "Email Bob that...", "text Sarah": a message to someone, said first. ("Email from Bob" is a lookup.)
+_ADDRESS = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you|hey|scout)[ ,]+)*(?:e-?mail|text|message) "
+    r"(?!(?:from|about|in|on|today|yesterday|this|lately|recently)\b)\w"
 )
 # Judgment, conditions, or several steps: Claude.
 _JUDGMENT = re.compile(
@@ -71,6 +78,8 @@ def guard(request: str) -> str | None:
         return "not a calendar or mail lookup"
     if m := _ACTION.search(low):
         return f"action word {m.group(1)!r}"
+    if _ADDRESS.search(low):
+        return "a message to someone"
     if m := _JUDGMENT.search(low):
         return f"needs judgment ({m.group(0).strip()!r})"
     if len(low.split()) < 2:
@@ -381,9 +390,10 @@ async def run(decision: dict[str, Any], now: dt.datetime, summaries: Summaries |
         # "Anything from Rover?" wants what it says, not its subject line (heard live: the
         # subject alone sounded cut off). A local gist costs ~1 s and stays on the Mac.
         q = args.get("query") if tool == "mail_search" else None
-        return await summarize(
-            {"query": q} if q else {"unread_only": args.get("unread_only", True)}, now, summaries
-        )
+        args = {"query": q} if q else {"unread_only": args.get("unread_only", True)}
+        # Now a summary of what the email says: the caller marks the answer private.
+        decision.update(tool="mail_summarize", args=args)
+        return await summarize(args, now, summaries)
     msgs = await mail_mac.message_data(
         args.get("count") or 5,
         bool(args.get("unread_only")),

@@ -66,3 +66,19 @@ def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     monkeypatch.setattr(reminders_mac, "_fallback_until", 0.0)
     yield
     ix.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may drive a real app (Notes, Mail, Reminders...) through osascript. Tests
+    fake mac._run; one that forgets fails here instead of changing the user's data."""
+    import scout.mac as mac
+
+    real = mac._run
+
+    async def guarded(*argv: str, timeout: float = 10.0) -> str:
+        if argv and argv[0].endswith("osascript") and any("application" in a for a in argv):
+            raise AssertionError(f"test reached a real app through osascript: {argv[:3]}")
+        return await real(*argv, timeout=timeout)
+
+    monkeypatch.setattr(mac, "_run", guarded)

@@ -113,15 +113,19 @@ async def add(a: dict[str, Any]) -> str:
         (lst, title, due, notes, now),
     )
     rid = ix.last_rowid
-    index.default().put(
-        f"list:{rid}",
-        "list",
-        title=title,
-        body=f"{title}\n{notes}".strip(),
-        who=lst,
-        ts=now,
-        meta={"due": due},
-    )
+    try:  # the index down: undo the add, so a retry doesn't make a second one
+        index.default().put(
+            f"list:{rid}",
+            "list",
+            title=title,
+            body=f"{title}\n{notes}".strip(),
+            who=lst,
+            ts=now,
+            meta={"due": due},
+        )
+    except Exception:
+        ix.sql("DELETE FROM list_items WHERE id = ?", (rid,))
+        raise
     return f"Added {title} to {lst}" + (f", due {due}." if due else ".")
 
 
@@ -134,6 +138,6 @@ async def complete(a: dict[str, Any]) -> str:
     rows = ix.sql("SELECT list, title FROM list_items WHERE id = ? AND completed = 0", (int(rid),))
     if not rows or rows[0][1].lower() != title.lower():
         raise ToolError("that item isn't open on any list (list them again)")
+    index.default().delete(f"list:{rid}")  # first: if the index is down, the item stays open
     ix.sql("UPDATE list_items SET completed = 1, done_at = ? WHERE id = ?", (time.time(), int(rid)))
-    index.default().delete(f"list:{rid}")
     return f"Marked {rows[0][1]} done in {rows[0][0]}."

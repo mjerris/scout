@@ -92,7 +92,12 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   to wait" is an ordinary request). Saying "never mind" or "stop" instead
   cancels it.
 - **Working sounds:** a soft tick every few seconds while tools run and nothing
-  is being said, so a quiet stretch doesn't sound like a hang.
+  is being said, so a quiet stretch doesn't sound like a hang. When a lookup
+  (Claude's or a local one like the weather or a route) has said nothing for
+  2 s, it says what it's doing ("Checking your mail.", "Getting the weather.",
+  "One moment."), and "Still working on it." 12 s later if it's still going.
+  Turn it off with `tts.progress_speech = false`; the timing is
+  `tts.progress_delay_s` and `tts.progress_again_s` (0 = no second line).
 - **Pronunciation:** regex rules fix how words are spoken ("config.toml" →
   "config dot toml") and common mishearings ("Claud" → "Claude"). Built-in
   defaults are in `src/scout/pronounce_default.txt`; add your own in

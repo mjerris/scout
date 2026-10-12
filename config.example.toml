@@ -52,6 +52,9 @@ voice = "af_heart"    # e.g. af_bella, am_michael, bf_emma, bm_george
 speed = 1.1
 chimes = true
 working_sound = true  # soft tick while tools run
+progress_speech = true  # a short spoken line ("Checking your mail.") when a lookup runs long
+progress_delay_s = 2.0  # quiet seconds before it
+progress_again_s = 12.0  # then "Still working on it." (0: never)
 
 [claude]
 cwd = "~"                     # where the agent works

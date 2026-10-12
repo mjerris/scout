@@ -6,7 +6,7 @@
 # models, rebuild a native helper only when its source changed (macOS ties calendar
 # and microphone permissions to the exact binary), then (re)start the login item.
 # Progress goes to DATA/state/install.json, which `scout status` reads.
-set -euo pipefail
+set -Eeuo pipefail  # -E: the ERR trap fires in functions too (a failed helper build)
 ROOT="$(cd "${1:-$(dirname "$0")/..}" && pwd -P)"
 DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"
 OLD_LABEL=com.local.claude-voice
@@ -19,11 +19,26 @@ status() {  # status STATE MESSAGE
     echo "$(date '+%F %T') $1: $2"
 }
 
-if ! mkdir "$DATA/.install.lock" 2>/dev/null; then
+# The lock holds the installer's PID, so one killed mid-way (reboot, power loss)
+# doesn't block every later install: a lock whose process is gone is taken over.
+LOCK="$DATA/.install.lock"
+take_lock() {
+    local pid
+    if mkdir "$LOCK" 2>/dev/null; then echo $$ >"$LOCK/pid"; return 0; fi
+    pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
+    # No PID yet: another installer may have just taken it; give it a minute.
+    if [ -z "$pid" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1)" ]; then return 1; fi
+    echo "clearing a stale install lock${pid:+ (process $pid is gone)}"
+    rm -rf "$LOCK"
+    if mkdir "$LOCK" 2>/dev/null; then echo $$ >"$LOCK/pid"; return 0; fi
+    return 1
+}
+if ! take_lock; then
     echo "another install is running"
     exit 0
 fi
-trap 'rmdir "$DATA/.install.lock" 2>/dev/null || true' EXIT
+trap 'rm -rf "$LOCK"' EXIT
 trap 'status error "setup failed; see logs/install.log"' ERR
 
 if launchctl print "gui/$(id -u)/$OLD_LABEL" >/dev/null 2>&1; then

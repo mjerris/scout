@@ -166,7 +166,11 @@ def resolve_device(spec: str, kind: str, devices: Any, default: int | None = Non
 
 def _resolve_one(spec: str, kind: str, devices: Any) -> int:
     if spec.isdigit():
-        return int(spec)
+        # Indexes shift when a device is unplugged: a missing or wrong-kind one falls through.
+        i = int(spec)
+        if i < len(devices) and devices[i][f"max_{kind}_channels"] > 0:
+            return i
+        raise ValueError(f"no {kind} device {i}; run with --list-devices")
     for i, dev in enumerate(devices):
         if spec.lower() in dev["name"].lower() and dev[f"max_{kind}_channels"] > 0:
             return i

@@ -11,7 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
+import threading
 import time
 from pathlib import Path
 from collections.abc import Callable
@@ -46,6 +49,8 @@ class Memory:
         self.path = path
         self.facts: list[dict[str, Any]] = []
         self.on_change: Callable[[], None] | None = None  # e.g. re-index (index.py)
+        # The memory service runs requests on several threads: one change at a time.
+        self._lock = threading.RLock()
         try:
             data = json.loads(path.read_text())
             self.facts = [f for f in data.get("facts", []) if isinstance(f, dict) and f.get("text")]
@@ -56,9 +61,14 @@ class Memory:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"facts": self.facts}, indent=1))
-        tmp.replace(self.path)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps({"facts": self.facts}, indent=1))
+            Path(tmp).replace(self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         if self.on_change is not None:
             try:
                 self.on_change()
@@ -83,12 +93,13 @@ class Memory:
             raise ToolError("that has control characters")
         # The same fact said again (in other small words) replaces the old copy.
         new = keywords(fact)
-        self.facts = [
-            f for f in self.facts if f["text"].lower() != fact.lower() and keywords(f["text"]) != new
-        ]
-        self.facts.append({"text": fact, "ts": time.time()})
-        del self.facts[:-MAX_FACTS]
-        self._save()
+        with self._lock:
+            self.facts = [
+                f for f in self.facts if f["text"].lower() != fact.lower() and keywords(f["text"]) != new
+            ]
+            self.facts.append({"text": fact, "ts": time.time()})
+            del self.facts[:-MAX_FACTS]
+            self._save()
         return fact
 
     def matching(self, about: str) -> list[str]:
@@ -99,10 +110,11 @@ class Memory:
         return [f["text"] for f in reversed(self.facts) if want <= keywords(f["text"])]
 
     def forget(self, about: str) -> list[str]:
-        gone = self.matching(about)
-        if gone:
-            self.facts = [f for f in self.facts if f["text"] not in gone]
-            self._save()
+        with self._lock:
+            gone = self.matching(about)
+            if gone:
+                self.facts = [f for f in self.facts if f["text"] not in gone]
+                self._save()
         return gone
 
     def relevant(self, request: str, limit: int = 5) -> list[str]:
