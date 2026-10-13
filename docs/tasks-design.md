@@ -77,20 +77,23 @@ Backfill: on the first run, meetings and mail from the last `[tasks] backfill_da
 
 ## Which model reads meetings
 
-Measured on 26 real meetings (scripts/bench_taskfarm.py, 2026-10-13; each found task judged
-by Sonnet as a real commitment with the right owner or not, configs unlabelled):
+Measured on 26 real meetings (scripts/bench_taskfarm.py, 2026-10-13). Each found task was
+judged by Sonnet, with the readers unlabelled, as a real commitment with the right owner or
+not; the judge was run twice and the ranges are the two runs:
 
 | Reader | Precision | Real tasks found | Cost per meeting (list) | Time |
 |---|---|---|---|---|
-| Haiku 5.5, summary + transcript | 72% | 47% | $0.003 | 16 s |
-| Sonnet 5.5, summary + transcript | 61–65% | 44–45% | $0.02–0.04 | 6 s |
-| Sonnet, summary + action lines only | 61% | 41% | $0.02 | 6 s |
-| Qwen3-4B (local), summary | 52% | 34% | 0 | 14 s |
-| Qwen3-8B (local), summary | 50% | 21% | 0 | 18 s |
+| Haiku 5.5, summary + transcript | 72–76% | 42–47% | $0.003 | 16 s |
+| Sonnet 5.5, summary + transcript | 61–79% | 44–45% | $0.02–0.04 | 6 s |
+| Sonnet, summary + action lines only | 61–74% | 41–43% | $0.02 | 6 s |
+| Qwen3-4B (local), summary | 52–63% | 34–35% | 0 | 14 s |
+| Qwen3-8B (local), summary | 50–70% | 21–25% | 0 | 18 s |
+| Qwen3-14B (local), summary | 65% | 31% | 0 | 27 s, 9.3 GB |
 
-Haiku found the most and was right the most often, at about a tenth of Sonnet's price, so
-it's the default. Sonnet agrees with itself only about 72% from run to run. The local 4B
-is the reader in strict privacy mode; the 8B was worse at telling your tasks from others'.
+Haiku is as good as Sonnet within the judge's noise (Sonnet also agrees with itself only
+about 72% from run to run) at about a tenth of the price, so it's the default. The local
+models find fewer real tasks; the 4B, already loaded, is the reader in strict privacy
+mode, and the larger ones gain nothing worth their memory.
 The CLI runs each read without saving the session (`--no-session-persistence`), so meeting
 text isn't left in Claude Code's session files.
 
