@@ -388,6 +388,48 @@ today?" are answered locally. Scout announces outages longer than a minute, when
 back, and new dish alerts; it tallies data used per day. Claude and other sessions get
 the read-only `starlink` tool with exact values.
 
+## Phone calls (SignalWire)
+
+Off unless turned on (design: [docs/phone-design.md](docs/phone-design.md)). A paired
+phone app calls a SignalWire AI agent; SignalWire does the speech and the conversation,
+and the Mac only receives signed webhooks through Tailscale Funnel. **What Scout says on
+the phone passes through SignalWire's speech recognition, model and text-to-speech**; the
+privacy mode applies as it does at home.
+
+```toml
+[phone]
+enabled = true
+signing_key = "<signing key>"                        # SignalWire Dashboard, API Credentials
+public_url = "https://<mac>.<tailnet>.ts.net:8443"   # the Funnel base
+address = "<the agent's address>"                    # what the app dials
+```
+
+`scout-phone` (its own login item, `com.local.scout.phone`, started by the installer
+only when `enabled = true`; `scripts/run-phone.sh` runs it in the foreground) listens on
+127.0.0.1:8768. It refuses to start without `signing_key` and `public_url`. On a call it
+offers the read-only shared tools (calendar, reminders, notes, mail, texts, weather,
+places, routes, Starlink, local search) and `ask_scout`, which answers through Scout's
+own tiers (local intents, memory, the local model, Claude on a session of its own) and
+returns text: nothing is spoken in the room and a room conversation is left alone.
+Nothing that needs a spoken yes is offered by phone, and email is never sent from it.
+
+Pairing, at home:
+
+```sh
+scripts/scoutctl.sh phone pair "My iPhone"   # QR code + JSON with the phone's secret
+scripts/scoutctl.sh phone list
+scripts/scoutctl.sh phone forget <device>    # a lost phone stops working at once
+```
+
+Each call carries `userVariables = {device, ts, nonce, sig}` with
+`sig = hex(HMAC-SHA256(secret, "device|ts|nonce|address"))` (the secret base64url-decoded
+to its 32 bytes, `ts` in Unix seconds). A call whose device is unknown or forgotten, whose
+timestamp is more than `call_skew_s` off, whose nonce was used before or whose signature
+doesn't match gets no tools: it hears a short goodbye and is hung up. Every tool call is
+checked again against its call. Basic-auth credentials and the SWAIG token secret are
+kept in `state/phone.auth` and `state/phone.secret`, the paired phones in
+`state/phone_devices.json` (all mode 600).
+
 ## Messages (iMessage and SMS)
 
 Scout can read your texts, never send them. Messages keeps its history in

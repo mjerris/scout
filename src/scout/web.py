@@ -90,6 +90,8 @@ class VoiceApp(Protocol):
         wait_for_floor: float = 0.0,
     ) -> dict[str, Any]: ...
 
+    async def ask(self, agent: str, text: str, deadline: float = ...) -> dict[str, Any]: ...
+
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None: ...
 
     async def submit_audio(
@@ -557,6 +559,26 @@ async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
             return web.json_response({"status": "error", "error": str(exc)}, status=400)
         return web.json_response(await assistant.run_shared_tool(agent or "session", name, args))
 
+    async def api_ask(req: web.Request) -> web.StreamResponse:
+        """A request from the phone (scout-phone): answered as text, never spoken here."""
+        guard(req)
+        if req.content_type != "application/json":  # also forces a CORS preflight
+            raise web.HTTPUnsupportedMediaType(text="Send application/json.")
+        try:
+            b = await req.json()
+            if not isinstance(b, dict):
+                raise TypeError("the body must be a JSON object")
+            text, agent = b.get("text"), b.get("agent")
+            if not isinstance(text, str) or not text.strip():
+                raise TypeError("text must be a non-empty string")
+            if len(text) > 2000:
+                raise ValueError("text is too long")
+            if agent is not None and not isinstance(agent, str):
+                raise TypeError("agent must be a string")
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"status": "error", "error": str(exc)}, status=400)
+        return web.json_response(await assistant.ask(agent or "session", text))
+
     async def api_status(req: web.Request) -> web.StreamResponse:
         guard(req)
         return web.json_response(assistant.voice_status())
@@ -684,6 +706,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
             web.get("/ws", ws_handler),
             web.post("/api/discuss", api_discuss),
             web.post("/api/tool", api_tool),
+            web.post("/api/ask", api_ask),
             web.get("/api/status", api_status),
         ]
     )

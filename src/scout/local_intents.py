@@ -663,12 +663,22 @@ async def _ledger(m: re.Match[str], c: Context) -> str:
     return ledger.speak(period, ledger.summary(ledger.start_of(period, c.now())))
 
 
-async def answer(text: str, ctx: Context) -> str | None:
+# What a request from the phone may not do here: change the room (timers that ring in it,
+# volume, playback), repeat what the room last heard, or change what asks first.
+PHONE_SKIP = frozenset({
+    "_timer", "_timer2", "_cancel_timers", "_volume_step", "_volume_set", "_mute",
+    "_play_pause", "_skip", "_repeat", "_trust_on", "_trust_off",
+})  # fmt: skip
+
+
+async def answer(text: str, ctx: Context, skip: frozenset[str] = frozenset()) -> str | None:
     """The spoken answer when tier 0 handles `text`, "" when it acted silently,
-    or None to send it on to Claude."""
+    or None to send it on to Claude. Handlers named in `skip` are passed over."""
     t = _clean(text)
     ctx.request = text
     for pattern, handler in _RULES:
+        if handler.__name__ in skip:
+            continue
         m = pattern.match(t)
         if m:
             return await handler(m, ctx)

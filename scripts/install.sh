@@ -91,6 +91,15 @@ fi
 
 status installing "starting the memory service"
 "$DATA/current/scripts/launchd.sh" install memory >/dev/null
+# scout-phone only when the phone is turned on ([phone] enabled = true); otherwise its login
+# item is removed, so turning the phone off and reinstalling stops it.
+if UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$DATA/current" python -c \
+    "from scout.config import load; raise SystemExit(0 if load().phone.enabled else 1)" 2>/dev/null; then
+    status installing "starting the phone service"
+    "$DATA/current/scripts/launchd.sh" install phone >/dev/null
+else
+    "$DATA/current/scripts/launchd.sh" uninstall phone >/dev/null
+fi
 status installing "starting the background app"
 "$DATA/current/scripts/launchd.sh" install >/dev/null
 status ready "running $(basename "$ROOT")"

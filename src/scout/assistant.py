@@ -37,13 +37,13 @@ from . import (
 )
 from .asr import Transcriber
 from .audio import Utterance, analyze
-from .brain import Brain, describe_tool
+from .brain import Brain, PhoneBrain, describe_tool
 from .config import DATA, Config
 from .floor import Floor
 from .mac import ToolError
 from .pronounce import Pronouncer
 from .rules import Rules
-from .tools import Timers, build_server
+from .tools import SERVER, Timers, build_server
 from .tts import Speaker
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,21 @@ _CALENDARISH = re.compile(
 )
 _MAILISH = re.compile(r"\b(e-?mails?|inbox|mail|messages? from)\b")
 ROOM = "room"
+PHONE = "phone"  # the agent name scout-phone uses for its calls
+ASK_DEADLINE_S = 20.0  # an ask from the phone answers within this, or says it's still working
+ASK_KEEP_S = 600.0  # a late answer waits this long for the phone to ask again
+ASK_STILL_WORKING = "I'm still working on that; ask me again in a moment."
+# Scout's own tools a phone request may use through Claude: the shared tools that never
+# ask (sending mail never by phone), recall and remember, and reading the timers.
+PHONE_TOOLS = {
+    f"mcp__{SERVER}__{n}"
+    for n in (
+        *(t.name for t in shared_tools.SHARED if not t.asks and t.name != "mail_send"),
+        "recall",
+        "remember",
+        "list_timers",
+    )
+}
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
 
@@ -185,6 +200,11 @@ class Assistant:
         self._listeners: set[asyncio.Queue[dict[str, Any]]] = set()
         self._saved: deque[Path] = deque()
         self._bg: set[asyncio.Task[Any]] = set()  # keeps fire-and-forget tasks alive until done
+        # Requests from the phone (ask): one at a time, on their own Claude session.
+        self._phone_brain: Brain | None = None
+        self._ask_lock = asyncio.Lock()
+        self._ask_jobs: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._ask_ready: dict[str, tuple[float, str, dict[str, Any]]] = {}  # late answers, by request
 
     # --- events: web page, transcript file ------------------------------------------
 
@@ -1287,6 +1307,9 @@ class Assistant:
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
+        if agent == PHONE and (t.asks or name == "mail_send"):
+            # Nobody in the room should be asked about a call they can't hear.
+            return {"status": "error", "error": f"{name} can't be used from the phone"}
         tr = trust.default()
         if t.asks and tr.tier(name) == "auto":  # promoted by the user (trust.py)
             log.info("allowed by trust, for %s: %s", agent, name)
@@ -1333,6 +1356,123 @@ class Assistant:
         except Exception as exc:  # report it to the caller; don't take the app down
             log.exception("shared tool %s failed", name)
             return {"status": "error", "error": f"failed: {exc}"}
+
+    # --- requests from the phone ---------------------------------------------------------
+
+    async def ask(self, agent: str, text: str, deadline: float = ASK_DEADLINE_S) -> dict[str, Any]:
+        """Answer `text` through Scout's tiers (local intents, memory, tier 1, Claude) and
+        return the reply as text: nothing is spoken or chimed in the room, the floor is
+        not taken, and a room turn in progress is left alone (Claude runs on a session of
+        its own). Requests run one at a time. Past `deadline` the answer is kept, so asking
+        again returns it; an answer nobody collected comes with the next reply."""
+        text = " ".join(text.split())
+        if not text:
+            return {"status": "error", "error": "nothing was asked"}
+        key = text.casefold()
+        now = time.monotonic()
+        for k in [k for k, (at, _, _) in self._ask_ready.items() if now - at > ASK_KEEP_S]:
+            del self._ask_ready[k]
+        result: dict[str, Any] | None = None
+        if key not in self._ask_ready:
+            task = self._ask_jobs.get(key)
+            if task is None:
+                task = self._spawn(self._ask_job(agent, text, key))
+                self._ask_jobs[key] = task
+            try:
+                result = await asyncio.wait_for(asyncio.shield(task), deadline)
+            except TimeoutError:
+                log.info("phone ask still running after %.0f s: %s", deadline, text)
+                return {"status": "pending", "text": ASK_STILL_WORKING}
+        kept = self._ask_ready.pop(key, None)
+        result = kept[2] if kept is not None else result
+        if result is None:  # can't happen: it finished just now, or was kept from earlier
+            return {"status": "pending", "text": ASK_STILL_WORKING}
+        earlier = [(t, r) for t, r in (v[1:] for v in self._ask_ready.values()) if r.get("text")]
+        self._ask_ready.clear()
+        if earlier and result.get("status") == "ok":
+            also = " ".join(f"Also, about {t!r} you asked earlier: {r['text']}" for t, r in earlier)
+            result = {**result, "text": f"{result['text']} {also}"}
+        return result
+
+    async def _ask_job(self, agent: str, text: str, key: str) -> dict[str, Any]:
+        try:
+            async with self._ask_lock:
+                result = await self._answer_text(agent, text)
+        except Exception as exc:
+            log.exception("phone ask failed")
+            result = {"status": "error", "error": f"failed: {exc}"}
+        finally:
+            self._ask_jobs.pop(key, None)
+        self._ask_ready[key] = (time.monotonic(), text, result)
+        return result
+
+    async def _answer_text(self, agent: str, text: str) -> dict[str, Any]:
+        t0 = time.monotonic()
+        self.emit("you", text=text, client=agent)
+        said, tier, private = await self._local_text(text)
+        if said is not None:
+            said = speech.speak_dates(said or "Done.")
+            log.info("phone: answered locally (tier %s): %s -> %s", tier, text, said)
+            ledger.record(tier, time.monotonic() - t0, client=agent)
+            self.emit("local", text=said, client=agent)
+            await self._record_turn(text, said, f"{agent} tier {tier}", private)
+            return {"status": "ok", "text": said, "tier": tier}
+        if self._phone_brain is None:
+            server, names = build_server(self.timers, memory=self.memory)  # no relaying to sessions
+            self._phone_brain = PhoneBrain(self.cfg.claude, server, names, PHONE_TOOLS, self.rules)
+        brain = self._phone_brain
+        replies: list[str] = []
+        try:
+            async for kind, data in brain.ask(await self._with_context(text)):
+                if kind in ("text", "spoken"):
+                    replies.append(data)
+                elif kind == "tool":
+                    name, args = data
+                    self.emit("tool", name=name, input=_preview(args), client=agent)
+                elif kind == "result":
+                    ledger.record("claude", time.monotonic() - t0, client=agent, **ledger.from_result(data))
+        except Exception as exc:
+            log.exception("phone: Claude failed")
+            self.emit("error", text=f"phone request failed: {exc}")
+            await brain.reset()
+            return {
+                "status": "ok",
+                "text": "Sorry, something went wrong talking to Claude.",
+                "tier": "claude",
+            }
+        reply = speech.to_speech(" ".join(replies)) or "Done."
+        self.emit("claude", text=reply, client=agent)
+        self._spawn(self._record_turn(text, reply, f"{agent} claude", False))
+        return {"status": "ok", "text": reply, "tier": "claude"}
+
+    async def _local_text(self, text: str) -> tuple[str | None, str, bool]:
+        """Tiers 0 and 1 for a phone request, without speaking: (answer or None, tier,
+        from private data). Nothing that changes the room (timers, volume, playback)."""
+        if not self.cfg.claude.local_first:
+            return None, "", False
+        try:
+            said = await local_intents.answer(text, self._local, skip=local_intents.PHONE_SKIP)
+            if said is not None:
+                return said, "0", False
+            try:
+                said = await asyncio.to_thread(memory.answer, text, self.memory)
+            except (ToolError, OSError) as exc:
+                log.warning("memory unavailable for a phone answer: %s", exc)
+                said = None
+            if said is not None:
+                return said, "0", True
+            if self.tier1 is not None:
+                now = datetime.now().astimezone()
+                decision = await self.tier1.decide(text, now)
+                if decision is not None:
+                    said = await tier1.run(decision, now, self.privacy.summaries)
+                    self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
+                    return said, "1", decision["tool"] == "mail_summarize"
+        except ToolError as exc:
+            return f"Sorry, {exc}", "0", False
+        except Exception:  # the local tiers never lose a request: Claude takes it
+            log.exception("phone: local answer failed; asking Claude")
+        return None, "", False
 
     def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> None:
         """Answer the pending question. With `confirm_id`, only if it's still that
@@ -1392,6 +1532,8 @@ class Assistant:
             await self.brain.interrupt()
             self._turn.cancel()
         await self.brain.close()
+        if self._phone_brain is not None:
+            await self._phone_brain.close()
 
     def set_mic_muted(self, muted: bool) -> None:
         self.mic_muted = muted

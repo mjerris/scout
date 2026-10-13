@@ -100,3 +100,17 @@ enabled = true
 # announce_outage_s = 60
 # quiet_hours = "22:00-08:00"     # only logged in these hours
 # ignore_alerts = ["is_heating"]
+
+[phone]
+# Talk to Scout from the paired phone app through SignalWire (docs/phone-design.md).
+# Off unless turned on. api_token and signing_key are secrets: keep this file mode 600.
+# enabled = true
+# space = "<your-space>.signalwire.com"
+# project_id = "<project id>"
+# api_token = "<API token>"
+# signing_key = "<signing key>"            # verifies every webhook comes from SignalWire
+# public_url = "https://<mac>.<tailnet>.ts.net:8443"   # the Funnel base SignalWire calls
+# address = "<the agent's address>"        # what the app dials; part of each call's signature
+# host = "127.0.0.1"
+# port = 8768
+# call_skew_s = 60                         # a call's signed timestamp may be this far off
