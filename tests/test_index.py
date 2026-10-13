@@ -151,9 +151,9 @@ def test_kind_and_date_filters_apply_to_meaning(tmp_path: Path) -> None:
 
 def test_matrix_top_filters_and_orders() -> None:
     m = index.Matrix(2)
-    m.add("a", np.array([1.0, 0.0], np.float32), "mail", 10)
-    m.add("b", np.array([0.6, 0.8], np.float32), "turn", 20)
-    m.add("c", np.array([0.0, 1.0], np.float32), "mail", 30)
+    m.set("a", [np.array([1.0, 0.0], np.float32)], "mail", 10)
+    m.set("b", [np.array([0.6, 0.8], np.float32)], "turn", 20)
+    m.set("c", [np.array([0.0, 1.0], np.float32)], "mail", 30)
     q = np.array([1.0, 0.0], np.float32)
     assert [i for i, _ in m.top(q, 3)] == ["a", "b", "c"]
     assert [i for i, _ in m.top(q, 1)] == ["a"]
@@ -166,7 +166,7 @@ def test_matrix_top_filters_and_orders() -> None:
 def test_matrix_compacts_after_many_drops() -> None:
     m = index.Matrix(2)
     for i in range(2000):
-        m.add(f"x{i}", np.array([1.0, float(i)], np.float32), "turn", i)
+        m.set(f"x{i}", [np.array([1.0, float(i)], np.float32)], "turn", i)
     for i in range(1500):
         m.drop(f"x{i}")
     assert len(m) == 500 and len(m.ids) < 2000  # rows reclaimed
@@ -193,3 +193,92 @@ def test_the_background_pass_works_through_a_backlog(tmp_path: Path, monkeypatch
     asyncio.run(run())
     assert emb.calls[0] == 1 and sum(emb.calls[1:]) == 50
     assert all(n == 8 for n in emb.calls[1:-1])  # in batches, one after another, not one per 30 s
+
+
+def test_the_model_loads_from_disk_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fastembed
+
+    made: list[dict[str, object]] = []
+
+    class Fake:
+        def __init__(self, name: str, **kw: object) -> None:
+            made.append(kw)
+            if kw.get("local_files_only") and len(made) == 1 and not have[0]:
+                raise ValueError("not cached")
+
+        def passage_embed(self, texts: list[str], batch_size: int = 16) -> list[np.ndarray]:
+            return [np.ones(4, np.float32) for _ in texts]
+
+    have = [True]
+    monkeypatch.setattr(fastembed, "TextEmbedding", Fake)
+    e = index.LocalEmbedder("BAAI/bge-small-en-v1.5")
+    e.embed(["hello"])
+    assert [m.get("local_files_only") for m in made] == [True]  # cached: no network at all
+    made.clear()
+    have[0] = False
+    e2 = index.LocalEmbedder("BAAI/bge-small-en-v1.5")
+    out = e2.embed(["hello"])
+    assert [m.get("local_files_only") for m in made] == [True, None]  # missing: then download
+    assert out.shape == (1, 4) and abs(float(np.linalg.norm(out[0])) - 1) < 1e-5
+
+
+def test_a_long_item_is_found_by_any_window(tmp_path: Path) -> None:
+    """Regression: only an item's first 1,000 characters were embedded, so a long mail
+    whose answer is near the end couldn't be found by meaning."""
+    emb = FakeEmbedder()
+    ix = index.Index(tmp_path / "scout.db", emb, min_similarity=0.3)
+    filler = "the quarterly figures look fine. " * 120  # ~4,000 characters
+    ix.put("long", "mail", "Weekly update", filler + "Also, Pat is my manager now.", ts=1)
+    ix.put("other", "mail", "Groceries", "milk eggs bread", ts=2)
+    while ix.embed_pending(16):
+        pass
+    assert ix.search("who is my boss")[0].id == "long"
+    with ix._lock:
+        parts = ix._conn.execute("SELECT count(*) FROM vecs WHERE id = 'long'").fetchone()[0]
+    assert parts == len(index._doc_texts(ix.get("long"))) > 4  # type: ignore[arg-type]
+
+
+def test_windows_cover_the_text_with_overlap() -> None:
+    h = index.Hit("x", "mail", "Title", "".join(f"{i:04d}" for i in range(1000)), "Pat", 0, {})  # 4,000 chars
+    texts = index._doc_texts(h)
+    assert texts[0].startswith("Title Pat 0000") and len(texts) == 5
+    assert all(t.startswith("Title ") for t in texts[1:])
+    assert texts[-1].endswith("0999")  # the end is covered
+    short = index.Hit("y", "turn", "Hi", "short", "", 0, {})
+    assert index._doc_texts(short) == ["Hi short"]
+    huge = index.Hit("z", "mail", "T", "x" * 100_000, "", 0, {})
+    assert len(index._doc_texts(huge)) == index.MAX_WINDOWS
+
+
+def test_old_single_vectors_become_part_zero_and_long_items_are_redone(tmp_path: Path) -> None:
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE vecs (id TEXT NOT NULL, model TEXT NOT NULL, sig TEXT NOT NULL, vec BLOB NOT NULL, "
+        "PRIMARY KEY (id, model));"
+    )
+    conn.execute("INSERT INTO vecs VALUES ('a', 'fake@512', 's', ?)", (np.zeros(512, np.float32).tobytes(),))
+    conn.commit()
+    conn.close()
+    ix = index.Index(db, FakeEmbedder())
+    with ix._lock:
+        assert ix._conn.execute("SELECT id, part FROM vecs").fetchall() == [("a", 0)]
+    ix.put("long", "mail", "T", "word " * 400, ts=1)  # 2,000 characters: needs more than one window
+    assert ix.embed_pending(10) == 1
+    with ix._lock:
+        assert ix._conn.execute("SELECT count(*) FROM vecs WHERE id = 'long'").fetchone()[0] >= 2
+    assert ix.embed_pending(10) == 0  # every window done: nothing left
+
+
+def test_matrix_counts_an_item_once_by_its_best_window() -> None:
+    m = index.Matrix(2)
+    m.set("a", [np.array([0.0, 1.0], np.float32), np.array([1.0, 0.0], np.float32)], "mail", 1)
+    m.set("b", [np.array([0.8, 0.6], np.float32)], "mail", 2)
+    q = np.array([1.0, 0.0], np.float32)
+    top = m.top(q, 2)
+    assert [i for i, _ in top] == ["a", "b"] and top[0][1] == 1.0 and abs(top[1][1] - 0.8) < 1e-6
+    assert m.best(["a", "b", "zz"], q) == {"a": 1.0, "b": pytest.approx(0.8)}
+    m.set("a", [np.array([0.0, 1.0], np.float32)], "mail", 1)  # replaced: one window now
+    assert [i for i, _ in m.top(q, 1)] == ["b"] and len(m) == 2
