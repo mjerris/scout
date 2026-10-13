@@ -339,6 +339,7 @@ class TasksConfig:
     farm: bool = True  # find tasks in new meetings and email
     farm_every_min: float = 10.0
     backfill_days: float = 14.0  # on the first run, read meetings and mail this far back
+    extract_model: str = "claude-sonnet-5-5"  # reads meetings for tasks ("" = Claude Code's default)
 
 
 @dataclass
