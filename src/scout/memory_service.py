@@ -15,6 +15,7 @@ token (state/memory.token, readable by this user only):
     POST /v1/memories/add {text} | /forget {about} | /matching {about}
     POST /v1/memories/relevant {request, limit} | /newest {limit} | /list
     POST /v1/journal/add {ts, who, q, a, tools, private}  -> {file}
+    POST /v1/notes/add {title, body, ts} -> {id} | /v1/notes/delete {id} -> {deleted}
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -173,6 +174,8 @@ class Service:
             "/v1/memories/relevant": lambda a: {"facts": self.relevant(str(a.get("request") or ""), int(a.get("limit") or 5))},
             "/v1/memories/newest": lambda a: {"facts": self.memory.newest(int(a.get("limit") or 10))},
             "/v1/memories/list": lambda a: {"facts": list(self.memory.facts)},
+            "/v1/notes/add": lambda a: {"id": self.ix.note_add(str(a.get("title") or ""), str(a.get("body") or ""), a.get("ts"))},
+            "/v1/notes/delete": lambda a: {"deleted": self.ix.note_delete(int(a["id"]))},
             "/v1/journal/add": lambda a: {"file": self.ix.journal_add(
                 float(a["ts"]), str(a.get("who") or "room"), str(a.get("q") or ""), str(a.get("a") or ""),
                 [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")))},
