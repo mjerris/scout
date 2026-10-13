@@ -251,7 +251,7 @@ SHARED = (
         "conversations with Scout, notes, lists, and the inbox) by words and "
         "by meaning. Use it for 'what did I say about...', 'did we talk about...', 'where did I "
         "note...'. kinds: any of memory, turn, note, list, mail (empty = all); days: only the last N "
-        "days (0 = any time); limit 1-20 (default 8). Returns the best matches, newest context first.",
+        "days (0 = any time); limit 1-20 (default 12). Returns the best matches, best first: the right one is often not the first, so read them all.",
         _obj(
             {"query": _STR, "kinds": {"type": "array", "items": _STR}, "days": _INT, "limit": _INT}, ["query"]
         ),
@@ -314,7 +314,7 @@ async def _local_search(a: dict[str, Any]) -> str:
         raise ToolError("query must be 1-300 characters")
     kinds = [str(k) for k in a.get("kinds") or [] if str(k)] or None
     days = int(a.get("days") or 0)
-    limit = max(1, min(int(a.get("limit") or 8), 20))
+    limit = max(1, min(int(a.get("limit") or 12), 20))
     since = time.time() - days * 86400 if days > 0 else None
     hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()

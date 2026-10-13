@@ -191,7 +191,7 @@ class Service:
 
 async def serve(host: str, port: int, db: Path = DB) -> None:
     cfg = load().index
-    emb = index.NomicEmbedder(cfg.model, cfg.dims, cfg.unload_after_s) if cfg.semantic else None
+    emb = index.LocalEmbedder(cfg.model, cfg.dims, cfg.unload_after_s) if cfg.semantic else None
     ix = index.Index(db, emb, cfg.min_similarity)
     migrate(ix)
     svc = Service(ix, Memory(DATA / "state" / "memory.json"), token())

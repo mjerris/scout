@@ -4,18 +4,21 @@ Everything Scout can read (memories, its own conversations, notes and lists, and
 later mail and calendar) is stored here and searchable locally; only the few best
 matches ever go to Claude.
 
-Search runs cheap layers first and the expensive one only on what they find:
+A search ranks by meaning over every item that has a vector (the kinds and dates
+asked for), and full text (SQLite FTS5, BM25) adds a small bonus for shared words and
+finds what has no vector yet. Meaning decides because, measured on a synthetic year of
+20,000 conversations with 50 questions, comparing against every item found the answer
+in the top 5 for 78-82% of them; full text alone, or meaning over just the text hits
+and the newest items, found 34%.
 
-    filter (kind, date)  ->  full text (SQLite FTS5, BM25)  ->  meaning (vectors)
+The vectors live in SQLite (table vecs) and, for searching, in one in-memory matrix
+(float32; 384 dimensions is ~1.5 KB an item, 150 MB per 100,000). An idle background
+pass embeds new items, and a search embeds the few text hits still without one, so
+nothing is ever unreachable by full text, and nothing leaves the Mac.
 
-Vectors are computed lazily: a search embeds just its candidates (the full-text hits
-plus the newest items of the kinds asked for) and caches them, and an idle background
-pass embeds new items ahead of time. So the vector cache grows with what's actually
-searched, nothing is ever unreachable by full text, and nothing leaves the Mac.
-
-The embedder is nomic-embed-text-v1.5 (ONNX on CPU through fastembed), cut to 256
-dimensions; it loads on first use and unloads after a while idle. The model name and
-dimension are stored with each vector, so changing either re-embeds on demand.
+The embedder is bge-small-en-v1.5 (ONNX on CPU through fastembed, ~0.2 GB in memory,
+loads in ~4 s); it unloads after a while idle. The model name and dimension are stored
+with each vector, so changing either re-embeds in the background.
 """
 
 from __future__ import annotations
@@ -101,14 +104,19 @@ class Embedder(Protocol):
     def embed(self, texts: Sequence[str], query: bool = False) -> np.ndarray: ...
 
 
-class NomicEmbedder:
-    """nomic-embed-text-v1.5 through fastembed (ONNX, CPU), Matryoshka-cut to `dims`.
-    Loads on first use; `unload_if_idle` frees its ~1.8 GB after `idle_s`."""
+DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+
+
+class LocalEmbedder:
+    """A fastembed model (ONNX, CPU). nomic models get their task prefixes and a
+    Matryoshka cut to `dims`; others use fastembed's query and passage embedding at full
+    size. Every vector is unit length. Loads on first use; `unload_if_idle` frees it
+    after `idle_s`."""
 
     def __init__(
         self,
-        name: str = "nomic-ai/nomic-embed-text-v1.5",
-        dims: int = 256,
+        name: str = DEFAULT_MODEL,
+        dims: int = 0,  # 0: the model's own size
         idle_s: float = 900,
         threads: int = 2,
     ) -> None:
@@ -116,7 +124,8 @@ class NomicEmbedder:
         self.threads = threads
         self.dims = dims
         self.idle_s = idle_s
-        self.model = f"{name}@{dims}"
+        self.model = f"{name}@{dims}" if dims else name
+        self._nomic = name.startswith("nomic-ai/")
         self._m: Any = None
         self._used = 0.0
         self._lock = threading.Lock()
@@ -130,14 +139,22 @@ class NomicEmbedder:
                 MODELS.mkdir(parents=True, exist_ok=True)
                 # Few threads: embedding never takes the cores listening and speaking need.
                 self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
-                log.info("embedder loaded in %.1fs", time.perf_counter() - t0)
+                log.info("embedder %s loaded in %.1fs", self.name, time.perf_counter() - t0)
             self._used = time.monotonic()
-            prefix = "search_query: " if query else "search_document: "
-            raw = np.array(list(self._m.embed([prefix + t for t in texts], batch_size=16)), dtype=np.float32)
-        # Matryoshka: layer-norm, cut, then unit length (nomic's recipe).
-        raw = (raw - raw.mean(axis=1, keepdims=True)) / (raw.std(axis=1, keepdims=True) + 1e-6)
-        cut = raw[:, : self.dims]
-        out: np.ndarray = cut / (np.linalg.norm(cut, axis=1, keepdims=True) + 1e-9)
+            if self._nomic:
+                prefix = "search_query: " if query else "search_document: "
+                raw = np.array(
+                    list(self._m.embed([prefix + t for t in texts], batch_size=16)), dtype=np.float32
+                )
+            else:
+                f = self._m.query_embed if query else self._m.passage_embed
+                raw = np.array(list(f(list(texts), batch_size=16)), dtype=np.float32)
+        if self._nomic:
+            # Matryoshka: layer-norm, then cut (nomic's recipe).
+            raw = (raw - raw.mean(axis=1, keepdims=True)) / (raw.std(axis=1, keepdims=True) + 1e-6)
+        if self.dims:
+            raw = raw[:, : self.dims]
+        out: np.ndarray = raw / (np.linalg.norm(raw, axis=1, keepdims=True) + 1e-9)
         return out
 
     @property
@@ -151,6 +168,90 @@ class NomicEmbedder:
                 log.info("embedder unloaded after %.0f s idle", self.idle_s)
                 return True
         return False
+
+
+class Matrix:
+    """Every current vector of one model, in memory, for ranking by meaning: one row per
+    item with its kind and time, so a search filters and scores with numpy. Rows are
+    added and dropped as items change; dropped rows are reused by compaction."""
+
+    def __init__(self, dims: int) -> None:
+        self.dims = dims
+        self.ids: list[str] = []
+        self.rows: dict[str, int] = {}
+        self.vecs = np.zeros((0, dims), np.float32)
+        self.kinds: list[str] = []
+        self.ts = np.zeros(0, np.float64)
+        self.alive = np.zeros(0, bool)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def _grow(self, n: int) -> None:
+        if n <= len(self.alive):
+            return
+        cap = max(n, 2 * len(self.alive), 256)
+        for name, fill in (
+            ("vecs", np.zeros((cap, self.dims), np.float32)),
+            ("ts", np.zeros(cap)),
+            ("alive", np.zeros(cap, bool)),
+        ):
+            old = getattr(self, name)
+            fill[: len(old)] = old
+            setattr(self, name, fill)
+
+    def add(self, id: str, vec: np.ndarray, kind: str, ts: float) -> None:
+        r = self.rows.get(id)
+        if r is None:
+            r = len(self.ids)
+            self._grow(r + 1)
+            self.ids.append(id)
+            self.kinds.append(kind)
+            self.rows[id] = r
+        self.vecs[r], self.ts[r], self.alive[r], self.kinds[r] = vec, ts, True, kind
+
+    def drop(self, id: str) -> None:
+        r = self.rows.pop(id, None)
+        if r is not None:
+            self.alive[r] = False
+            if len(self.ids) > 1024 and len(self.rows) < len(self.ids) // 2:
+                self._compact()
+
+    def touch(self, id: str, kind: str, ts: float) -> None:
+        r = self.rows.get(id)
+        if r is not None:
+            self.kinds[r], self.ts[r] = kind, ts
+
+    def _compact(self) -> None:
+        keep = [r for r in range(len(self.ids)) if self.alive[r]]
+        self.ids = [self.ids[r] for r in keep]
+        self.kinds = [self.kinds[r] for r in keep]
+        self.vecs, self.ts = self.vecs[keep].copy(), self.ts[keep].copy()
+        self.alive = np.ones(len(keep), bool)
+        self.rows = {id: r for r, id in enumerate(self.ids)}
+
+    def top(
+        self, q: np.ndarray, k: int, kinds: Sequence[str] | None = None, since: float | None = None
+    ) -> list[tuple[str, float]]:
+        """The k most similar items (id, cosine), best first."""
+        n = len(self.ids)
+        if not n or k <= 0:
+            return []
+        mask = self.alive[:n].copy()
+        if kinds:
+            want = set(kinds)
+            mask &= np.fromiter((kd in want for kd in self.kinds), bool, n)
+        if since is not None:
+            mask &= self.ts[:n] >= since
+        rows = np.flatnonzero(mask)
+        if not len(rows):
+            return []
+        sims = self.vecs[rows] @ q
+        if len(rows) > k:
+            part = np.argpartition(-sims, k - 1)[:k]
+            rows, sims = rows[part], sims[part]
+        order = np.argsort(-sims, kind="stable")
+        return [(self.ids[rows[i]], float(sims[i])) for i in order]
 
 
 _WORD = re.compile(r"[^\W_][\w']*")  # any script: "José", "Müller", "café" (FTS folds the accents)
@@ -177,9 +278,10 @@ def _sig(*parts: str) -> str:
 class Index:
     path: Path
     embedder: Embedder | None = None
-    min_similarity: float = 0.5  # a match by meaning alone (no shared words) needs this cosine
-    max_new_per_search: int = 32  # items a search may embed itself; the background does the rest
+    min_similarity: float = 0.6  # a match by meaning alone (no shared words) needs this cosine
+    max_new_per_search: int = 32  # text hits a search may embed itself; the background does the rest
     _conn: sqlite3.Connection = field(init=False, repr=False)
+    _matrix: Matrix | None = field(init=False, repr=False, default=None)  # loaded on first use
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
 
@@ -207,10 +309,18 @@ class Index:
         row but keeps its vector."""
         sig = _sig(title, body, who)
         meta = meta or {}
+        when = ts
         with self._lock:
             row = self._conn.execute("SELECT kind, ts, meta, sig FROM docs WHERE id = ?", (id,)).fetchone()
             if row and (row[0], row[3]) == (kind, sig) and ts in (None, row[1]) and _meta(row[2]) == meta:
                 return False
+            if when is None:
+                when = row[1] if row else time.time()
+            if self._matrix is not None:
+                if row and row[3] == sig:
+                    self._matrix.touch(id, kind, when)  # same text: the vector still holds
+                else:
+                    self._matrix.drop(id)
             self._conn.execute(
                 "INSERT INTO docs(id, kind, title, body, who, ts, meta, sig) VALUES (?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, body=excluded.body, "
@@ -221,7 +331,7 @@ class Index:
                     title,
                     body,
                     who,
-                    ts if ts is not None else time.time(),
+                    when,
                     json.dumps(meta),
                     sig,
                 ),
@@ -232,6 +342,8 @@ class Index:
         with self._lock:
             self._conn.execute("DELETE FROM docs WHERE id = ?", (id,))
             self._conn.execute("DELETE FROM vecs WHERE id = ?", (id,))
+            if self._matrix is not None:
+                self._matrix.drop(id)
 
     def sync(self, kind: str, items: Iterable[dict[str, Any]]) -> tuple[int, int]:
         """Make `kind` hold exactly `items` (each a put() dict). Returns (changed, removed)."""
@@ -312,36 +424,45 @@ class Index:
         since: float | None = None,
         limit: int = 8,
         semantic: bool | None = True,
-        pool: int = 200,
     ) -> list[Hit]:
-        """Best matches for `query`: full text, re-ranked by meaning when an embedder is
-        available (the candidates are the text hits plus the `pool` newest items, so a
-        question that shares no words with the answer can still find it). semantic=None:
-        by meaning only if the model is already loaded (never wait ~25 s for it)."""
+        """Best matches for `query`. With an embedder: ranked by meaning over every item
+        with a vector (of `kinds`, since `since`), plus a small bonus for full-text
+        matches; text hits still without a vector keep their text rank. semantic=None:
+        by meaning only if the model is already loaded (never wait for it to load)."""
         text = self.text_search(query, kinds, since, limit=60)
         if semantic is None:
             semantic = bool(getattr(self.embedder, "loaded", True))
         if not semantic or self.embedder is None:
             return text[:limit]
-        cands = {h.id: h for h in text}
-        for h in self.recent(kinds, pool, since):
-            cands.setdefault(h.id, h)
-        if not cands:
-            return []
-        # Rank by meaning what has a vector, embedding at most a few new ones here (the
-        # background pass embeds the rest); text matches without one keep their text rank.
-        vecs, hits, unranked = self._vectors(list(cands.values()), self.max_new_per_search)
+        # Items without a vector yet: embed a few now, text hits first, then the newest
+        # (the background does the rest), so what was just added is found by meaning.
+        _, _, unranked = self._vectors(text, self.max_new_per_search)
+        if not unranked:  # the text hits didn't use up the budget
+            self.embed_pending(self.max_new_per_search)
         q = self.embedder.embed([query], query=True)[0]
-        sims = vecs @ q
+        with self._lock:
+            near = self._loaded_matrix().top(q, max(limit * 4, 60), kinds, since)
+        sims = dict(near)
+        text_rank = {h.id: i for i, h in enumerate(text)}
+        # A text hit just outside the meaning shortlist still gets its own similarity.
+        missing = [h for h in text if h.id not in sims and h.id not in {u.id for u in unranked}]
+        if missing:
+            vecs, kept, _ = self._vectors(missing, 0)
+            for h, v in zip(kept, vecs @ q, strict=True):
+                sims[h.id] = float(v)
+        hits = {h.id: h for h in text}
+        hits.update({h.id: h for h in self._get_many([id for id in sims if id not in hits])})
         # Meaning decides; sharing the query's words adds a little (more for the best text
         # matches). One bar for both, so a shared stray word ("work" in "working") can't
-        # carry an unrelated item, and recent-but-unrelated items never match.
-        text_rank = {h.id: i for i, h in enumerate(text)}
+        # carry an unrelated item.
         ranked = []
-        for i, h in enumerate(hits):
-            t = text_rank.get(h.id)
-            h.similarity = float(sims[i])
-            h.score = h.similarity + (TEXT_BONUS / (1 + t) if t is not None else 0.0)
+        for id, sim in sims.items():
+            if id not in hits:
+                continue  # deleted since the matrix was read
+            h = hits[id]
+            t = text_rank.get(id)
+            h.similarity = sim
+            h.score = sim + (TEXT_BONUS / (1 + t) if t is not None else 0.0)
             if h.score < self.min_similarity:
                 continue
             h.how = "text+meaning" if t is not None else "meaning"
@@ -353,6 +474,37 @@ class Index:
                 ranked.append(h)
         ranked.sort(key=lambda h: -h.score)
         return ranked[:limit]
+
+    def _get_many(self, ids: Sequence[str]) -> list[Hit]:
+        if not ids:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, kind, title, body, who, ts, meta FROM docs WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps(list(ids)),),
+            ).fetchall()
+        return [_hit(r) for r in rows]
+
+    def _loaded_matrix(self) -> Matrix:
+        """The in-memory matrix of the embedder's current vectors (with the lock held)."""
+        if self.embedder is None:
+            raise RuntimeError("no embedder")
+        if self._matrix is None:
+            t0 = time.perf_counter()
+            rows = self._conn.execute(
+                "SELECT v.id, v.vec, d.kind, d.ts FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
+                "WHERE v.model = ?",
+                (self.embedder.model,),
+            ).fetchall()
+            dims = len(rows[0][1]) // 4 if rows else 0
+            m = Matrix(dims)
+            for id, blob, kind, ts in rows:
+                if len(blob) == dims * 4:
+                    m.add(id, np.frombuffer(blob, dtype=np.float32), kind, float(ts))
+            self._matrix = m
+            if rows:
+                log.info("index: %d vectors in memory in %.2fs", len(m), time.perf_counter() - t0)
+        return self._matrix
 
     async def asearch(self, query: str, **kw: Any) -> list[Hit]:
         return await asyncio.get_running_loop().run_in_executor(self._pool, lambda: self.search(query, **kw))
@@ -398,12 +550,18 @@ class Index:
                 # Keyed by the sig of the text that was embedded; if the item changed while
                 # it was being embedded, drop the stale vector (the next pass redoes it).
                 sig = _sig(h.title, h.body, h.who)
-                row = self._conn.execute("SELECT sig FROM docs WHERE id = ?", (h.id,)).fetchone()
+                row = self._conn.execute("SELECT sig, kind, ts FROM docs WHERE id = ?", (h.id,)).fetchone()
                 if row and row[0] == sig:
+                    vec = np.asarray(v, dtype=np.float32)
                     self._conn.execute(
                         "INSERT OR REPLACE INTO vecs(id, model, sig, vec) VALUES (?,?,?,?)",
-                        (h.id, self.embedder.model, sig, np.asarray(v, dtype=np.float32).tobytes()),
+                        (h.id, self.embedder.model, sig, vec.tobytes()),
                     )
+                    if self._matrix is not None:
+                        if not self._matrix.dims:
+                            self._matrix = Matrix(len(vec))
+                        if len(vec) == self._matrix.dims:
+                            self._matrix.add(h.id, vec, str(row[1]), float(row[2]))
 
     def embed_pending(self, limit: int = 64) -> int:
         """Embed up to `limit` items that have no current vector yet, newest first."""
@@ -523,7 +681,7 @@ class Store(Protocol):
     def prune(self, kind: str, before: float) -> int: ...
     def search(
         self, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
-        limit: int = 8, semantic: bool | None = True, pool: int = 200,
+        limit: int = 8, semantic: bool | None = True,
     ) -> list[Hit]: ...  # fmt: skip
     async def asearch(self, query: str, **kw: Any) -> list[Hit]: ...
 
