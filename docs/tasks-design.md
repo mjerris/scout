@@ -12,7 +12,7 @@ result; a periodic deterministic check, with interruptions only for what's urgen
 | The record | Markdown files, `memory/tasks/0012-send-budget-to-pat.md`, one per task, indexed (kind `task`) like notes and the journal |
 | On your phone and watch | Open tasks are mirrored to the Mac's Reminders: what you owe in the list **Scout**, what others owe you in **Waiting On** (each made when missing). Completing one in Reminders completes the task |
 | Found tasks | Added directly (no suggested inbox). Each one names its source, so a wrong one is quick to drop |
-| Who reads | Claude reads meetings (Granola notes, meeting summaries that arrive by email); the local model reads other email (it stays on the Mac) |
+| Who reads | Claude reads meetings (Granola notes, meeting summaries that arrive by email); the local model reads other email and Slack (they stay on the Mac) |
 | What's tracked | What you owe; what others owe you (waiting on); due dates mentioned in passing |
 
 ## A task file
@@ -37,7 +37,7 @@ cut by Friday?").
 
 `status` is open, done or dropped. `owner` is `me` or the person who owes it (waiting on);
 a name or address from `[tasks] me` (or just your first name) is stored as `me`. `from`
-(mail or meeting) marks a task the farm found; `reminder_title` is the title its reminder
+(mail, meeting or slack) marks a task the farm found; `reminder_title` is the title its reminder
 was made with (the helper checks it when completing). You can edit any line, add tasks by
 hand, or delete a file; the index follows within a minute.
 
@@ -51,8 +51,11 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    you", "please", "by Friday", "follow up", "I'll", "action item", "waiting on") is
    skipped too, and so is mail that is also stored as a meeting summary (it's read once,
    as the meeting). Meetings go through once all their parts have been stored for five
-   minutes (a Granola note's transcript arrives in pieces).
-2. **Extract.** Meetings go to Claude, email to the local model, with one prompt; in
+   minutes (a Granola note's transcript arrives in pieces). Slack (kind `slack`, synced
+   by scout-memory, docs/slack.md): bot messages and messages without an action cue are
+   skipped, and a conversation's new messages are read together, up to 3,000 characters
+   per read.
+2. **Extract.** Meetings go to Claude, email and Slack to the local model, with one prompt; in
    strict privacy mode, meeting summaries that came by email go to the local model too.
    It returns JSON: one item per task with title, owner (`me` or a name), due date,
    importance, urgency, effort, and a short quote as evidence. Only commitments count,
@@ -60,7 +63,8 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    in Granola transcripts by the lines marked "Me:". A task whose quote isn't in the
    text (case and spacing aside) is dropped, and at most five come from one item. An
    answer that isn't valid JSON (cut short, say) isn't taken as "no tasks": the item is
-   tried again next pass, three times in all, then left.
+   tried again next pass, three times in all, then left. Claude reads up to three
+   meetings at a time; the local model's reads go one at a time (it has a single worker).
 3. **Dedupe.** A found task that matches an open one closely, by meaning and the same
    owner (first names compared: "Pat" is "Pat Doe"), adds its source and quote to that
    task instead of making a new one, along with an earlier due date or a higher
@@ -112,10 +116,11 @@ priority") overrides the score. `tasks_list` gives each task with one reason.
 (the source and evidence). None of them asks first: they change only Scout's own list
 (and its reminders).
 
-What a found task holds came from someone's email or meeting, so Claude sees it the way
+What a found task holds came from someone's email, meeting or Slack message, so Claude sees it the way
 the privacy mode says (privacy.py): in open mode, everything, with the quotes marked as
 data, not instructions; in balanced mode, titles but not the quoted context; in strict
-mode, "a task from an email" or "a task from a meeting" with its number and due date.
+mode, "a task from an email", "a task from a meeting" or "a task from a Slack message"
+with its number and due date.
 The same goes for tasks in `local_search`. Tasks you add are shown as they are.
 
 ## Reminders
@@ -127,13 +132,37 @@ tried again on each farm pass. Completions are read by reminder id (the helper's
 date changes its reminder (`reminder-update`); a task moved between yours and waiting on
 finishes its old reminder and gets one in the other list.
 
-## The briefing
+## Asking out loud (tier 0, no Claude)
+
+Plain code answers these from the list, in a sentence or three:
+
+| Asked | Said |
+|---|---|
+| "What should I work on?", "what's next?", "what should I do next?", "what are my top priorities?" | The top three in order, one reason each: "Start with send Pat the budget, due today. Then review the deck, overdue since October 9. After that, follow up with Pat Doe on the vendor quote, overdue since October 9." |
+| "What's on my list?", "what are my tasks?", "what's on my plate?" | "You have four tasks, one overdue: A, B, C, and one more. You're waiting on three things from others." |
+| "How many tasks do I have?" | Counts only: open, overdue, due today, waiting on others |
+| "What am I waiting on?", "who owes me anything?" | Grouped by person, overdue first: "Pat Doe owes you two: the vendor quote, overdue since October 9, and the slides, due Friday. Sam owes you the contract." At most three people, three items each |
+| "What does Pat owe me?", "what is Pat working on for me?", "what am I waiting on from Pat?" | The same for one person ("Pat" is "Pat Doe"). Someone with nothing on the list goes to Claude, so "what does the bank owe me" isn't answered with "nothing" |
+
+The patterns match whole requests only: "what should I make for dinner", a bare "what
+should I do", "what's next on my calendar" and "what's on my grocery list" (a Reminders
+list) are left to their own answers or to Claude. These answers are spoken here and use
+the real titles, even of found tasks; an answer that says a found task's title is marked
+private (`Context.private`), so in strict privacy mode it's withheld from Claude like
+other private local answers.
+
+## The briefing and the pulse
 
 The morning briefing says your top three tasks and how many more are overdue. Waiting-on
 items past their date are offered as follow-ups ("Sam owes you the vendor quote, due
-Friday, October 9; maybe follow up"). The pulse has no task code.
+Friday, October 9; maybe follow up").
+
+The pulse (pulse.py), at its first check of the day (the first after quiet hours end),
+says what you owe that's due today ("Due today: send Pat the budget.") and up to three
+waiting-on items that are overdue ("Pat owes you the vendor quote, overdue since October
+9; maybe follow up."). Each is said once that day; nothing is said in quiet hours, and
+the follow-ups come again the next day while they're overdue.
 
 ## Not now
 
-Slack (the next source, same farm), effort estimates feeding a calendar plan, and
-dependencies between tasks.
+Effort estimates feeding a calendar plan, and dependencies between tasks.

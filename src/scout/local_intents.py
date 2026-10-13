@@ -1,7 +1,8 @@
 """Tier 0: everyday requests answered by plain code, in well under a second and
 with no tokens: the time and date, timers, volume, play/pause, what's on the
 calendar today or tomorrow, free and busy time ("am I free at 3", "when am I free
-tomorrow"), reminder lists and what's due, and the briefing ("brief me").
+tomorrow"), reminder lists and what's due, the briefing ("brief me"), and the task list
+("what should I work on", "what am I waiting on", "what does Pat owe me").
 
 Tier 0 only reads. Adding or completing a reminder ("add milk to my shopping
 list") is left to Claude, whose reminder_add / reminder_complete calls are
@@ -14,6 +15,7 @@ does go to Claude ("and what about Friday?") still has the context."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import re
 from collections.abc import Awaitable, Callable
@@ -31,6 +33,7 @@ from . import (
     trust,
     reminders_mac,
     starlink,
+    tasks,
     weather,
 )
 from . import ledger
@@ -96,6 +99,14 @@ async def _media(action: str) -> str:
     raise ToolError(f"nothing to {action}: Spotify and Music aren't running")
 
 
+async def _load_tasks() -> list[tasks.Task]:
+    return await asyncio.to_thread(tasks.all_tasks)
+
+
+async def _task_people() -> list[str]:
+    return await asyncio.to_thread(tasks._people)
+
+
 @dataclass
 class Context:
     """What tier 0 can reach: the app's timers, and the Mac and calendar tools."""
@@ -119,6 +130,11 @@ class Context:
     mail: Callable[..., Awaitable[list[dict[str, Any]]]] = mail_mac.message_data
     hours: Callable[[], freebusy.Hours] = freebusy.work_hours
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
+    task_list: Callable[[], Awaitable[list[tasks.Task]]] = _load_tasks
+    people: Callable[[], Awaitable[list[str]]] = _task_people
+    # The last answer used text from an email or meeting (a found task's title): spoken
+    # here, but withheld from Claude in strict privacy mode like other private answers.
+    private: bool = False
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
@@ -424,6 +440,76 @@ async def _briefing(m: re.Match[str], c: Context) -> str:
     return await briefing.build(c.now(), c.events, c.reminders, c.mail, c.hours())
 
 
+# The task list (tasks.py). Spoken here only, so found tasks' real titles are used; the
+# answer is marked private when one is, for strict privacy mode.
+
+_THEN = r"(?: next| now| first| today| right now)"
+
+
+@_rule(
+    r"(?:what should i (?:(?:work on|tackle|focus on|start (?:on|with)|be working on)" + _THEN + r"?|"
+    r"(?:do|be doing)" + _THEN + r")|"
+    r"what(?:'s| is) next(?: on my (?:list|plate|task list))?|"
+    r"what(?:'s| is| are) my (?:next|top) (?:task|tasks|priority|priorities|thing)|"
+    r"what do i (?:need|have) to do next|what(?:'s| is) the next thing on my list)"
+)
+async def _task_next(m: re.Match[str], c: Context) -> str:
+    text, c.private = tasks.speak_next(await c.task_list(), c.now().date(), await c.people())
+    return text
+
+
+@_rule(
+    r"(?:what(?:'s| is) on my (?:task )?list|what(?:'s| is) on my plate|what do i have on my plate|"
+    r"what are my tasks|what(?:'s| is| are) on my tasks|what tasks do i have|"
+    r"(?:list|read(?: me)?|tell me) my tasks)"
+)
+async def _task_list(m: re.Match[str], c: Context) -> str:
+    text, c.private = tasks.speak_list(await c.task_list(), c.now().date(), await c.people())
+    return text
+
+
+@_rule(
+    r"how many (?:open )?(?:tasks|things|to-?dos) (?:do i have|have i got|are on my (?:list|plate))"
+    r"(?: (?:left|open|today))?"
+)
+async def _task_count(m: re.Match[str], c: Context) -> str:
+    text, c.private = tasks.speak_count(await c.task_list(), c.now().date())
+    return text
+
+
+_WHO = r"(?P<who>[a-z][a-z'.-]*(?: [a-z][a-z'.-]*)?)"
+
+
+@_rule(
+    r"(?:what am i (?:still )?waiting (?:on|for)|who owes me (?:anything|something|stuff)|"
+    r"what do (?:people|others) owe me)"
+)
+async def _task_waiting(m: re.Match[str], c: Context) -> str | None:
+    got = tasks.speak_waiting(await c.task_list(), c.now().date())
+    if got is None:
+        return None
+    text, c.private = got
+    return text
+
+
+@_rule(
+    r"(?:what am i (?:still )?waiting (?:on|for) from "
+    + _WHO
+    + r"|what(?:'s| is) "
+    + _WHO.replace("who", "who2")
+    + r" (?:working on|doing) for me|what does "
+    + _WHO.replace("who", "who3")
+    + r" owe me)"
+)
+async def _task_owed_by(m: re.Match[str], c: Context) -> str | None:
+    name = m.group("who") or m.group("who2") or m.group("who3")
+    got = tasks.speak_waiting(await c.task_list(), c.now().date(), name)
+    if got is None:
+        return None  # nothing from them on the list ("what is the team doing for me"): Claude
+    text, c.private = got
+    return text
+
+
 @_rule(r"(?:what(?:'s| is) on|read(?: me)?|check) (?:my |the )?((?:[a-z0-9'-]+ ){0,2}?[a-z0-9'-]+) list")
 async def _reminder_list(m: re.Match[str], c: Context) -> str | None:
     name = m.group(1)
@@ -676,6 +762,7 @@ async def answer(text: str, ctx: Context, skip: frozenset[str] = frozenset()) ->
     or None to send it on to Claude. Handlers named in `skip` are passed over."""
     t = _clean(text)
     ctx.request = text
+    ctx.private = False
     for pattern, handler in _RULES:
         if handler.__name__ in skip:
             continue

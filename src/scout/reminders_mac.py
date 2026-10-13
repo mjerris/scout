@@ -13,14 +13,49 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import locallists
-from .calendar_mac import ensure_access, iso, parse_time, text_arg, vcal
+from . import calendar_mac, locallists
+from .calendar_mac import ensure_access, iso, parse_time, text_arg
 from .config import load
 from .mac import ToolError
 
 log = logging.getLogger(__name__)
 _FALLBACK_S = 600.0  # after Reminders fails, use Scout's own lists this long before retrying
 _fallback_until = 0.0
+_GRANTED_S = 300.0  # a granted Reminders access is trusted this long before asking the helper again
+_DENIED_S = 60.0  # and a refusal this long
+_access: dict[str, tuple[float, str]] = {}  # helper path -> (good until, "" or the refusal)
+_ACCESS_ERRORS = ("access not granted", "access is ")  # native/vcal's refusals
+
+
+def _helper_key(helper: Path | None) -> str:
+    return str(helper or calendar_mac.VCAL)
+
+
+async def _ensure_reminders(helper: Path | None) -> None:
+    """ensure_access for Reminders, remembered for a while: every operation asks, and the
+    pulse and task farm ask often, so the helper isn't spawned for each one."""
+    key = _helper_key(helper)
+    until, refusal = _access.get(key, (0.0, ""))
+    if time.monotonic() < until:
+        if refusal:
+            raise ToolError(refusal)
+        return
+    try:
+        await ensure_access(helper, reminders=True)
+    except ToolError as exc:
+        _access[key] = (time.monotonic() + _DENIED_S, str(exc))
+        raise
+    _access[key] = (time.monotonic() + _GRANTED_S, "")
+
+
+async def vcal(*args: str, helper: Path | None = None) -> dict[str, Any]:
+    """calendar_mac.vcal; a refusal from a real operation forgets the remembered access."""
+    try:
+        return await calendar_mac.vcal(*args, helper=helper)
+    except ToolError as exc:
+        if any(e in str(exc) for e in _ACCESS_ERRORS):
+            _access.pop(_helper_key(helper), None)
+        raise
 
 
 def _backend() -> str:
@@ -35,12 +70,12 @@ async def _apple(helper: Path | None) -> bool:
     if backend == "scout":
         return False
     if backend == "reminders":
-        await ensure_access(helper, reminders=True)
+        await _ensure_reminders(helper)
         return True
     if time.monotonic() < _fallback_until:
         return False
     try:
-        await ensure_access(helper, reminders=True)
+        await _ensure_reminders(helper)
         return True
     except (ToolError, OSError) as exc:
         log.info("Reminders unavailable (%s); using Scout's own lists", exc)

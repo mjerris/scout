@@ -115,3 +115,29 @@ enabled = true
 # port = 8768
 # call_skew_s = 60                         # a call's signed timestamp may be this far off
 # subscriber = "scout-owner"               # who the /phone test page signs in to SignalWire as
+
+[tasks]
+# Scout's task list (docs/tasks-design.md): found in meetings and email, ordered by plain code,
+# mirrored to Reminders.
+# me = ["Pat", "pat@example.com"]          # your names and addresses: tells your tasks from others'
+# mirror = true                           # open tasks in Reminders (yours, and what others owe you)
+# mirror_list = "Scout"
+# waiting_list = "Waiting On"
+# farm = true                             # find tasks in new meetings, mail and Slack
+# farm_every_min = 10
+# backfill_days = 14                      # on the first run, read this far back
+# extract_model = "claude-sonnet-5-5"     # reads meetings; mail and Slack stay with the local model
+
+[granola]
+# Granola meeting notes in local search and the task farm (a personal API key: Granola,
+# Settings, Connectors, API keys; Business plan or above). A secret: keep this file mode 600.
+# api_key = "<grn_ key>"
+# every_min = 30
+
+[slack]
+# Slack messages in local search and the task farm (docs/slack.md: a Slack app with a user
+# token). A secret: keep this file mode 600. Empty token: off.
+# token = "<xoxp- user token>"
+# every_min = 15
+# backfill_days = 14
+# skip = ["random", "Pat"]                # channels, or the person a DM is with, to leave out

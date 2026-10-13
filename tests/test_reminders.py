@@ -93,6 +93,7 @@ def test_refused_reminders_access_names_the_reminders_pane(
     exe = _fake(tmp_path, status="not_determined", granted=False)
     with pytest.raises(ToolError, match=r"Reminders access wasn.t allowed.*Privacy and Security, Reminders"):
         asyncio.run(reminders_mac.reminders(helper=exe))
+    reminders_mac._access.clear()  # the refusal is remembered for a minute
     exe = _fake(tmp_path, status="denied")
     with pytest.raises(ToolError, match="Reminders access is denied"):
         asyncio.run(reminders_mac.lists(helper=exe))

@@ -11,6 +11,7 @@ import asyncio
 import datetime as dt
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +40,37 @@ async def vcal(*args: str, timeout: float = 15.0, helper: Path | None = None) ->
     except json.JSONDecodeError:
         raise ToolError(err.decode(errors="replace").strip()[:300] or "the calendar helper failed") from None
     if "error" in data and (proc.returncode != 0 or data["error"]):
+        if (
+            args
+            and args[0] not in ("status", "request")
+            and any(e in str(data["error"]) for e in _ACCESS_ERRORS)
+        ):
+            _cal_access.pop(str(exe), None)  # access was taken away: ask again next time
         raise ToolError(str(data["error"]))
     return data
+
+
+_cal_access: dict[str, tuple[float, str]] = {}  # helper path -> (good until, "" or the refusal)
+_ACCESS_ERRORS = ("access not granted", "access is ")  # native/vcal's refusals
+_GRANTED_S, _DENIED_S = 300.0, 60.0
+
+
+async def _ensure_calendar(helper: Path | None) -> None:
+    """ensure_access for Calendar, remembered for a while (granted 5 min, refused 1 min):
+    every read asks, and the pulse asks every 15 minutes, so the helper isn't spawned
+    for each one. A real operation refused for access forgets it (vcal above)."""
+    key = str(helper or VCAL)
+    until, refusal = _cal_access.get(key, (0.0, ""))
+    if time.monotonic() < until:
+        if refusal:
+            raise ToolError(refusal)
+        return
+    try:
+        await ensure_access(helper)
+    except ToolError as exc:
+        _cal_access[key] = (time.monotonic() + _DENIED_S, str(exc))
+        raise
+    _cal_access[key] = (time.monotonic() + _GRANTED_S, "")
 
 
 async def ensure_access(helper: Path | None = None, reminders: bool = False) -> None:
@@ -182,7 +212,7 @@ async def event_data(
         raise ToolError("end must be after start")
     if e - s > dt.timedelta(days=_MAX_DAYS):
         raise ToolError(f"the range can be at most {_MAX_DAYS} days")
-    await ensure_access(helper)
+    await _ensure_calendar(helper)
     args = ["events", "--from", iso(s), "--to", iso(e), "--limit", "100"]
     if q := text_arg(query, "query", 100):
         args += ["--query", q]
@@ -192,7 +222,7 @@ async def event_data(
 
 
 async def calendars(helper: Path | None = None) -> str:
-    await ensure_access(helper)
+    await _ensure_calendar(helper)
     cals = (await vcal("calendars", helper=helper)).get("calendars", [])
     if not cals:
         return "No calendars on this Mac. Add an account in System Settings, Internet Accounts."
@@ -217,7 +247,7 @@ async def create_event(a: dict[str, Any], helper: Path | None = None) -> str:
         raise ToolError("end must not be before start")
     if end - start > dt.timedelta(days=31):
         raise ToolError("an event can be at most 31 days long")
-    await ensure_access(helper)
+    await _ensure_calendar(helper)
     args = ["create", "--title", title, "--start", iso(start), "--end", iso(end)]
     for key, flag, limit in (
         ("calendar", "--calendar", 200),
