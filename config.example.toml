@@ -129,7 +129,7 @@ enabled = true
 # farm = true                             # find tasks in new meetings, mail and Slack
 # farm_every_min = 10
 # backfill_days = 14                      # on the first run, read this far back
-# extract_model = "claude-sonnet-5-5"     # reads meetings; mail and Slack stay with the local model
+# extract_model = "claude-haiku-5-5"      # reads meetings; mail and Slack stay with the local model
 
 [granola]
 # Granola meeting notes in local search and the task farm (a personal API key: Granola,

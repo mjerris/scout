@@ -79,6 +79,11 @@ def test_answers_are_parsed_leniently() -> None:
     assert taskfarm.parse_found("I couldn't find any.") is None  # not an answer: not "none"
     assert taskfarm.parse_found("{not json}") is None
     assert taskfarm.parse_found('{"tasks": [{"title": "Send') is None  # cut short
+    # Valid JSON followed by prose that has a brace of its own: still the answer.
+    assert taskfarm.parse_found('{"tasks": [{"title": "Send it"}]}\nNote: {skipped the rest}') == [
+        {"title": "Send it"}
+    ]
+    assert taskfarm.parse_found('Here: {"tasks": []} (done)') == []
 
 
 def test_meetings_and_mail_become_tasks_once(store: index.Index, tmp_path: Path) -> None:
