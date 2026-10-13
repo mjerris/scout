@@ -168,3 +168,21 @@ def test_mail_waits_while_the_local_model_isnt_loaded(store: index.Index, tmp_pa
     assert taskfarm.local_extract(None) is None
     c = asyncio.run(taskfarm.farm_pass(store, None, None, now=NOW, state_path=tmp_path / "s.json"))
     assert c["read"] == 0 and "mail:1" not in json.loads((tmp_path / "s.json").read_text()).get("seen", [])
+
+
+def test_quotes_match_across_markdown_punctuation_and_speaker_lines() -> None:
+    text = (
+        "## Decisions\n- **Mike** will send the *revised* budget to Pat, by Friday.\n\n"
+        "Pat Doe: Can you get me the travel cut\nMike: by Friday? Sure, I'll do it.\n"
+    )
+    ok = [
+        "Mike will send the revised budget to Pat by Friday",
+        "can you get me the travel cut by Friday",  # across two transcript lines
+        "I’ll do it",  # a curly apostrophe  # noqa: RUF001
+        "send the revised budget ... by Friday",
+    ]
+    for q in ok:
+        assert taskfarm.evidenced({"evidence": q}, text), q
+    for q in ("Mike will send the budget to Sam", "approve the raise", "", "budget to Pat by Monday"):
+        assert not taskfarm.evidenced({"evidence": q}, text), q
+    assert not taskfarm.evidenced({"evidence": "cut by"}, "the haircut by noon")  # whole words only

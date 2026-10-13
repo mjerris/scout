@@ -17,6 +17,7 @@ from typing import Any
 
 from . import appdb, index, mail_mac
 from .config import load
+from .mac import ToolError
 from .summary import essential
 
 log = logging.getLogger(__name__)
@@ -177,19 +178,46 @@ def _mark(ts: float | None = None) -> float | None:
     return float(rows[0][0]) if rows else None
 
 
+FAST_TIMEOUT_S = 30.0  # the newest-by-range listing; slower than this, the full scan is used
+FAST_RETRY_S = 6 * 3600.0  # after the range listing failed, scan in full this long before retrying
+_fast_off_until = 0.0
+
+
+async def _list_newest(
+    run: mail_mac.Runner, newest: mail_mac.Runner | None
+) -> tuple[list[dict[str, Any]], str]:
+    """The newest inbox messages as {id, date, read} (more from the full scan), and how
+    they were listed. The newest NEWEST of each inbox by range when Mail is the real one
+    (or `newest` fakes it); the full id-and-date scan (_LIST) when that fails or is off."""
+    global _fast_off_until
+    real = newest is None and run is _slow_jxa
+    if (real or newest is not None) and time.monotonic() >= _fast_off_until:
+        try:
+            return await mail_mac.newest_ids(NEWEST, newest, timeout=FAST_TIMEOUT_S), "ranges"
+        except ToolError as exc:
+            _fast_off_until = time.monotonic() + FAST_RETRY_S
+            log.warning("mail index: the newest-by-range listing failed (%s); scanning everything", exc)
+    data = await mail_mac._call(run, mail_mac._LIST, str(NEWEST), "false", "", str(mail_mac.RECENT_DAYS))
+    listed: list[dict[str, Any]] = data.get("messages", [])
+    return listed, "scan"
+
+
 async def sync_pass(
-    ix: index.Store, run: mail_mac.Runner = _slow_jxa, first_days: float = 2.0
+    ix: index.Store,
+    run: mail_mac.Runner = _slow_jxa,
+    first_days: float = 2.0,
+    newest: mail_mac.Runner | None = None,
 ) -> dict[str, Any]:
     """Index mail that arrived since the last pass stored everything (the first time, the
     last `first_days`), then fill in the text of a few remembered search results.
 
     The watermark only moves past messages actually stored: not the newest indexed one,
-    which may be a search result remembered ahead of older mail this pass never got to."""
+    which may be a search result remembered ahead of older mail this pass never got to.
+    `newest` fakes the AppleScript range listing in tests (see _list_newest)."""
     t0 = time.monotonic()
     mark = _mark()
     since = mark - 60 if mark is not None else time.time() - first_days * 86400
-    data = await mail_mac._call(run, mail_mac._LIST, str(NEWEST), "false", "", str(mail_mac.RECENT_DAYS))
-    listed = data.get("messages", [])
+    listed, how = await _list_newest(run, newest)
     t_list = time.monotonic() - t0
     due = [
         m for m in listed
@@ -209,7 +237,7 @@ async def sync_pass(
     t1 = time.monotonic()
     for i in range(0, len(todo), CHUNK):
         chunk = todo[i : i + CHUNK]
-        got = await mail_mac.bodies([int(m["id"]) for m in chunk], run, remember=False)
+        got = await mail_mac.bodies([int(m["id"]) for m in chunk], run, remember=False, stored=False)
         for row in chunk:
             m = got.get(int(row["id"]))
             if m is not None:
@@ -224,7 +252,7 @@ async def sync_pass(
     elif listed:
         _mark(max([_ts(str(m.get("date") or "")) for m in listed] + ([mark] if mark is not None else [])))
     out = {
-        "listed": len(listed), "new": len(new), "filled": len(partial), "stored": stored,
+        "listed": len(listed), "how": how, "new": len(new), "filled": len(partial), "stored": stored,
         "list_s": round(t_list, 1), "read_s": round(time.monotonic() - t1, 1), "total": ix.count(KIND),
     }  # fmt: skip
     log.info("mail index: %s", out)
@@ -249,7 +277,7 @@ async def backfill_meetings(ix: index.Store, run: mail_mac.Runner = _slow_jxa, d
     ids = [i for i in found if ix.get(f"mailmeeting:{i}") is None]
     stored: set[int] = set()
     for i in range(0, len(ids), CHUNK):
-        got = await mail_mac.bodies(ids[i : i + CHUNK], run, remember=False)
+        got = await mail_mac.bodies(ids[i : i + CHUNK], run, remember=False, stored=False)
         for mid, m in got.items():
             if m.get("body"):
                 _put(ix, {**found.get(mid, {}), **m}, str(m["body"]))
@@ -261,13 +289,13 @@ async def backfill_meetings(ix: index.Store, run: mail_mac.Runner = _slow_jxa, d
 
 
 def search(query: str, count: int, days: int) -> dict[str, Any] | None:
-    """Matching messages from the index, in mail_mac.listing's shape, or None when the
-    index has no mail yet (the caller asks Mail.app instead)."""
-    ix = index.default()
-    if not ix.count(KIND):
-        return None
+    """Matching messages from the index, in mail_mac.listing's shape, or None when it
+    has none (no mail indexed yet, or no match: the caller asks Mail.app instead). One
+    call to the store."""
     t0 = time.monotonic()
-    hits = ix.search(query, kinds=[KIND], since=time.time() - days * 86400, limit=count, semantic=None)
+    hits = index.default().search(
+        query, kinds=[KIND], since=time.time() - days * 86400, limit=count, semantic=None
+    )
     msgs = [
         {"id": int(h.meta.get("mail_id") or h.id.split(":", 1)[1]), "date": h.meta.get("date") or "",
          "sender": h.who, "subject": h.title, "read": bool(h.meta.get("read"))}

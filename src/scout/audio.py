@@ -7,6 +7,7 @@ import collections
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -47,6 +48,8 @@ class Utterance:
     echo: bool  # speech began while (or just after) the assistant was talking
     stats: AudioStats
     ended: float = 0.0  # time.monotonic() when the clip ended
+    end_reason: str = ""  # why the segmenter ended it ("turn", "pause", "max"; "" if it doesn't say)
+    turn_prob: float | None = None  # the end-of-turn model's last answer, if it was asked
 
 
 def analyze(pcm: bytes, aggressiveness: int = 2) -> AudioStats:
@@ -169,7 +172,31 @@ async def utterances(
     on_onset: Callable[[bool], None] | None = None,
 ) -> None:
     """Consume mic frames forever, emitting Utterances. is_echo() reports TTS
-    activity; on_onset(while_speaking) fires when speech starts (barge-in)."""
+    activity; on_onset(while_speaking) fires when speech starts (barge-in).
+
+    The segmenter runs on a thread of its own: the end-of-turn model takes tens of
+    milliseconds (54 ms p90) that would otherwise stall the event loop, playback included.
+    Frames are still fed one at a time, in order."""
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="segmenter")
+
+    def feed(frame: bytes) -> asyncio.Future[bytes | bool | None]:
+        return loop.run_in_executor(pool, seg.feed, frame)
+
+    try:
+        await _utterances(mic, seg, is_echo, out, on_onset, feed)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+async def _utterances(
+    mic: _Frames,
+    seg: _Segmenter,
+    is_echo: Callable[[], bool],
+    out: asyncio.Queue[Utterance],
+    on_onset: Callable[[bool], None] | None,
+    feed: Callable[[bytes], asyncio.Future[bytes | bool | None]],
+) -> None:
     started, echo = 0.0, False
     silent_since = time.monotonic()
     warned = False
@@ -194,7 +221,7 @@ async def utterances(
                     "Privacy & Security → Microphone for the app running this process"
                 )
                 warned = True
-        res = seg.feed(frame)
+        res = await feed(frame)
         if seg.triggered and not echo:
             # The assistant may start talking after the user does: if it plays
             # at any point during the clip, the clip holds its voice too.
@@ -206,4 +233,5 @@ async def utterances(
                 on_onset(echo)
         elif isinstance(res, bytes):
             stats = AudioStats(seg.last_voiced_ms, seg.last_level_db, onset_floor)
-            await out.put(Utterance(res, started, echo, stats, time.monotonic()))
+            reason, prob = getattr(seg, "last_end_reason", ""), getattr(seg, "last_turn_prob", None)
+            await out.put(Utterance(res, started, echo, stats, time.monotonic(), reason, prob))

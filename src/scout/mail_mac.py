@@ -173,6 +173,84 @@ async def _recent_by_range(scan: int, run: Runner | None = None) -> list[dict[st
     return _parse_recent(out)
 
 
+# The background index pass (mailindex.sync_pass) needs only ids, dates and read status:
+# the newest n of each inbox as three range requests, not every inbox message's id and
+# date (_LIST took 7.5-16.6 s a pass on a 71k-message inbox even with nothing new). Same
+# date encoding as _RECENT_AS.
+_NEWEST_AS = """
+on run argv
+  set n to (item 1 of argv) as integer
+  set unitSep to character id 31
+  set recSep to character id 30
+  set epoch to current date
+  set year of epoch to 2020
+  set month of epoch to January
+  set day of epoch to 1
+  set time of epoch to 0
+  set out to {}
+  tell application "Mail"
+    repeat with mb in (mailboxes of inbox)
+      set cnt to count messages of mb
+      if cnt > 0 then
+        set k to n
+        if k > cnt then set k to cnt
+        if (date received of message 1 of mb) >= (date received of message cnt of mb) then
+          set a to 1
+          set b to k
+        else
+          set a to cnt - k + 1
+          set b to cnt
+        end if
+        set ids to id of messages a thru b of mb
+        set ds to date received of messages a thru b of mb
+        set rds to read status of messages a thru b of mb
+        if (count ids) = (count ds) and (count ids) = (count rds) then
+          repeat with i from 1 to count ids
+            set end of out to ((item i of ids) as text) & unitSep & (((item i of ds) - epoch) as integer as text) & unitSep & ((item i of rds) as text)
+          end repeat
+        end if
+      end if
+    end repeat
+  end tell
+  set AppleScript's text item delimiters to recSep
+  return out as text
+end run
+"""
+
+
+def _parse_newest(text: str) -> list[dict[str, Any]]:
+    """_NEWEST_AS's records as {id, date, read}, newest first. AppleScript subtracts local
+    wall-clock dates, so the seconds are wall-clock too: made aware after adding, so a
+    date across a daylight-saving change keeps its own offset."""
+    epoch = dt.datetime(2020, 1, 1)
+    rows: list[tuple[dt.datetime, int, bool]] = []
+    for rec in text.split("\x1e"):
+        parts = rec.split("\x1f")
+        if len(parts) != 3 or not parts[0].strip().isdigit():
+            continue
+        try:
+            when = (epoch + dt.timedelta(seconds=int(parts[1]))).astimezone()
+        except (ValueError, OverflowError):
+            continue
+        rows.append((when, int(parts[0]), parts[2].strip() == "true"))
+    rows.sort(reverse=True)
+    return [{"id": mid, "date": when.isoformat(), "read": read} for when, mid, read in rows]
+
+
+async def newest_ids(
+    per_inbox: int, run: Runner | None = None, timeout: float = 30.0
+) -> list[dict[str, Any]]:
+    """The newest `per_inbox` messages of each inbox as {id, date, read}, newest first. Raises
+    ToolError when Mail can't answer (the caller falls back to the full _LIST scan)."""
+    if run is not None:
+        out = await run(_NEWEST_AS, str(per_inbox))
+    else:
+        out = await _applescript(_NEWEST_AS, str(per_inbox), timeout=timeout)
+    if out.strip() and not _parse_newest(out):
+        raise ToolError(f"unexpected reply from Mail: {out[:200]}")
+    return _parse_newest(out)
+
+
 async def _applescript(script: str, *args: str, timeout: float = 30.0) -> str:
     return await mac._run(
         "/usr/bin/osascript", "-e", script, "--", *args, timeout=timeout
@@ -643,20 +721,52 @@ def _remember(messages: list[dict[str, Any]], with_body: bool) -> None:
     mailindex.remember_soon(messages, with_body)
 
 
+def _stored(ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Messages whose text Scout's index already has (mailindex._put: the essential part,
+    at most _MAX_BODY characters, which is all a summary reads), in _READ_MANY's shape.
+    Partial rows (sender and subject only) are left out. Blocking: run off the loop."""
+    from . import index as store
+
+    ix = store.default()
+    out: dict[int, dict[str, Any]] = {}
+    for mid in ids:
+        h = ix.get(f"mail:{mid}")
+        if h is None or h.kind != "mail" or h.meta.get("partial"):
+            continue
+        out[mid] = {"id": mid, "date": str(h.meta.get("date") or ""), "sender": h.who, "subject": h.title,
+                    "body": h.body, "truncated": len(h.body) >= _MAX_BODY}  # fmt: skip
+    return out
+
+
 async def bodies(
-    ids: list[int], run: Runner = _jxa, index: Index | None = None, remember: bool = True
+    ids: list[int],
+    run: Runner = _jxa,
+    index: Index | None = None,
+    remember: bool = True,
+    stored: bool = True,
 ) -> dict[int, dict[str, Any]]:
-    """Several messages with their text, by id, in one call to Mail. Missing ids are left out.
-    Ids from the index are checked like message()'s."""
+    """Several messages with their text, by id: from Scout's index when it has them
+    (`stored`), the rest in one call to Mail. Missing ids are left out. Ids from Mail's
+    index are checked like message()'s, stored text included."""
     if not ids:
         return {}
     if len(ids) > 50:
         raise ToolError("at most 50 messages at a time")
     wanted = [_check_id(i) for i in ids]
-    data = await _call(run, _READ_MANY, ",".join(map(str, wanted)), str(_MAX_BODY))
-    got = {int(m["id"]): m for m in data.get("messages", []) if m.get("id") in wanted}
     idx = index or INDEX
-    for mid in wanted:
+    have: dict[int, dict[str, Any]] = {}
+    if stored:
+        try:  # blocking calls to the memory service: off the event loop
+            have = await asyncio.to_thread(_stored, wanted)
+        except Exception as exc:  # the memory service is down: Mail still answers
+            log.info("mail: Scout's index unavailable for message text (%s); asking Mail", exc)
+        have = {i: m for i, m in have.items() if (row := idx.rows.get(i)) is None or not _same(row, m)}
+    ask = [i for i in wanted if i not in have]
+    if not ask:
+        return have
+    data = await _call(run, _READ_MANY, ",".join(map(str, ask)), str(_MAX_BODY))
+    got = {int(m["id"]): m for m in data.get("messages", []) if m.get("id") in ask}
+    for mid in ask:
         row = idx.rows.get(mid)
         if row is None or (mid in got and not _same(row, got[mid])):
             continue
@@ -668,7 +778,9 @@ async def bodies(
             log.warning("mail: message %d left out: %s", mid, exc)
     if remember:
         _remember(list(got.values()), with_body=True)
-    return got
+    if have:
+        log.info("mail: text of %d message(s) from Scout's index, %d from Mail", len(have), len(got))
+    return {i: m for i in wanted if (m := have.get(i) or got.get(i)) is not None}
 
 
 async def verify_index_ids(n: int = 5, run: Runner = _jxa, index: Index | None = None) -> str:

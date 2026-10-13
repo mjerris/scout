@@ -20,7 +20,10 @@ KEEPALIVE='<true/>'
 if [ "${2:-}" = memory ]; then
   LABEL=com.local.scout.memory
   PROGRAM=run-memory.sh
-  PROCESS=Background  # embedding gives way to listening and speaking
+  # Standard, not Background: Background pins it to the efficiency cores and throttles
+  # its disk (embedding 4-5 docs/s instead of 28-38, and voice searches wait behind it).
+  # It yields the CPU by nice 10 instead (memory_service.main).
+  PROCESS=Standard
   LOG=memory
 elif [ "${2:-}" = phone ]; then
   LABEL=com.local.scout.phone

@@ -565,6 +565,7 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
         spk._pending = 0
         spk._kinds = deque()
         spk._speech = 0
+        spk._progress = 0
         spk._playing = False
         spk._last_end = 0.0
         spk._idle = asyncio.Event()
@@ -575,7 +576,7 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
         task = asyncio.create_task(spk._play_loop())
         spk._pending = 1
         spk._idle.clear()
-        spk._audio.put_nowait((0, np.zeros(2400, np.float32), "hello"))
+        spk._audio.put_nowait((0, np.zeros(2400, np.float32), "hello", None))
         await asyncio.sleep(0.01)
         spk.stop()
         await asyncio.sleep(0.01)

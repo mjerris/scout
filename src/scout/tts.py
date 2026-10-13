@@ -21,12 +21,34 @@ if TYPE_CHECKING:
     from .audio_io import AudioIO
     from .pronounce import Pronouncer
 
-# A queued item: (text to synthesize, voice, original wording) or a ready-made tone.
-_Item = tuple[str, str | None, str] | np.ndarray
+# A queued item: (text to synthesize, voice, original wording, progress tag, pause after
+# in seconds) or a ready-made tone. The progress tag is None for real speech.
+_Item = tuple[str, str | None, str, int | None, float] | np.ndarray
 
 log = logging.getLogger(__name__)
 
 _SENTENCE = re.compile(r"(?<=[.!?;:])\s+(?=\S)")
+# Kokoro synthesizes a whole piece before any of it plays (measured: 0.33 s for 13
+# characters, 0.55 s for 60, 1.36 s for 140). A long sentence said into silence is
+# split at its first comma or dash past SPLIT_MIN characters, so playback starts sooner.
+SPLIT_OVER = 60  # sentences longer than this are split
+SPLIT_MIN = 40  # ...at a clause break at least this far in
+_CLAUSE = re.compile(r"(?:,|\s[-\u2013\u2014])\s+(?=\S)")  # a comma, or a spaced dash
+CLAUSE_PAUSE_S = 0.1  # the pause Kokoro itself puts at a comma between batches
+
+
+def split_first(sentence: str) -> list[str]:
+    """A long sentence as [first clause, rest], or unchanged. Only at a comma or a dash
+    followed by a space (not "1,000"), at least SPLIT_MIN characters in, with at least a
+    few words left after it."""
+    if len(sentence) <= SPLIT_OVER:
+        return [sentence]
+    for m in _CLAUSE.finditer(sentence, SPLIT_MIN):
+        head, rest = sentence[: m.end()].rstrip(), sentence[m.end() :].strip()
+        if len(rest) >= 15:
+            return [head, rest]
+        break
+    return [sentence]
 
 
 def _tone(freqs: Sequence[float], sr: int, dur: float = 0.09, gain: float = 0.25) -> np.ndarray:
@@ -58,11 +80,13 @@ class Speaker:
         self.chimes = chimes
         self.sr = 24000
         self._text: asyncio.Queue[tuple[int, _Item]] = asyncio.Queue()
-        self._audio: asyncio.Queue[tuple[int, np.ndarray, str | None]] = asyncio.Queue()
+        # (generation, samples, original wording or None for a tone, progress tag)
+        self._audio: asyncio.Queue[tuple[int, np.ndarray, str | None, int | None]] = asyncio.Queue()
         self._gen = 0  # bumped by stop() to discard queued work
         self._pending = 0  # items queued or in flight
         self._kinds: collections.deque[bool] = collections.deque()  # per queued item: is it speech?
         self._speech = 0  # speech items queued or in flight (chimes and ticks don't count)
+        self._progress = 0  # bumped by real speech: progress lines queued before it are dropped
         self._playing = False
         self._last_end = 0.0
         self._idle = asyncio.Event()
@@ -123,11 +147,31 @@ class Speaker:
         return float(min(max(ends), time.monotonic()))
 
     def speak(self, text: str, voice: str | None = None) -> None:
-        for sentence in _SENTENCE.split(text.strip()):
-            sentence = sentence.strip()
-            if sentence:
-                spoken = self.pronounce.tts(sentence) if self.pronounce is not None else sentence
-                self._enqueue((spoken, voice, sentence))
+        self._progress += 1  # a progress line still waiting to play is out of date now
+        self._queue_text(text, voice, None)
+
+    def speak_progress(self, text: str) -> None:
+        """A "One moment."-style line: dropped if real speech is queued before it plays."""
+        self._queue_text(text, None, self._progress)
+
+    def _queue_text(self, text: str, voice: str | None, tag: int | None) -> None:
+        sentences = [s.strip() for s in _SENTENCE.split(text.strip()) if s.strip()]
+        if sentences and not self.busy:  # said into silence: start the audio sooner
+            sentences[:1] = split_first(sentences[0])
+        for i, sentence in enumerate(sentences):
+            # A split sentence keeps its comma's pause (Kokoro trims a piece's silence).
+            pause = CLAUSE_PAUSE_S if sentence[-1:] in ",-\u2013\u2014" and i + 1 < len(sentences) else 0.0
+            spoken = self.pronounce.tts(sentence) if self.pronounce is not None else sentence
+            self._enqueue((spoken, voice, sentence, tag, pause))
+
+    def _stale(self, tag: int | None) -> bool:
+        """A progress line overtaken by real speech."""
+        return tag is not None and tag != self._progress
+
+    def first_played_since(self, since: float) -> float | None:
+        """When the first sentence that started playing at or after `since` started."""
+        starts = [start for start, _, _ in self._played if start >= since]
+        return min(starts) if starts else None
 
     def chime(self, kind: str) -> None:
         if not self.chimes:
@@ -188,31 +232,37 @@ class Speaker:
             if gen != self._gen:
                 self._done_one()
                 continue
+            tag: int | None = None
             if isinstance(item, np.ndarray):
-                samples, text = item, None
+                samples, original = item, None
             else:
-                text, voice, original = item
+                text, voice, original, tag, pause = item
+                if self._stale(tag):
+                    self._done_one()
+                    continue
                 try:
                     samples, sr = await loop.run_in_executor(
-                        self._synth_pool, functools.partial(self._create, text, voice)
+                        self._synth_pool, functools.partial(self._create, text, voice, pause)
                     )
                     self.sr = sr
                 except Exception:
                     log.exception("TTS failed for %r", item)
                     self._done_one()
                     continue
-            self._audio.put_nowait((gen, samples, None if isinstance(item, np.ndarray) else original))
+            self._audio.put_nowait((gen, samples, original, tag))
 
-    def _create(self, text: str, voice: str | None) -> tuple[np.ndarray, int]:
+    def _create(self, text: str, voice: str | None, pause: float = 0.0) -> tuple[np.ndarray, int]:
         samples, sr = self.kokoro.create(text, voice=voice or self.voice, speed=self.speed)
+        if pause > 0:
+            samples = np.concatenate([samples, np.zeros(int(pause * sr), samples.dtype)])
         return samples, sr
 
     async def _play_loop(self) -> None:
         while True:
-            gen, samples, text = await self._audio.get()
+            gen, samples, text, tag = await self._audio.get()
             entry = None
             try:
-                if gen == self._gen:
+                if gen == self._gen and not self._stale(tag):
                     self._playing = True
                     if text:
                         entry = [time.monotonic(), float("inf"), text]

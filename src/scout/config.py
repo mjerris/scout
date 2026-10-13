@@ -252,7 +252,7 @@ class IndexConfig:
     semantic: bool = True  # also rank by meaning (a local embedding model, ~70 MB download)
     model: str = "BAAI/bge-small-en-v1.5"
     dims: int = 0  # 0: the model's own size (384); nomic models can be cut, e.g. 256
-    unload_after_s: float = 0.0  # free the model's ~0.2 GB after this long unused (0 = keep it loaded)
+    unload_after_s: float = 900.0  # free the model (~0.7 GB in use) after this long idle (0: keep it)
     # Index new mail through Mail.app in the background, and older mail lazily as Scout
     # touches it for a task (search results, messages read): fast local mail search.
     mail: bool = True
