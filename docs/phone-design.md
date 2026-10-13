@@ -13,7 +13,7 @@ phone app ──WebRTC──▶ SignalWire (call, ASR/TTS, AI agent)
                           ▼
               scout-phone (127.0.0.1:8768) ──local API──▶ Scout (tools, memory, Claude)
                           │
-                          └── REST ai_message / ai_unhold ──▶ SignalWire (late answers)
+                          └── REST ai_message ──▶ SignalWire (late answers)
 ```
 
 ## Pieces
@@ -34,11 +34,14 @@ and the ledger apply the same as at home.
 | Action tools (reminder add/complete, calendar event, note delete) | Two steps: the first call returns what would happen and a one-time code; the agent reads it back; a second call with the code and the user's yes does it |
 | Never by phone | sending email |
 
-Long answers: a tool returns at once with a hold ("Let me check that") and `wait_file`
-or fillers. When Scout has the answer it sends it with REST `calling.ai_message` and
-`ai_unhold`. That is outbound from the Mac, so there are no long-held webhooks.
+Long answers: each lookup runs in the background. A tool call that has its answer
+within 2 s returns it (the calendar, weather); otherwise it returns at once, the agent
+says it's checking, and when Scout has the answer scout-phone sends it into the call
+with REST `calling.ai_message`. That is outbound from the Mac, so no webhook is held
+open (SignalWire stops waiting for a tool after about 10 s and re-sends it).
 
-**Events**: `on_summary` (post-prompt), `on_call_end` (call log), and the address's
+**Events**: `on_summary` (post-prompt), `on_call_end` (the `hangup_hook`: the call log),
+both kept per call in `state/phone_reports/` (0600, the newest 30), and the address's
 status callback go to Scout's transcript and ledger (tier "phone").
 
 ## Who is calling
@@ -108,7 +111,8 @@ summaries only. The phone path is opt-in, and README states this plainly.
 ## SDK work (our PRs; IM Luca about RN changes when needed)
 
 - signalwire-python: a documented way to reject a call from the per-call config callback
-  (hang up without an agent), and an `on_start` wrapper for `startup_hook`.
+  (hang up without an agent), and an `on_call_start` wrapper for the platform's
+  `startup_hook` (`hangup_hook` already has one: `on_call_end`).
 - signalwire-python: document the SWAIG webhook timeout; and an aiohttp mount, or a
   public framework-free SWAIG dispatch (today `_execute_swaig_function` is private).
 - RN library (PR to Luca's repo): voice calls start on speakerphone (audio mode follows the app's
