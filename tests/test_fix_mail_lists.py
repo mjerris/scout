@@ -43,17 +43,25 @@ def _rows(sql: str) -> list[tuple[Any, ...]]:
 
 def test_a_note_is_not_half_saved_when_the_index_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
     store = index.default()
+    root = getattr(store, "journal_root", None)
+    assert root is not None
+
+    def note_files() -> list[Path]:
+        return sorted((root / "notes").glob("*.md"))
+
     monkeypatch.setattr(index, "default", lambda: Down())
     with pytest.raises(ToolError, match="memory service"):
         asyncio.run(notes.add("water filter is due"))
-    assert _rows("SELECT COUNT(*) FROM notes") == [(0,)]  # a retry won't make a duplicate
+    assert note_files() == []  # a retry won't make a duplicate
     monkeypatch.setattr(index, "default", lambda: store)
     asyncio.run(notes.add("water filter is due"))
     assert [n["title"] for n in asyncio.run(notes.find("filter"))] == ["water filter is due"]
     monkeypatch.setattr(index, "default", lambda: Down())
     with pytest.raises(ToolError):
         asyncio.run(notes.delete({"id": 1}))
-    assert _rows("SELECT COUNT(*) FROM notes") == [(1,)]  # still there and still findable
+    assert len(note_files()) == 1  # still there
+    monkeypatch.setattr(index, "default", lambda: store)
+    assert [n["id"] for n in asyncio.run(notes.find("filter"))] == [1]  # and still findable
 
 
 def test_a_list_item_is_not_half_added_or_half_done_when_the_index_is_down(
