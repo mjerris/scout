@@ -60,7 +60,9 @@ progress_again_s = 12.0  # then "Still working on it." (0: never)
 cwd = "~"                     # where the agent works
 model = ""                    # e.g. "sonnet" for snappier replies; empty = Claude Code default
 permission_mode = "default"   # "" = use defaultMode from your settings
-setting_sources = ["user"]    # load ~/.claude settings, MCP servers and CLAUDE.md
+setting_sources = []          # ["user"] loads all of ~/.claude (CLAUDE.md, skills, hooks): ~30% more tokens a turn
+inherit_settings = ["permissions", "model", "effortLevel", "alwaysThinkingEnabled"]  # from ~/.claude/settings.json when "user" isn't loaded
+plugins = "scout"             # Scout's skills; "enabled" adds every plugin enabled in ~/.claude; "none"
 confirm_timeout_s = 30.0
 # "strict": only the two lists below run without a spoken yes; your ~/.claude allow rules don't apply.
 # "settings": your ~/.claude allow rules and hooks apply; you're asked aloud only where Claude Code would prompt.

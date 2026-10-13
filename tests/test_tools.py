@@ -363,3 +363,85 @@ def test_plugin_files_point_at_real_scripts() -> None:
     for cmd in (mcp, hook):
         script = ROOT / cmd.replace('"', "").replace("${CLAUDE_PLUGIN_ROOT}/", "")
         assert script.is_file() and os.access(script, os.X_OK), cmd
+
+
+def test_result_cost_is_the_turns_own_not_the_sessions_running_total(tmp_path: Path) -> None:
+    """A long-lived session's ResultMessage carries the running total; the ledger and the
+    page get each turn's own cost, starting over after a reset."""
+    from claude_agent_sdk import ResultMessage
+
+    b = _brain(tmp_path)
+
+    def result(total: float) -> ResultMessage:
+        return ResultMessage("success", 1, 1, False, 1, "s", total_cost_usd=total)
+
+    assert b._turn_cost(result(0.07)).total_cost_usd == 0.07
+    assert b._turn_cost(result(0.12)).total_cost_usd == 0.05
+    assert b._turn_cost(result(0.03)).total_cost_usd == 0.03  # the conversation was reset
+    asyncio.run(b.reset())
+    assert b._turn_cost(result(0.02)).total_cost_usd == 0.02
+
+
+def test_lean_room_keeps_the_users_rules_model_and_effort_but_not_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """By default the room loads no settings files (no CLAUDE.md, skills, hooks or other
+    plugins in every request) but still gets the user's permission rules, model and effort
+    from ~/.claude/settings.json, with Scout's own rules on top."""
+    import json
+
+    import scout.brain as brain_mod
+    from scout.config import ROOT
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "model": "opus[1m]",
+                "effortLevel": "high",
+                "env": {"X": "1"},
+                "hooks": {"PreToolUse": [{"matcher": "*", "hooks": []}]},
+                "enabledPlugins": {"other@market": True},
+                "permissions": {
+                    "allow": ["Read", "Edit", "Bash(git status:*)"],
+                    "deny": ["Bash(git push --force:*)"],
+                    "defaultMode": "auto",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(brain_mod, "CLAUDE_SETTINGS", settings)
+    opts = _brain(tmp_path, approval_policy="settings_no_hooks")._options()
+    assert opts.setting_sources == []
+    assert [p["path"] for p in opts.plugins] == [str(ROOT)]  # Scout's own skills only
+    s = json.loads(opts.settings or "{}")
+    assert (s["model"], s["effortLevel"], s["disableAllHooks"]) == ("opus[1m]", "high", True)
+    assert "env" not in s and "hooks" not in s and "enabledPlugins" not in s
+    perms = s["permissions"]
+    assert perms["allow"][:3] == ["Read", "Edit", "Bash(git status:*)"]
+    assert "WebSearch" in perms["allow"] and "Bash" in perms["ask"]  # Scout's still there
+    assert "Bash(git push --force:*)" in perms["deny"] and "mcp__scout" in perms["deny"]
+    assert perms["defaultMode"] == "auto"
+    # The "settings" policy means the user's hooks apply, so they come along.
+    s = json.loads(_brain(tmp_path, approval_policy="settings")._options().settings or "{}")
+    assert "hooks" in s and "disableAllHooks" not in s
+    # The old behavior: load ~/.claude/settings.json itself, nothing copied in.
+    opts = _brain(tmp_path, setting_sources=["user"], plugins="enabled")._options()
+    assert opts.setting_sources == ["user"]
+    assert "model" not in json.loads(opts.settings or "{}")
+    # No settings file: Scout's own settings only.
+    monkeypatch.setattr(brain_mod, "CLAUDE_SETTINGS", tmp_path / "missing.json")
+    assert set(json.loads(_brain(tmp_path)._options().settings or "{}")) == {"permissions"}
+
+
+def test_merge_settings_joins_rule_lists_without_duplicates() -> None:
+    from scout.brain import merge_settings
+
+    out = merge_settings(
+        {"permissions": {"allow": ["Read", "WebSearch"], "ask": ["X"]}, "model": "a"},
+        {"permissions": {"allow": ["WebSearch"], "deny": ["Y"]}, "model": "b"},
+    )
+    assert out == {
+        "permissions": {"allow": ["Read", "WebSearch"], "ask": ["X"], "deny": ["Y"]},
+        "model": "b",
+    }
