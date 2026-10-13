@@ -144,6 +144,18 @@ class Store:
     async def asearch(self, query: str, **kw: Any) -> list[index.Hit]:
         return await asyncio.get_running_loop().run_in_executor(None, lambda: self.search(query, **kw))
 
+    def journal_add(
+        self,
+        ts: float,
+        who: str,
+        q: str,
+        a: str,
+        tools: Sequence[tuple[str, dict[str, Any]]] = (),
+        private: bool = False,
+    ) -> str:
+        args = {"ts": ts, "who": who, "q": q, "a": a, "tools": [list(t) for t in tools], "private": private}
+        return str(self.c.call("/v1/journal/add", args)["file"])
+
     def health(self) -> dict[str, Any]:
         return self.c.call("/v1/health", None, timeout=5)
 

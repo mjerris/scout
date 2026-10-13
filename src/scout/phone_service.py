@@ -44,7 +44,7 @@ from signalwire.core.agent_base import AgentBase
 from signalwire.core.capabilities import user_variables
 from signalwire.core.function_result import FunctionResult
 
-from . import ledger, progress, shared_tools
+from . import index, ledger, progress, shared_tools
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
 from .phone_devices import PATH as DEVICES
@@ -283,6 +283,7 @@ class PhoneAgent(AgentBase):
         calls: Calls | None = None,
         push: Pusher | None = None,
         reports: Path | None = None,
+        journal: Callable[[list[dict[str, Any]]], int] | None = None,
     ) -> None:
         super().__init__(
             name="scout",
@@ -299,6 +300,7 @@ class PhoneAgent(AgentBase):
         self.calls = calls if calls is not None else Calls()
         self.push = push
         self.reports = reports  # each call's post-prompt report from SignalWire, kept here
+        self.journal = journal or journal_call  # tests pass their own
         self._lookups: dict[str, asyncio.Task[dict[str, Any]]] = {}  # lookups past the deadline
         self._waiting: dict[str, int] = {}  # tool calls waiting on each lookup now
         self.prompt_add_section("Scout", body=PROMPT)
@@ -499,6 +501,12 @@ class PhoneAgent(AgentBase):
         cid = call_id_of(raw_data)
         device = self.calls.device(cid)
         self._keep_report(cid, "end", {**raw_data, "call_log": call_log})
+        if device is not None:  # a verified call: what was said goes in the journal
+            try:
+                n = self.journal(call_log)
+                log.info("phone: call %s: %d exchanges in the journal", cid, n)
+            except Exception as exc:  # the memory service is down: the report still has it
+                log.warning("phone: call %s not journaled: %s", cid, exc)
         took = self.calls.end(cid)
         log.info(
             "phone: call %s ended after %.0f s (device %s, %d log entries)",
@@ -512,6 +520,58 @@ class PhoneAgent(AgentBase):
             verified=device is not None,
             entries=len(call_log),
         )
+
+
+_PRIVATE_TOOL = ("mail_", "messages_")  # an answer built from these is private
+
+
+def _seconds(stamp: Any) -> float | None:
+    """A call-log timestamp (microseconds, milliseconds or seconds) in seconds."""
+    if not isinstance(stamp, (int, float)) or stamp <= 0:
+        return None
+    return stamp / 1e6 if stamp > 1e14 else stamp / 1e3 if stamp > 1e11 else float(stamp)
+
+
+def call_exchanges(call_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The call's exchanges for the journal: each thing the caller said, what the agent
+    answered, and the tools it used (name and arguments, not results). Fillers and
+    system messages are left out."""
+    out: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for e in call_log or []:
+        if not isinstance(e, dict):
+            continue
+        role, text = e.get("role"), " ".join(str(e.get("content") or "").split())
+        if role == "user" and text:
+            if cur is not None and not cur["a"] and not cur["tools"]:
+                cur["q"] += " " + text  # the caller went on before the agent answered
+                continue
+            cur = {"ts": _seconds(e.get("timestamp")) or time.time(), "q": text, "a": "", "tools": []}
+            out.append(cur)
+        elif role == "assistant" and cur is not None:
+            for tc in e.get("tool_calls") or []:
+                fn = tc.get("function") or {} if isinstance(tc, dict) else {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                if fn.get("name"):
+                    cur["tools"].append((str(fn["name"]), args if isinstance(args, dict) else {}))
+            if text:
+                cur["a"] = f"{cur['a']} {text}".strip()
+    for x in out:
+        x["private"] = any(n.startswith(_PRIVATE_TOOL) for n, _ in x["tools"])
+    return out
+
+
+def journal_call(call_log: list[dict[str, Any]], store: Any = None) -> int:
+    """Write a finished call's exchanges into Scout's journal (via scout-memory)."""
+    store = store or index.default()
+    n = 0
+    for x in call_exchanges(call_log):
+        store.journal_add(x["ts"], AGENT, x["q"], x["a"] or "(no answer)", x["tools"], x["private"])
+        n += 1
+    return n
 
 
 def tool_text(r: dict[str, Any]) -> str:

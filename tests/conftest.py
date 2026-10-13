@@ -53,6 +53,7 @@ def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     import scout.memory_client as memory_client_mod
 
     ix = index_mod.Index(tmp_path / "memory.db", None)
+    ix.journal_root = tmp_path / "memory"
     monkeypatch.setattr(index_mod, "_index", ix)
     monkeypatch.setattr(appdb_mod, "_db", appdb_mod.AppDB(tmp_path / "scout.db"))
     monkeypatch.setattr(memory_client_mod, "_memory", memory_mod.Memory(tmp_path / "memory.json"))

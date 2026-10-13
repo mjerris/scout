@@ -554,7 +554,8 @@ fact). Other summaries are attributed to the sender ("Pat asks you to...").
 Tell Scout things to keep: "remember that my dentist is Dr. Lee", "note that
 Pat is my manager". Ask "who's my dentist", "what do you know about Pat", "what
 do you remember", or "forget my dentist". Plain code answers these, and the
-facts live in `state/memory.json` in Scout's data folder. Claude sees a memory
+facts live in `memory/facts.md` in Scout's data folder, one `- fact · date` line
+each: edit the file and Scout picks the change up. Claude sees a memory
 only when it shares words with the request (and not in strict mode); the room
 agent can also `remember`, `forget` and `recall`.
 
@@ -576,16 +577,24 @@ Memories and the search index live in a separate local service, **scout-memory**
 over HTTP on 127.0.0.1:8767 to Scout and any other local program holding the token
 in `state/memory.token`: `/v1/docs/*` (put, delete, sync, get, count, recent,
 prune), `/v1/search` and `/v1/memories/*` (add, forget, matching, relevant, newest,
-list). It keeps running while the voice app restarts; `scripts/launchd.sh status
-memory` shows it.
+list) and `/v1/journal/add`. It keeps running while the voice app restarts;
+`scripts/launchd.sh status memory` shows it.
 
-Scout keeps a local store and search index on this Mac (`state/scout.db`): memories
-and every exchange with Scout so far, with notes, lists, mail and calendar to follow.
-Search runs cheap layers first: a filter by kind and date, then full text (SQLite
-FTS5), then a re-rank by meaning with a local embedding model (nomic-embed-text,
-256 dimensions, CPU). Vectors are computed lazily: a search embeds only its
-candidates and caches them, and an idle pass embeds new items ahead of time. Only the
-best few matches reach Claude, through the `local_search` tool.
+**The journal.** Every exchange with Scout, in the room or by phone, is written to a
+markdown file per day: `memory/journal/2026/10/2026-10-13.md` in Scout's data folder.
+Each entry has the question, the answer and the tools used with their arguments (a
+mail id, a place): what they returned isn't copied, and an answer built from mail or
+messages is kept only in open privacy mode. The files are the record: edit or delete
+an entry and search follows within a minute. A phone call is written when it ends.
+
+**Search.** The index (`state/memory.db`) holds the journal, your facts, notes, lists,
+mail and Granola meetings. A search ranks by meaning over everything of the kinds and
+dates asked for, with a local embedding model (bge-small-en-v1.5, CPU, about 0.2 GB in
+memory), and full text (SQLite FTS5) adds a little for shared words and finds what has
+no vector yet. An idle pass embeds new items ahead of time. On a synthetic year of
+20,000 conversations and 50 questions it finds the answer in the top 5 for about
+three in four, and in the top 20 for 84%. Claude gets the best 12 matches through the
+`local_search` tool.
 The inbox is indexed too, lazily: while Scout is idle, a pass every 20 minutes reads
 mail that arrived since the newest indexed message (Mail.app, the access Scout already
 has). Older mail joins the index only when Scout touches it for a task: a Mail search
@@ -593,3 +602,9 @@ result (sender and subject, its text filled in on a later pass) or a message rea
 summarized. Mail searches use the index first, by words and meaning, and fall back to
 asking Mail. Mail text never reaches Claude through search outside open privacy mode. `[index]` in
 config.toml tunes it; `semantic = false` keeps it to full text only.
+
+**Granola.** With a Granola API key in `[granola] api_key` (Granola: Settings,
+Connectors, API keys; a Business plan or above), scout-memory brings your meeting
+notes into the index every 30 minutes: the summary and the transcript, in chunks with
+each speaker named. Granola stays the record. Like mail, a meeting's text reaches
+Claude only in open privacy mode; otherwise Claude sees the title.

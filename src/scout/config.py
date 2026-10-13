@@ -329,6 +329,14 @@ class PhoneConfig:
 
 
 @dataclass
+class GranolaConfig:
+    # Granola meeting notes in Scout's local search (src/scout/granola.py): a personal API
+    # key from Granola (Settings, Connectors, API keys; Business plan or above). Empty: off.
+    api_key: str = ""
+    every_min: float = 30.0  # how often to look for new and changed notes
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -366,6 +374,7 @@ class Config:
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     phone: PhoneConfig = field(default_factory=PhoneConfig)
+    granola: GranolaConfig = field(default_factory=GranolaConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)
     memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)

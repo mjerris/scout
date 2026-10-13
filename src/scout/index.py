@@ -31,7 +31,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +39,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from . import journal
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
     INSERT INTO docs_fts(docs_fts, rowid, title, body, who) VALUES ('delete', old.rowid, old.title, old.body, old.who);
     INSERT INTO docs_fts(rowid, title, body, who) VALUES (new.rowid, new.title, new.body, new.who);
 END;
+CREATE TABLE IF NOT EXISTS files (
+    path TEXT PRIMARY KEY,
+    sig TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS vecs (
     id TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -281,6 +286,8 @@ class Index:
     min_similarity: float = 0.6  # a match by meaning alone (no shared words) needs this cosine
     max_new_per_search: int = 32  # text hits a search may embed itself; the background does the rest
     _conn: sqlite3.Connection = field(init=False, repr=False)
+    journal_root: Path | None = None  # where the markdown journal lives (journal.py)
+    keep_private: Callable[[], bool] = lambda: False  # keep answers from mail in the journal
     _matrix: Matrix | None = field(init=False, repr=False, default=None)  # loaded on first use
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
@@ -395,6 +402,69 @@ class Index:
         for id in old:
             self.delete(id)
         return len(old)
+
+    # --- the markdown journal (journal.py): the files are the record, this is the index ---
+
+    def journal_add(
+        self,
+        ts: float,
+        who: str,
+        q: str,
+        a: str,
+        tools: Sequence[tuple[str, dict[str, Any]]] = (),
+        private: bool = False,
+    ) -> str:
+        """Append one exchange to the day's journal file and index it; returns the file."""
+        if self.journal_root is None:
+            raise RuntimeError("no journal")
+        e = journal.Entry(ts, who, q, a, [(str(n), dict(args or {})) for n, args in tools], private)
+        p = journal.append(self.journal_root, e, self.keep_private())
+        self.sync_file(p)
+        return str(p)
+
+    def sync_file(self, p: Path) -> int:
+        """Make the index hold exactly the entries of one journal file (or none, if it's
+        gone). Returns how many items changed."""
+        prefix = journal.id_prefix(p)
+        if prefix is None:
+            return 0
+        items = journal.parse(p) if p.exists() else []
+        changed = sum(self.put(kind="turn", **it) for it in items)
+        keep = {it["id"] for it in items}
+        with self._lock:
+            old = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT id FROM docs WHERE kind = 'turn' AND substr(id, 1, ?) = ?", (len(prefix), prefix)
+                )
+                if r[0] not in keep
+            ]
+        for id in old:
+            self.delete(id)
+        with self._lock:
+            if p.exists():
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO files(path, sig) VALUES (?, ?)", (str(p), journal.file_sig(p))
+                )
+            else:
+                self._conn.execute("DELETE FROM files WHERE path = ?", (str(p),))
+        return changed + len(old)
+
+    def sync_files(self) -> int:
+        """Re-index journal files that changed, appeared or went away since last time
+        (an edit, a deleted entry, a file restored from a backup). Returns items changed."""
+        if self.journal_root is None:
+            return 0
+        with self._lock:
+            known = dict(self._conn.execute("SELECT path, sig FROM files").fetchall())
+        changed = 0
+        files = journal.day_files(self.journal_root)
+        for p in files:
+            if known.get(str(p)) != journal.file_sig(p):
+                changed += self.sync_file(p)
+        for path in set(known) - {str(p) for p in files}:
+            changed += self.sync_file(Path(path))
+        return changed
 
     # --- searching ------------------------------------------------------------------
 
@@ -593,6 +663,10 @@ class Index:
         while True:
             await asyncio.sleep(every_s)
             try:
+                if self.journal_root is not None:
+                    n = await loop.run_in_executor(self._pool, self.sync_files)
+                    if n:
+                        log.info("index: %d journal entries re-read from edited files", n)
                 if idle():
                     n = await loop.run_in_executor(self._pool, self.embed_pending, batch)
                     if n:
@@ -679,6 +753,10 @@ class Store(Protocol):
         self, kinds: Sequence[str] | None = None, limit: int = 20, since: float | None = None
     ) -> list[Hit]: ...
     def prune(self, kind: str, before: float) -> int: ...
+    def journal_add(
+        self, ts: float, who: str, q: str, a: str,
+        tools: Sequence[tuple[str, dict[str, Any]]] = (), private: bool = False,
+    ) -> str: ...  # fmt: skip
     def search(
         self, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
         limit: int = 8, semantic: bool | None = True,

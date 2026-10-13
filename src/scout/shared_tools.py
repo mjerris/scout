@@ -250,7 +250,8 @@ SHARED = (
         "Search Scout's local index on this Mac (memories the user asked Scout to keep, past "
         "conversations with Scout, notes, lists, and the inbox) by words and "
         "by meaning. Use it for 'what did I say about...', 'did we talk about...', 'where did I "
-        "note...'. kinds: any of memory, turn, note, list, mail (empty = all); days: only the last N "
+        "note...', 'what did we decide in the meeting about...'. kinds: any of memory, turn (past "
+        "conversations), note, list, mail, meeting (Granola notes and transcripts) (empty = all); days: only the last N "
         "days (0 = any time); limit 1-20 (default 12). Returns the best matches, best first: the right one is often not the first, so read them all.",
         _obj(
             {"query": _STR, "kinds": {"type": "array", "items": _STR}, "days": _INT, "limit": _INT}, ["query"]
@@ -319,12 +320,15 @@ async def _local_search(a: dict[str, Any]) -> str:
     hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()
     if pol.mode == "strict":  # a hit on mail would say its text holds the words: none at all
-        hits = [h for h in hits if h.kind != "mail"]
-    if pol.mode != "open":  # mail text, and answers built from it, stay out: titles only
+        hits = [h for h in hits if h.kind not in _PRIVATE_KINDS]
+    if pol.mode != "open":  # mail and meeting text, and answers built from them: titles only
         for h in hits:
-            if h.meta.get("private") or h.kind == "mail":
+            if h.meta.get("private") or h.kind in _PRIVATE_KINDS:
                 h.body = ""
     return index.format_hits(hits)
+
+
+_PRIVATE_KINDS = ("mail", "meeting")  # their text stays on the Mac outside "open" privacy mode
 
 
 BY_NAME = {t.name: t for t in SHARED}
