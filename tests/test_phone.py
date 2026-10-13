@@ -289,7 +289,7 @@ def test_ask_scout_forwards_to_scout(rig: Rig) -> None:
     swml = rig.swml("call-6", uvars(rig.device, rig.secret))
     rig.scout.reply = {"status": "pending", "text": ASK_STILL_WORKING}
     out = rig.swaig(swml, "call-6", "ask_scout", {"request": "what did I say about the tires?"})
-    assert out["response"] == ASK_STILL_WORKING
+    assert out["response"] == ps.STILL_LOOKING  # the answer is pushed when Scout has it
     assert rig.scout.calls[-1] == (
         "/api/ask",
         {"agent": "phone", "text": "what did I say about the tires?"},
@@ -592,3 +592,104 @@ def test_a_slow_tool_answers_in_time_and_keeps_going(
     assert first == ps.STILL_LOOKING
     assert second == "Two truck stops near Luther."
     assert len(scout.calls) == 1  # the second ask picked up the same lookup
+
+
+def test_a_late_answer_is_pushed_into_the_call(
+    paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ps, "TOOL_DEADLINE_S", 0.05)
+    scout = SlowScout()
+    pushed: list[tuple[str, str]] = []
+
+    async def push(call_id: str, text: str) -> bool:
+        pushed.append((call_id, text))
+        return True
+
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), scout, AUTH, "s" * 43, push=push)
+    agent.calls.bind("call-p", paired[1])
+    handle = agent._tool_handler("places_near")
+
+    async def run() -> str:
+        first = await handle({"what": "diesel"}, {"call_id": "call-p"})
+        scout.release.set()
+        for _ in range(50):
+            if pushed:
+                break
+            await asyncio.sleep(0.01)
+        return str(first.to_dict()["response"])
+
+    assert asyncio.run(run()) == ps.STILL_LOOKING
+    assert pushed == [
+        ("call-p", ps.LATE_ANSWER.format(what="places near", text="Two truck stops near Luther."))
+    ]
+    assert not agent._lookups
+
+
+def test_a_repeat_call_takes_the_answer_and_nothing_is_pushed(
+    paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ps, "TOOL_DEADLINE_S", 0.05)
+    scout = SlowScout()
+    pushed: list[tuple[str, str]] = []
+
+    async def push(call_id: str, text: str) -> bool:
+        pushed.append((call_id, text))
+        return True
+
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), scout, AUTH, "s" * 43, push=push)
+    agent.calls.bind("call-r", paired[1])
+    handle = agent._tool_handler("places_near")
+
+    async def run() -> str:
+        await handle({"what": "diesel"}, {"call_id": "call-r"})
+        waiting = asyncio.ensure_future(handle({"what": "diesel"}, {"call_id": "call-r"}))
+        await asyncio.sleep(0.01)
+        scout.release.set()
+        second = await waiting
+        await asyncio.sleep(0.05)
+        return str(second.to_dict()["response"])
+
+    assert asyncio.run(run()) == "Two truck stops near Luther."
+    assert pushed == []
+
+
+def test_the_pusher_needs_the_rest_credentials() -> None:
+    assert ps.pusher(PhoneConfig(space="x.signalwire.com", project_id="p")) is None
+    assert ps.pusher(PhoneConfig(space="x.signalwire.com", project_id="p", api_token="t"))  # noqa: S106 is not None
+
+
+def test_a_late_ask_is_pushed_into_the_call(
+    paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ps, "ASK_POLL_S", 0.0)
+    answers = [{"status": "pending", "text": "still"}, {"status": "pending", "text": "still"}]
+    asked: list[str] = []
+
+    async def scout(path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        asked.append(body["text"])
+        return answers.pop(0) if answers else {"status": "ok", "text": "You parked by the barn."}
+
+    pushed: list[tuple[str, str]] = []
+
+    async def push(call_id: str, text: str) -> bool:
+        pushed.append((call_id, text))
+        return True
+
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), scout, AUTH, "s" * 43, push=push)
+    agent.calls.bind("call-a", paired[1])
+
+    async def run() -> str:
+        first = await agent._ask({"request": "where did I park"}, {"call_id": "call-a"})
+        for _ in range(50):
+            if pushed:
+                break
+            await asyncio.sleep(0.01)
+        return str(first.to_dict()["response"])
+
+    assert asyncio.run(run()) == ps.STILL_LOOKING
+    assert pushed == [("call-a", ps.LATE_ANSWER.format(what="Scout", text="You parked by the barn."))]
+    assert asked == ["where did I park"] * 3
+    assert not agent._asks

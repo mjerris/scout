@@ -61,9 +61,11 @@ TOOL_TIMEOUT_S = 90.0
 # places_near every 10-13 s, in silence). Answer by then; a slow lookup keeps running.
 TOOL_DEADLINE_S = 8.0
 STILL_LOOKING = (
-    "Still looking that up. Tell the user it's taking a moment, then call this tool again "
-    "with the same arguments to get the answer."
+    "Still looking that up. Tell the user briefly that it's taking a moment. The answer "
+    "will be sent to you as soon as it's ready: don't ask the user whether to keep looking."
 )
+LATE_ANSWER = "The {what} lookup the user asked for just finished. Tell the user now, briefly: {text}"
+ASK_POLL_S = 1.0
 ASK_TIMEOUT_S = 40.0  # Scout itself answers within 20 s ("still working" after that)
 REFUSED = "This call isn't verified, so I can't do that."
 GOODBYE = "Sorry, this phone isn't paired with Scout. Goodbye."
@@ -99,6 +101,7 @@ ASK_SCOUT = (
 )
 
 Caller = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
+Pusher = Callable[[str, str], Awaitable[bool]]  # (call_id, text) -> sent
 
 
 # --- state files ------------------------------------------------------------------------
@@ -164,6 +167,36 @@ async def call_scout(path: str, body: dict[str, Any], timeout: float) -> dict[st
         return {"status": "error", "error": f"no answer from Scout within {timeout:.0f} s"}
     except aiohttp.ClientError as exc:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def pusher(cfg: PhoneConfig) -> Pusher | None:
+    """Sends a late answer into a live call: SignalWire's REST calling.ai_message, outbound
+    from the Mac. None without the space, project and API token."""
+    if not (cfg.space.strip() and cfg.project_id.strip() and cfg.api_token.strip()):
+        return None
+    space = cfg.space.strip().split("://", 1)[-1].split("/", 1)[0]
+    url = f"https://{space}/api/calling/calls"
+    headers = {"Authorization": aiohttp.encode_basic_auth(cfg.project_id.strip(), cfg.api_token.strip())}
+
+    async def push(call_id: str, text: str) -> bool:
+        body = {
+            "command": "calling.ai_message",
+            "id": call_id,
+            "params": {"role": "system", "message_text": text},
+        }
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as s,
+                s.post(url, json=body, headers=headers) as r,
+            ):
+                if r.status < 300:
+                    return True
+                log.warning("phone: late answer for call %s not sent: HTTP %d", call_id, r.status)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning("phone: late answer for call %s not sent: %s", call_id, type(exc).__name__)
+        return False
+
+    return push
 
 
 # --- calls ------------------------------------------------------------------------------
@@ -245,6 +278,7 @@ class PhoneAgent(AgentBase):
         auth: tuple[str, str] | None = None,
         secret: str | None = None,
         calls: Calls | None = None,
+        push: Pusher | None = None,
     ) -> None:
         super().__init__(
             name="scout",
@@ -259,7 +293,10 @@ class PhoneAgent(AgentBase):
         self.check = check
         self.scout = scout
         self.calls = calls if calls is not None else Calls()
+        self.push = push
         self._lookups: dict[str, asyncio.Task[dict[str, Any]]] = {}  # lookups past the deadline
+        self._waiting: dict[str, int] = {}  # tool calls waiting on each lookup now
+        self._asks: dict[tuple[str, str], asyncio.Task[None]] = {}  # asks past Scout's deadline
         self.prompt_add_section("Scout", body=PROMPT)
         self.set_post_prompt(
             "Summarize the call in one or two sentences: what was asked and what was answered."
@@ -341,27 +378,54 @@ class PhoneAgent(AgentBase):
             if self.verified(raw_data, name) is None:
                 return FunctionResult(REFUSED)
             body = {"agent": AGENT, "name": name, "args": {k: v for k, v in args.items() if v is not None}}
-            r = await self._within_deadline(json.dumps(body, sort_keys=True), body)
-            if r is None:
-                return FunctionResult(STILL_LOOKING)
-            if r.get("status") == "ok":
-                return FunctionResult(str(r.get("text", "")))
-            return FunctionResult(f"Not done: {r.get('error', r)}")
+            r = await self._within_deadline(
+                json.dumps(body, sort_keys=True), body, call_id_of(raw_data), name
+            )
+            return FunctionResult(STILL_LOOKING if r is None else tool_text(r))
 
         return handle
 
-    async def _within_deadline(self, key: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    async def _within_deadline(
+        self, key: str, body: dict[str, Any], call_id: str | None, name: str
+    ) -> dict[str, Any] | None:
         """Scout's answer to a tool call, or None if it isn't ready by the deadline. The
-        lookup keeps going; the same call asked again picks it up."""
+        lookup keeps going: when it finishes, the answer is pushed into the call; the same
+        call asked again before then picks it up instead."""
         task = self._lookups.get(key)
         if task is None:
-            task = asyncio.ensure_future(self.scout("/api/tool", body, TOOL_TIMEOUT_S))
+            task = asyncio.ensure_future(self._timed(name, body))
             self._lookups[key] = task
-        done, _ = await asyncio.wait({task}, timeout=TOOL_DEADLINE_S)
-        if not done:
-            return None
-        self._lookups.pop(key, None)
-        return task.result()
+        self._waiting[key] = self._waiting.get(key, 0) + 1
+        try:
+            done, _ = await asyncio.wait({task}, timeout=TOOL_DEADLINE_S)
+        finally:
+            self._waiting[key] -= 1
+            if not self._waiting[key]:
+                del self._waiting[key]
+        if done:
+            self._lookups.pop(key, None)
+            return task.result()
+        if call_id and not getattr(task, "push_on_done", False):
+            task.push_on_done = True  # type: ignore[attr-defined]
+            task.add_done_callback(lambda t: asyncio.ensure_future(self._deliver(key, t, call_id, name)))
+        return None
+
+    async def _timed(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        t0 = time.monotonic()
+        r = await self.scout("/api/tool", body, TOOL_TIMEOUT_S)
+        log.info("phone: %s %s in %.1f s", name, r.get("status"), time.monotonic() - t0)
+        return r
+
+    async def _deliver(self, key: str, task: asyncio.Task[dict[str, Any]], call_id: str, name: str) -> None:
+        """A lookup that missed the deadline finished: unless a repeat call already took
+        the answer, send it into the call."""
+        if self._lookups.get(key) is not task or key in self._waiting:
+            return  # a repeat call has it
+        del self._lookups[key]
+        if task.cancelled() or self.push is None or self.calls.device(call_id) is None:
+            return
+        text = tool_text(task.result())
+        await self.push(call_id, LATE_ANSWER.format(what=name.replace("_", " "), text=text))
 
     async def _ask(self, args: dict[str, Any], raw_data: dict[str, Any] | None = None) -> FunctionResult:
         if self.verified(raw_data, "ask_scout") is None:
@@ -369,10 +433,40 @@ class PhoneAgent(AgentBase):
         text = str(args.get("request") or "").strip()
         if not text:
             return FunctionResult("Ask with the user's request.")
+        cid = call_id_of(raw_data)
         r = await self.scout("/api/ask", {"agent": AGENT, "text": text}, ASK_TIMEOUT_S)
+        if r.get("status") == "pending" and cid:
+            if (cid, text) not in self._asks:
+                self._asks[(cid, text)] = asyncio.ensure_future(self._finish_ask(cid, text))
+            return FunctionResult(STILL_LOOKING)
+        late = self._asks.pop((cid or "", text), None)
+        if late is not None:
+            late.cancel()  # this answer is the one the user gets
         if r.get("status") in ("ok", "pending"):
             return FunctionResult(str(r.get("text", "")))
         return FunctionResult(f"Scout couldn't answer: {r.get('error', r)}")
+
+    async def _finish_ask(self, call_id: str, text: str) -> None:
+        """An ask past Scout's deadline: keep asking (Scout picks up the same job) until it
+        answers, then push the answer into the call."""
+        try:
+            t0 = time.monotonic()
+            r: dict[str, Any] = {"status": "pending"}
+            while r.get("status") == "pending" and time.monotonic() - t0 < ASK_TIMEOUT_S:
+                await asyncio.sleep(ASK_POLL_S)  # Scout waits its own deadline; this is a floor
+                r = await self.scout("/api/ask", {"agent": AGENT, "text": text}, ASK_TIMEOUT_S)
+            log.info("phone: ask_scout %s in %.1f s", r.get("status"), time.monotonic() - t0)
+            if self.push is None or self.calls.device(call_id) is None:
+                return
+            answer = (
+                str(r.get("text", ""))
+                if r.get("status") == "ok"
+                else f"Scout couldn't answer: {r.get('error', r)}"
+            )
+            await self.push(call_id, LATE_ANSWER.format(what="Scout", text=answer))
+        finally:
+            if self._asks.get((call_id, text)) is asyncio.current_task():
+                del self._asks[(call_id, text)]
 
     # --- events ----------------------------------------------------------------------
 
@@ -403,6 +497,13 @@ class PhoneAgent(AgentBase):
         )
 
 
+def tool_text(r: dict[str, Any]) -> str:
+    """What the agent gets for Scout's answer to a tool call."""
+    if r.get("status") == "ok":
+        return str(r.get("text", ""))
+    return f"Not done: {r.get('error', r)}"
+
+
 # --- running it ---------------------------------------------------------------------------
 
 
@@ -424,7 +525,7 @@ def build(cfg: PhoneConfig, scout: Caller = call_scout, devices: Path | None = N
     os.environ["SWML_PROXY_URL_BASE"] = cfg.public_url.rstrip("/")  # read by the SDK, here and per request
     state = (devices or DEVICES).parent
     check = CallCheck(cfg.address, cfg.call_skew_s, devices, nonces=state / "phone_nonces.json")
-    return PhoneAgent(cfg, check, scout, calls=Calls(path=state / "phone_calls.json"))
+    return PhoneAgent(cfg, check, scout, calls=Calls(path=state / "phone_calls.json"), push=pusher(cfg))
 
 
 def main() -> None:
