@@ -285,7 +285,8 @@ def test_tool_call_forwards_to_scout(rig: Rig) -> None:
     assert out["response"] == "Not done: calendar access not allowed"
 
 
-def test_ask_scout_forwards_to_scout(rig: Rig) -> None:
+def test_ask_scout_forwards_to_scout(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ps, "TOOL_DEADLINE_S", 0.05)
     swml = rig.swml("call-6", uvars(rig.device, rig.secret))
     rig.scout.reply = {"status": "pending", "text": ASK_STILL_WORKING}
     out = rig.swaig(swml, "call-6", "ask_scout", {"request": "what did I say about the tires?"})
@@ -664,11 +665,13 @@ def test_a_late_ask_is_pushed_into_the_call(
     paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(ps, "ASK_POLL_S", 0.0)
+    monkeypatch.setattr(ps, "TOOL_DEADLINE_S", 0.05)
     answers = [{"status": "pending", "text": "still"}, {"status": "pending", "text": "still"}]
     asked: list[str] = []
 
     async def scout(path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
         asked.append(body["text"])
+        await asyncio.sleep(0.05)  # Scout's own wait before it says "pending"
         return answers.pop(0) if answers else {"status": "ok", "text": "You parked by the barn."}
 
     pushed: list[tuple[str, str]] = []
@@ -683,7 +686,7 @@ def test_a_late_ask_is_pushed_into_the_call(
 
     async def run() -> str:
         first = await agent._ask({"request": "where did I park"}, {"call_id": "call-a"})
-        for _ in range(50):
+        for _ in range(100):
             if pushed:
                 break
             await asyncio.sleep(0.01)
@@ -692,4 +695,30 @@ def test_a_late_ask_is_pushed_into_the_call(
     assert asyncio.run(run()) == ps.STILL_LOOKING
     assert pushed == [("call-a", ps.LATE_ANSWER.format(what="Scout", text="You parked by the barn."))]
     assert asked == ["where did I park"] * 3
-    assert not agent._asks
+    assert not agent._lookups
+
+
+def test_each_calls_report_is_kept_privately(
+    paired: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ps, "REPORTS_KEPT", 2)
+    monkeypatch.setattr(ledger, "PATH", tmp_path / "ledger.jsonl")
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    reports = tmp_path / "reports"
+    agent = ps.PhoneAgent(
+        cfg, CallCheck(ADDRESS, 60, paired[0]), FakeScout(), AUTH, "s" * 43, reports=reports
+    )
+    agent.on_summary(
+        {"text": "asked the weather"}, {"call_id": "call-z/../x", "call_log": [{"role": "user"}]}
+    )
+    kept = sorted(reports.glob("*.json"))
+    assert len(kept) == 1 and kept[0].name.endswith("-call-zx-summary.json")  # no path parts
+    assert json.loads(kept[0].read_text())["call_log"] == [{"role": "user"}]
+    assert stat.S_IMODE(kept[0].stat().st_mode) == 0o600
+    for n in range(3):
+        (reports / f"2000010{n}-000000-old.json").write_text("{}")
+    agent._call_ended([{"role": "assistant"}], {"call_id": "call-y"})
+    names = sorted(p.name.split("-", 2)[-1] for p in reports.glob("*.json"))
+    assert names == ["call-y-end.json", "call-zx-summary.json"]
+    end = next(reports.glob("*-call-y-end.json"))
+    assert json.loads(end.read_text())["call_log"] == [{"role": "assistant"}]
