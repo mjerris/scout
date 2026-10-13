@@ -387,6 +387,41 @@ async def note_delete(id: int) -> str:
     return await _tool("note_delete", {"id": id})
 
 
+@mcp.tool(description=_doc("tasks_list"))
+async def tasks_list(who: str = "all", query: str = "", limit: int = 10) -> str:
+    return await _tool("tasks_list", {"who": who, "query": query, "limit": limit})
+
+
+@mcp.tool(description=_doc("task_add"))
+async def task_add(
+    title: str, owner: str = "", due: str = "", importance: str = "", urgency: str = "",
+    effort: str = "", context: str = "",
+) -> str:  # fmt: skip
+    args = {"title": title, "owner": owner, "due": due, "importance": importance, "urgency": urgency,
+            "effort": effort, "context": context}  # fmt: skip
+    return await _tool("task_add", {k: v for k, v in args.items() if v})
+
+
+@mcp.tool(description=_doc("task_done"))
+async def task_done(id: int, drop: bool = False) -> str:
+    return await _tool("task_done", {"id": id, "drop": drop})
+
+
+@mcp.tool(description=_doc("task_update"))
+async def task_update(
+    id: int, title: str = "", owner: str = "", due: str = "", importance: str = "", urgency: str = "",
+    effort: str = "", pin: str = "", context: str = "",
+) -> str:  # fmt: skip
+    args = {"title": title, "owner": owner, "due": due, "importance": importance, "urgency": urgency,
+            "effort": effort, "pin": pin, "context": context}  # fmt: skip
+    return await _tool("task_update", {"id": id, **{k: v for k, v in args.items() if v}})
+
+
+@mcp.tool(description=_doc("task_why"))
+async def task_why(id: int) -> str:
+    return await _tool("task_why", {"id": id})
+
+
 @mcp.tool(description=_doc("places_near"))
 async def places_near(what: str, near: str, radius_miles: int = 25, limit: int = 5) -> str:
     return await _tool(

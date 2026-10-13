@@ -329,6 +329,19 @@ class PhoneConfig:
 
 
 @dataclass
+class TasksConfig:
+    # Scout's task list (docs/tasks-design.md): memory/tasks/, ordered by plain code,
+    # filled from meetings and email.
+    me: list[str] = field(default_factory=list)  # your names and addresses, to tell your tasks from others'
+    mirror: bool = True  # open tasks in Reminders: yours in mirror_list, others' in waiting_list
+    mirror_list: str = "Scout"
+    waiting_list: str = "Waiting On"
+    farm: bool = True  # find tasks in new meetings and email
+    farm_every_min: float = 10.0
+    backfill_days: float = 14.0  # on the first run, read meetings and mail this far back
+
+
+@dataclass
 class GranolaConfig:
     # Granola meeting notes in Scout's local search (src/scout/granola.py): a personal API
     # key from Granola (Settings, Connectors, API keys; Business plan or above). Empty: off.
@@ -375,6 +388,7 @@ class Config:
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     phone: PhoneConfig = field(default_factory=PhoneConfig)
     granola: GranolaConfig = field(default_factory=GranolaConfig)
+    tasks: TasksConfig = field(default_factory=TasksConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)
     memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)

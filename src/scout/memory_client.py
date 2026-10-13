@@ -150,6 +150,13 @@ class Store:
     def note_delete(self, n: int) -> bool:
         return bool(self.c.call("/v1/notes/delete", {"id": n})["deleted"])
 
+    def task_add(self, title: str, fields: dict[str, Any], context: str = "") -> int:
+        return int(self.c.call("/v1/tasks/add", {"title": title, "fields": fields, "context": context})["id"])
+
+    def task_update(self, n: int, fields: dict[str, Any], add_context: str = "") -> bool:
+        args = {"id": n, "fields": fields, "context": add_context}
+        return bool(self.c.call("/v1/tasks/update", args)["updated"])
+
     def journal_add(
         self,
         ts: float,

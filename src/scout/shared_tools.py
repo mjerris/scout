@@ -32,6 +32,7 @@ from . import (
     privacy,
     reminders_mac,
     starlink,
+    tasks,
     weather,
 )
 from .mac import ToolError
@@ -271,6 +272,68 @@ SHARED = (
         "Empty query = the newest notes. limit 1-20 (default 5).",
         _obj({"query": _STR, "limit": _INT}),
         notes.find_text,
+    ),
+    SharedTool(
+        "tasks_list",
+        "The user's open tasks, in priority order, each with its number, due date and why it's "
+        "there. who: mine (what the user owes; default all), waiting (what others owe the user) "
+        "or all. query narrows by words and meaning. limit 1-50 (default 10). For 'what should I "
+        "work on', 'what's on my list', 'what am I waiting on'.",
+        _obj({"who": _STR, "query": _STR, "limit": _INT}),
+        lambda a: tasks.list_text(a),
+    ),
+    SharedTool(
+        "task_add",
+        "Add a task to the user's list. title says what to do. owner: 'me' (default) or the "
+        "person who owes it (a 'waiting on' item). due: YYYY-MM-DD. importance: high, normal or "
+        "low; urgency: urgent or normal; effort: small, medium or large. context: why, in a "
+        "sentence or two.",
+        _obj(
+            {
+                "title": _STR,
+                "owner": _STR,
+                "due": _STR,
+                "importance": _STR,
+                "urgency": _STR,
+                "effort": _STR,
+                "context": _STR,
+            },
+            ["title"],
+        ),
+        lambda a: tasks.add_text(a),
+    ),
+    SharedTool(
+        "task_done",
+        "Mark a task done by its number from tasks_list (drop: true when it's no longer needed "
+        "rather than done). Its reminder is marked done too.",
+        _obj({"id": _INT, "drop": _BOOL}, ["id"]),
+        lambda a: tasks.done(a),
+    ),
+    SharedTool(
+        "task_update",
+        "Change a task by its number: title, owner, due (YYYY-MM-DD), importance, urgency, "
+        "effort, pin (top, high, low or none: overrides the order), or context to add.",
+        _obj(
+            {
+                "id": _INT,
+                "title": _STR,
+                "owner": _STR,
+                "due": _STR,
+                "importance": _STR,
+                "urgency": _STR,
+                "effort": _STR,
+                "pin": _STR,
+                "context": _STR,
+            },
+            ["id"],
+        ),
+        lambda a: tasks.update(a),
+    ),
+    SharedTool(
+        "task_why",
+        "Where a task came from (the meeting or email), when it was found, and its context.",
+        _obj({"id": _INT}, ["id"]),
+        lambda a: tasks.why_text(a),
     ),
     SharedTool(
         "note_delete",

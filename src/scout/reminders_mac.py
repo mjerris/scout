@@ -179,6 +179,18 @@ async def reminders(
 
 
 async def add(a: dict[str, Any], helper: Path | None = None) -> str:
+    r = await add_data(a, helper)
+    if "said" in r:  # Scout's own lists answered
+        return str(r["said"])
+    when = _when(r)
+    return f"Added {r.get('title', a.get('title'))} to {r.get('list') or 'Reminders'}" + (
+        f", due {when}." if when else "."
+    )
+
+
+async def add_data(a: dict[str, Any], helper: Path | None = None) -> dict[str, Any]:
+    """Add a reminder; the helper's record of it (with its id), or {"said": ...} when
+    Scout's own lists took it."""
     title = text_arg(a.get("title"), "title", 200)
     if not title:
         raise ToolError("title is required")
@@ -191,12 +203,9 @@ async def add(a: dict[str, Any], helper: Path | None = None) -> str:
     if notes := text_arg(a.get("notes"), "notes", 2000):
         args += ["--notes", notes]
     if not await _apple(helper):  # after the checks: bad arguments never touch either store
-        return await locallists.add(a)
-    r = (await vcal(*args, helper=helper)).get("reminder", {})
-    when = _when(r)
-    return f"Added {r.get('title', title)} to {r.get('list') or 'Reminders'}" + (
-        f", due {when}." if when else "."
-    )
+        return {"said": await locallists.add(a)}
+    r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
+    return r
 
 
 async def complete(a: dict[str, Any], helper: Path | None = None) -> str:
