@@ -263,6 +263,7 @@ _WORD = re.compile(r"[^\W_][\w']*")  # any script: "José", "Müller", "café" (
 _STOP = frozenset({"a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "for", "with", "about", "from", "by", "is", "are", "was", "were", "be", "been", "am", "do", "does", "did", "what", "whats", "who", "where", "when", "how", "which", "that", "this", "it", "its", "my", "me", "i", "you", "your", "we", "our", "they", "their", "there", "have", "has", "had", "not", "no", "so", "just", "can", "could", "would", "will", "any", "some"})  # fmt: skip
 
 
+BACKLOG_PAUSE_S = 0.5  # between embedding batches while there's a backlog
 TEXT_BONUS = 0.1  # added to the cosine of the best full-text match (less further down)
 
 
@@ -660,17 +661,28 @@ class Index:
                 )
             except Exception:
                 log.exception("loading the embedding model failed")
+        backlog = True  # look right away after starting
+        last_files = 0.0
+        done = 0  # embedded in this run of batches
         while True:
-            await asyncio.sleep(every_s)
+            # A backlog (a first sync, a new model) is worked through batch after batch;
+            # otherwise look again every every_s.
+            await asyncio.sleep(BACKLOG_PAUSE_S if backlog else every_s)
+            backlog = False
             try:
-                if self.journal_root is not None:
+                if self.journal_root is not None and time.monotonic() - last_files >= every_s:
+                    last_files = time.monotonic()
                     n = await loop.run_in_executor(self._pool, self.sync_files)
                     if n:
                         log.info("index: %d journal entries re-read from edited files", n)
                 if idle():
                     n = await loop.run_in_executor(self._pool, self.embed_pending, batch)
+                    done += n
+                    backlog = n == batch
+                    if done and not backlog:
+                        log.info("index: embedded %d new items ahead of time", done)
+                        done = 0
                     if n:
-                        log.info("index: embedded %d new items ahead of time", n)
                         continue
                 unload = getattr(self.embedder, "unload_if_idle", None)
                 if unload is not None:

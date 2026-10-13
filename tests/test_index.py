@@ -171,3 +171,25 @@ def test_matrix_compacts_after_many_drops() -> None:
         m.drop(f"x{i}")
     assert len(m) == 500 and len(m.ids) < 2000  # rows reclaimed
     assert {i for i, _ in m.top(np.array([0.0, 1.0], np.float32), 3)} == {"x1999", "x1998", "x1997"}
+
+
+def test_the_background_pass_works_through_a_backlog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(index, "BACKLOG_PAUSE_S", 0.01)
+    emb = FakeEmbedder()
+    ix = index.Index(tmp_path / "scout.db", emb, min_similarity=0.3)
+    for i in range(50):
+        ix.put(f"n{i}", "turn", f"note {i}", f"note number {i}", ts=i)
+
+    async def run() -> None:
+        task = asyncio.create_task(ix.background(lambda: True, every_s=30, batch=8))
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if sum(emb.calls[1:]) >= 50:  # calls[0] is the warm-up
+                break
+        task.cancel()
+
+    asyncio.run(run())
+    assert emb.calls[0] == 1 and sum(emb.calls[1:]) == 50
+    assert all(n == 8 for n in emb.calls[1:-1])  # in batches, one after another, not one per 30 s
