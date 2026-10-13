@@ -301,7 +301,9 @@ class StarlinkConfig:
     announce: bool = True  # say outages, recoveries and new alerts out loud
     announce_outage_s: float = 60.0  # only outages at least this long are announced
     quiet_hours: str = "22:00-08:00"  # announcements are only logged in these hours ("" = never quiet)
-    ignore_alerts: list[str] = field(default_factory=lambda: ["is_heating"])  # never announced
+    # Never announced or mentioned: is_heating (snow melt), lower_signal_than_predicted
+    # (a flat-mounted dish on a roof; the link is still fine).
+    ignore_alerts: list[str] = field(default_factory=lambda: ["is_heating", "lower_signal_than_predicted"])
     poll_s: float = 30.0
 
 

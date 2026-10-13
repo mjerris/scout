@@ -167,3 +167,24 @@ def test_starlink_questions_go_to_claude_when_it_is_off() -> None:
     ctx = local_intents.Context(timers=None, starlink_on=lambda: False, starlink=status)
     for text in ("is starlink down", "why is the internet so slow", "how much data have we used"):
         assert asyncio.run(local_intents.answer(text, ctx)) is None, text
+
+
+def test_ignored_alerts_arent_mentioned_or_announced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flat-mounted dish reports lower_signal_than_predicted while the link is fine:
+    the user doesn't want to hear about it, in answers or announcements."""
+    flat = {"dish_get_status": {**ONLINE["dish_get_status"],
+                                "alerts": {"lower_signal_than_predicted": True, "thermal_throttle": True}}}  # fmt: skip
+
+    class Dish:
+        async def aget(self, what: str) -> dict[str, Any]:
+            return flat if what == "get_status" else hist()
+
+    monkeypatch.setattr(starlink, "dish", lambda: Dish())
+    f = asyncio.run(starlink.status())
+    assert f["alerts"] == ["thermal_throttle"]
+    assert "lower signal" not in starlink.speak(f) and "thermal throttle" in starlink.speak(f)
+    from scout.config import StarlinkConfig
+
+    w = starlink.Watch(ignore=tuple(StarlinkConfig().ignore_alerts))
+    said = w.update(starlink.facts(flat, None, NOW), NOW)
+    assert not any("lower signal" in s for s in said)

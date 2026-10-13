@@ -176,9 +176,13 @@ def facts(
 
 
 async def status() -> dict[str, Any]:
+    """Facts now, without the alerts the user chose to ignore ([starlink] ignore_alerts)."""
     d = dish()
     st, hist = await asyncio.gather(d.aget("get_status"), d.aget("get_history"))
-    return facts(st, hist)
+    f = facts(st, hist)
+    ignore = set(load().starlink.ignore_alerts)
+    f["alerts"] = [a for a in f["alerts"] if a not in ignore]
+    return f
 
 
 def _ago(seconds: float) -> str:
