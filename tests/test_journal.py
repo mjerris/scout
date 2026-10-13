@@ -217,3 +217,33 @@ def test_unchanged_files_arent_read_again(tmp_path: Path, monkeypatch: pytest.Mo
     os.utime(day, (time.time() + 10, time.time() + 10))
     assert ix.sync_files() == 1  # changed: read and parsed
     assert [h.id for h in ix.search("glovebox", semantic=False)] == ["journal:2026-10-13T10:00:00"]
+
+
+def test_scout_log_keeps_thirty_days(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import logging
+    import logging.handlers
+    import os
+
+    import scout
+    from scout import config as config_mod
+
+    monkeypatch.setattr(config_mod, "DATA", tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    old, recent = logs / "scout.log.1", logs / "scout.log.2"
+    for f in (old, recent):
+        f.write_text("heard: ...")
+    os.utime(old, (time.time() - 31 * 86400,) * 2)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        scout._setup_logging(False)
+        added = [h for h in root.handlers if h not in before]
+        files = [h for h in added if isinstance(h, logging.handlers.TimedRotatingFileHandler)]
+        assert len(files) == 1 and files[0].backupCount == 30 and files[0].when == "MIDNIGHT"
+        assert Path(files[0].baseFilename) == logs / "scout.log"
+    finally:
+        for h in [h for h in root.handlers if h not in before]:
+            root.removeHandler(h)
+            h.close()
+    assert not old.exists() and recent.exists()  # the old size-rotated file past 30 days is gone
