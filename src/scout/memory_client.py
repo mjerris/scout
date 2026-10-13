@@ -129,7 +129,6 @@ class Store:
         since: float | None = None,
         limit: int = 8,
         semantic: bool | None = True,
-        pool: int = 200,
     ) -> list[index.Hit]:
         args = {
             "query": query,

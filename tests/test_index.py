@@ -110,3 +110,64 @@ def test_a_search_embeds_only_a_few_new_items_itself(tmp_path: Path) -> None:
     assert emb.calls == [1, 1]  # one item embedded, then the query
     assert {h.id for h in hits} == {"m1", "m2", "t1"}
     assert sum(h.how == "text" for h in hits) == 2  # the two still waiting rank by text
+
+
+def test_meaning_reaches_every_item_not_just_the_newest(tmp_path: Path) -> None:
+    """Regression: meaning only ranked the text hits and the 200 newest items, so an
+    older item that shares no words with the question was never found."""
+    emb = FakeEmbedder()
+    ix = index.Index(tmp_path / "scout.db", emb, min_similarity=0.3)
+    ix.put("old", "memory", "Pat is my manager", "Pat is my manager", ts=1)
+    for i in range(300):
+        ix.put(f"n{i}", "turn", f"timer {i}", f"set a timer for {i} minutes", ts=1000 + i)
+    while ix.embed_pending(128):
+        pass
+    assert ix.search("who is my boss")[0].id == "old"
+
+
+def test_the_matrix_follows_puts_and_deletes(tmp_path: Path) -> None:
+    emb = FakeEmbedder()
+    ix = make(tmp_path, emb)
+    assert ix.search("who is my boss")[0].id == "m1"  # loads the matrix
+    ix.put("m1", "memory", "Our van is blue", "Our van is blue", ts=100)  # new text: old vector gone
+    assert all(h.id != "m1" for h in ix.search("who is my boss"))
+    ix.put("m3", "memory", "Sam is my manager", "Sam is my manager", ts=400)
+    assert ix.search("who is my boss")[0].id == "m3"
+    ix.delete("m3")
+    assert all(h.id != "m3" for h in ix.search("who is my boss"))
+    ix.put(
+        "m2", "turn", "Our campsite is number 37", "Our campsite is number 37", ts=200
+    )  # same text, new kind
+    assert ix.search("what site are we in", kinds=["memory"]) == []
+    assert ix.search("what site are we in", kinds=["turn"])[0].id == "m2"
+
+
+def test_kind_and_date_filters_apply_to_meaning(tmp_path: Path) -> None:
+    ix = make(tmp_path, FakeEmbedder())
+    assert ix.search("who is my boss", kinds=["turn"]) == []
+    assert ix.search("who is my boss", since=150) == []
+    assert ix.search("who is my boss", since=50)[0].id == "m1"
+
+
+def test_matrix_top_filters_and_orders() -> None:
+    m = index.Matrix(2)
+    m.add("a", np.array([1.0, 0.0], np.float32), "mail", 10)
+    m.add("b", np.array([0.6, 0.8], np.float32), "turn", 20)
+    m.add("c", np.array([0.0, 1.0], np.float32), "mail", 30)
+    q = np.array([1.0, 0.0], np.float32)
+    assert [i for i, _ in m.top(q, 3)] == ["a", "b", "c"]
+    assert [i for i, _ in m.top(q, 1)] == ["a"]
+    assert [i for i, _ in m.top(q, 3, kinds=["mail"])] == ["a", "c"]
+    assert [i for i, _ in m.top(q, 3, since=15)] == ["b", "c"]
+    m.drop("a")
+    assert [i for i, _ in m.top(q, 3)] == ["b", "c"] and len(m) == 2
+
+
+def test_matrix_compacts_after_many_drops() -> None:
+    m = index.Matrix(2)
+    for i in range(2000):
+        m.add(f"x{i}", np.array([1.0, float(i)], np.float32), "turn", i)
+    for i in range(1500):
+        m.drop(f"x{i}")
+    assert len(m) == 500 and len(m.ids) < 2000  # rows reclaimed
+    assert {i for i, _ in m.top(np.array([0.0, 1.0], np.float32), 3)} == {"x1999", "x1998", "x1997"}
