@@ -114,8 +114,13 @@ class StubApp:
         self.calls.append(("discuss", agent, message, listen, timeout, hold, voice, wait_for_floor))
         return {"status": "ok", "text": "sure"}
 
-    async def run_shared_tool(self, agent: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append(("tool", agent, name, args))
+    async def run_shared_tool(
+        self, agent: str, name: str, args: dict[str, Any], preview: bool = False, confirmed: bool = False
+    ) -> dict[str, Any]:
+        self.calls.append(
+            ("tool", agent, name, args)
+            + ((("preview",) if preview else ()) + (("confirmed",) if confirmed else ()))
+        )
         return {"status": "ok", "text": "No events in that range."}
 
     async def ask(self, agent: str, text: str, deadline: float = 20.0) -> dict[str, Any]:

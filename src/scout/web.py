@@ -90,7 +90,9 @@ class VoiceApp(Protocol):
 
     def voice_status(self) -> dict[str, Any]: ...
 
-    async def run_shared_tool(self, agent: str, name: str, args: dict[str, Any]) -> dict[str, Any]: ...
+    async def run_shared_tool(
+        self, agent: str, name: str, args: dict[str, Any], preview: bool = False, confirmed: bool = False
+    ) -> dict[str, Any]: ...
 
     async def discuss(
         self,
@@ -652,9 +654,16 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("name must be a string and args an object")
             if agent is not None and not isinstance(agent, str):
                 raise TypeError("agent must be a string")
+            preview, confirmed = b.get("preview", False), b.get("confirmed", False)
+            if not isinstance(preview, bool) or not isinstance(confirmed, bool):
+                raise TypeError("preview and confirmed must be true or false")
         except (ValueError, TypeError) as exc:
             return web.json_response({"status": "error", "error": str(exc)}, status=400)
-        return web.json_response(await assistant.run_shared_tool(agent or "session", name, args))
+        return web.json_response(
+            await assistant.run_shared_tool(
+                agent or "session", name, args, preview=preview, confirmed=confirmed
+            )
+        )
 
     async def api_ask(req: web.Request) -> web.StreamResponse:
         """A request from the phone (scout-phone): answered as text, never spoken here."""

@@ -411,7 +411,11 @@ offers the read-only shared tools (calendar, reminders, notes, mail, texts, weat
 places, routes, Starlink, local search) and `ask_scout`, which answers through Scout's
 own tiers (local intents, memory, the local model, Claude on a session of its own) and
 returns text: nothing is spoken in the room and a room conversation is left alone.
-Nothing that needs a spoken yes is offered by phone, and email is never sent from it.
+Actions (adding a reminder or calendar event, completing a reminder, deleting a note) take
+two steps: the tool says what it would do and gives a one-time code, the agent reads it
+back, and `confirm_action` does it only if a SignalWire semantic gate (a separate
+decision model reading the conversation) finds that you clearly said yes; a yes read out
+of an email or message doesn't count. Email is never sent from the phone.
 
 Pairing, at home:
 
