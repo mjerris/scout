@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS vecs (
     model TEXT NOT NULL,
     sig TEXT NOT NULL,
     vec BLOB NOT NULL,
-    PRIMARY KEY (id, model)
+    part INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (id, model, part)
 );
 """
 
@@ -143,7 +144,14 @@ class LocalEmbedder:
                 t0 = time.perf_counter()
                 MODELS.mkdir(parents=True, exist_ok=True)
                 # Few threads: embedding never takes the cores listening and speaking need.
-                self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
+                # The copy on disk first, without asking Hugging Face; download only if absent.
+                try:
+                    self._m = TextEmbedding(
+                        self.name, cache_dir=str(MODELS), threads=self.threads, local_files_only=True
+                    )
+                except Exception as exc:  # any failure to load locally: download
+                    log.info("embedder %s not on disk (%s); downloading", self.name, type(exc).__name__)
+                    self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
                 log.info("embedder %s loaded in %.1fs", self.name, time.perf_counter() - t0)
             self._used = time.monotonic()
             if self._nomic:
@@ -177,20 +185,21 @@ class LocalEmbedder:
 
 class Matrix:
     """Every current vector of one model, in memory, for ranking by meaning: one row per
-    item with its kind and time, so a search filters and scores with numpy. Rows are
-    added and dropped as items change; dropped rows are reused by compaction."""
+    vector (an item has one per window of its text) with the item's kind and time, so a
+    search filters and scores with numpy, and an item counts by its best window. Rows
+    are added and dropped as items change; dropped rows are reclaimed by compaction."""
 
     def __init__(self, dims: int) -> None:
         self.dims = dims
-        self.ids: list[str] = []
-        self.rows: dict[str, int] = {}
+        self.ids: list[str] = []  # the item of each row
+        self.by_id: dict[str, list[int]] = {}
         self.vecs = np.zeros((0, dims), np.float32)
         self.kinds: list[str] = []
         self.ts = np.zeros(0, np.float64)
         self.alive = np.zeros(0, bool)
 
     def __len__(self) -> int:
-        return len(self.rows)
+        return len(self.by_id)
 
     def _grow(self, n: int) -> None:
         if n <= len(self.alive):
@@ -205,26 +214,28 @@ class Matrix:
             fill[: len(old)] = old
             setattr(self, name, fill)
 
-    def add(self, id: str, vec: np.ndarray, kind: str, ts: float) -> None:
-        r = self.rows.get(id)
-        if r is None:
+    def set(self, id: str, vecs: Sequence[np.ndarray], kind: str, ts: float) -> None:
+        """An item's vectors (all its windows), replacing any it had."""
+        self.drop(id)
+        rows = []
+        for v in vecs:
             r = len(self.ids)
             self._grow(r + 1)
             self.ids.append(id)
             self.kinds.append(kind)
-            self.rows[id] = r
-        self.vecs[r], self.ts[r], self.alive[r], self.kinds[r] = vec, ts, True, kind
+            self.vecs[r], self.ts[r], self.alive[r] = v, ts, True
+            rows.append(r)
+        if rows:
+            self.by_id[id] = rows
 
     def drop(self, id: str) -> None:
-        r = self.rows.pop(id, None)
-        if r is not None:
+        for r in self.by_id.pop(id, []):
             self.alive[r] = False
-            if len(self.ids) > 1024 and len(self.rows) < len(self.ids) // 2:
-                self._compact()
+        if len(self.ids) > 1024 and int(self.alive[: len(self.ids)].sum()) < len(self.ids) // 2:
+            self._compact()
 
     def touch(self, id: str, kind: str, ts: float) -> None:
-        r = self.rows.get(id)
-        if r is not None:
+        for r in self.by_id.get(id, []):
             self.kinds[r], self.ts[r] = kind, ts
 
     def _compact(self) -> None:
@@ -233,12 +244,14 @@ class Matrix:
         self.kinds = [self.kinds[r] for r in keep]
         self.vecs, self.ts = self.vecs[keep].copy(), self.ts[keep].copy()
         self.alive = np.ones(len(keep), bool)
-        self.rows = {id: r for r, id in enumerate(self.ids)}
+        self.by_id = {}
+        for r, id in enumerate(self.ids):
+            self.by_id.setdefault(id, []).append(r)
 
     def top(
         self, q: np.ndarray, k: int, kinds: Sequence[str] | None = None, since: float | None = None
     ) -> list[tuple[str, float]]:
-        """The k most similar items (id, cosine), best first."""
+        """The k items most similar to q (id, cosine of their best window), best first."""
         n = len(self.ids)
         if not n or k <= 0:
             return []
@@ -252,11 +265,32 @@ class Matrix:
         if not len(rows):
             return []
         sims = self.vecs[rows] @ q
-        if len(rows) > k:
-            part = np.argpartition(-sims, k - 1)[:k]
-            rows, sims = rows[part], sims[part]
-        order = np.argsort(-sims, kind="stable")
-        return [(self.ids[rows[i]], float(sims[i])) for i in order]
+        # Enough rows to find k distinct items (an item's windows can crowd the top).
+        shortlist = min(len(rows), k * 8)
+        while True:
+            if shortlist < len(rows):
+                part = np.argpartition(-sims, shortlist - 1)[:shortlist]
+            else:
+                part = np.arange(len(rows))
+            out: dict[str, float] = {}
+            for i in part[np.argsort(-sims[part], kind="stable")]:
+                id = self.ids[rows[i]]
+                if id not in out:
+                    out[id] = float(sims[i])
+                    if len(out) == k:
+                        return list(out.items())
+            if shortlist >= len(rows):
+                return list(out.items())
+            shortlist = min(len(rows), shortlist * 4)
+
+    def best(self, ids: Sequence[str], q: np.ndarray) -> dict[str, float]:
+        """The similarity of each of these items (that has vectors): its best window."""
+        out = {}
+        for id in ids:
+            rows = [r for r in self.by_id.get(id, []) if self.alive[r]]
+            if rows:
+                out[id] = float((self.vecs[rows] @ q).max())
+        return out
 
 
 _WORD = re.compile(r"[^\W_][\w']*")  # any script: "José", "Müller", "café" (FTS folds the accents)
@@ -297,8 +331,22 @@ class Index:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._add_vector_parts()
         self._conn.executescript(_SCHEMA)
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="index")
+
+    def _add_vector_parts(self) -> None:
+        """Once: vecs from before an item could have several vectors (one per window of
+        its text) become part 0."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(vecs)")]
+        if cols and "part" not in cols:
+            self._conn.executescript(
+                "BEGIN; ALTER TABLE vecs RENAME TO vecs_old; "
+                "CREATE TABLE vecs (id TEXT NOT NULL, model TEXT NOT NULL, sig TEXT NOT NULL, vec BLOB NOT NULL, "
+                "part INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, model, part)); "
+                "INSERT INTO vecs(id, model, sig, vec, part) SELECT id, model, sig, vec, 0 FROM vecs_old; "
+                "DROP TABLE vecs_old; COMMIT;"
+            )
 
     # --- writing --------------------------------------------------------------------
 
@@ -507,20 +555,17 @@ class Index:
             return text[:limit]
         # Items without a vector yet: embed a few now, text hits first, then the newest
         # (the background does the rest), so what was just added is found by meaning.
-        _, _, unranked = self._vectors(text, self.max_new_per_search)
+        unranked = self._ensure_vectors(text, self.max_new_per_search)
         if not unranked:  # the text hits didn't use up the budget
             self.embed_pending(self.max_new_per_search)
         q = self.embedder.embed([query], query=True)[0]
+        waiting = {h.id for h in unranked}
         with self._lock:
-            near = self._loaded_matrix().top(q, max(limit * 4, 60), kinds, since)
-        sims = dict(near)
+            m = self._loaded_matrix()
+            sims = dict(m.top(q, max(limit * 4, 60), kinds, since))
+            # A text hit just outside the meaning shortlist still gets its own similarity.
+            sims.update(m.best([h.id for h in text if h.id not in sims and h.id not in waiting], q))
         text_rank = {h.id: i for i, h in enumerate(text)}
-        # A text hit just outside the meaning shortlist still gets its own similarity.
-        missing = [h for h in text if h.id not in sims and h.id not in {u.id for u in unranked}]
-        if missing:
-            vecs, kept, _ = self._vectors(missing, 0)
-            for h, v in zip(kept, vecs @ q, strict=True):
-                sims[h.id] = float(v)
         hits = {h.id: h for h in text}
         hits.update({h.id: h for h in self._get_many([id for id in sims if id not in hits])})
         # Meaning decides; sharing the query's words adds a little (more for the best text
@@ -538,7 +583,6 @@ class Index:
                 continue
             h.how = "text+meaning" if t is not None else "meaning"
             ranked.append(h)
-        waiting = {h.id for h in unranked}
         for t, h in enumerate(text):
             if h.id in waiting:
                 h.score, h.how = self.min_similarity + TEXT_BONUS / (1 + t), "text"
@@ -564,14 +608,18 @@ class Index:
             t0 = time.perf_counter()
             rows = self._conn.execute(
                 "SELECT v.id, v.vec, d.kind, d.ts FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
-                "WHERE v.model = ?",
+                "WHERE v.model = ? ORDER BY v.id, v.part",
                 (self.embedder.model,),
             ).fetchall()
             dims = len(rows[0][1]) // 4 if rows else 0
             m = Matrix(dims)
-            for id, blob, kind, ts in rows:
+            item: list[np.ndarray] = []
+            for i, (id, blob, kind, ts) in enumerate(rows):
                 if len(blob) == dims * 4:
-                    m.add(id, np.frombuffer(blob, dtype=np.float32), kind, float(ts))
+                    item.append(np.frombuffer(blob, dtype=np.float32))
+                if i + 1 == len(rows) or rows[i + 1][0] != id:
+                    m.set(id, item, kind, float(ts))
+                    item = []
             self._matrix = m
             if rows:
                 log.info("index: %d vectors in memory in %.2fs", len(m), time.perf_counter() - t0)
@@ -582,72 +630,84 @@ class Index:
 
     # --- vectors (lazy) ---------------------------------------------------------------
 
-    def _vectors(
-        self, hits: Sequence[Hit], max_new: int | None = None
-    ) -> tuple[np.ndarray, list[Hit], list[Hit]]:
-        """(vectors, the hits they belong to, hits left without one): cached vectors plus
-        up to `max_new` embedded now (all when None), which are cached too."""
+    def _ensure_vectors(self, hits: Sequence[Hit], max_new: int) -> list[Hit]:
+        """Embed up to `max_new` of these items that have no current vectors; returns the
+        ones left without (the background pass does them)."""
+        if self.embedder is None:
+            raise RuntimeError("no embedder")
+        if not hits:
+            return []
+        with self._lock:
+            have = {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT v.id FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
+                    "WHERE v.model = ? AND v.part = 0 AND v.id IN (SELECT value FROM json_each(?))",
+                    (self.embedder.model, json.dumps([h.id for h in hits])),
+                )
+            }
+        missing = [h for h in hits if h.id not in have]
+        if missing[:max_new]:
+            self._embed(missing[:max_new])
+        return missing[max_new:]
+
+    def _embed(self, hits: Sequence[Hit]) -> None:
+        """Embed every window of these items and keep the vectors."""
+        if self.embedder is None:
+            raise RuntimeError("no embedder")
+        t0 = time.perf_counter()
+        texts = [_doc_texts(h) for h in hits]
+        flat = self.embedder.embed([t for ts in texts for t in ts])
+        parts, at = [], 0
+        for ts in texts:
+            parts.append(flat[at : at + len(ts)])
+            at += len(ts)
+        self._store_vectors(hits, parts)
+        if len(flat) > len(hits) or time.perf_counter() - t0 > 1:
+            log.debug(
+                "embedded %d items (%d windows) in %.2fs", len(hits), len(flat), time.perf_counter() - t0
+            )
+
+    def _store_vectors(self, hits: Sequence[Hit], parts: Sequence[np.ndarray]) -> None:
         if self.embedder is None:
             raise RuntimeError("no embedder")
         model = self.embedder.model
-        have: dict[str, np.ndarray] = {}
         with self._lock:
-            for id, blob in self._conn.execute(
-                "SELECT v.id, v.vec FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
-                "WHERE v.model = ? AND v.id IN (SELECT value FROM json_each(?))",
-                (model, json.dumps([h.id for h in hits])),
-            ):
-                have[id] = np.frombuffer(blob, dtype=np.float32)
-        missing = [h for h in hits if h.id not in have]
-        skipped = missing[max_new:] if max_new is not None else []
-        missing = missing[:max_new] if max_new is not None else missing
-        if missing:
-            t0 = time.perf_counter()
-            new = self.embedder.embed([_doc_text(h) for h in missing])
-            self._store_vectors(missing, new)
-            for h, v in zip(missing, new, strict=True):
-                have[h.id] = v
-            log.info("embedded %d items in %.2fs", len(missing), time.perf_counter() - t0)
-        kept = [h for h in hits if h.id in have]
-        dims = next(iter(have.values())).shape[0] if have else 1
-        vecs = np.stack([have[h.id] for h in kept]) if kept else np.zeros((0, dims), np.float32)
-        return vecs, kept, skipped
-
-    def _store_vectors(self, hits: Sequence[Hit], vecs: np.ndarray) -> None:
-        if self.embedder is None:
-            raise RuntimeError("no embedder")
-        with self._lock:
-            for h, v in zip(hits, vecs, strict=True):
+            for h, vecs in zip(hits, parts, strict=True):
                 # Keyed by the sig of the text that was embedded; if the item changed while
-                # it was being embedded, drop the stale vector (the next pass redoes it).
+                # it was being embedded, drop the stale vectors (the next pass redoes them).
                 sig = _sig(h.title, h.body, h.who)
                 row = self._conn.execute("SELECT sig, kind, ts FROM docs WHERE id = ?", (h.id,)).fetchone()
-                if row and row[0] == sig:
-                    vec = np.asarray(v, dtype=np.float32)
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO vecs(id, model, sig, vec) VALUES (?,?,?,?)",
-                        (h.id, self.embedder.model, sig, vec.tobytes()),
-                    )
-                    if self._matrix is not None:
-                        if not self._matrix.dims:
-                            self._matrix = Matrix(len(vec))
-                        if len(vec) == self._matrix.dims:
-                            self._matrix.add(h.id, vec, str(row[1]), float(row[2]))
+                if not row or row[0] != sig:
+                    continue
+                vs = [np.asarray(v, dtype=np.float32) for v in vecs]
+                self._conn.execute("DELETE FROM vecs WHERE id = ? AND model = ?", (h.id, model))
+                self._conn.executemany(
+                    "INSERT INTO vecs(id, model, sig, vec, part) VALUES (?,?,?,?,?)",
+                    [(h.id, model, sig, v.tobytes(), n) for n, v in enumerate(vs)],
+                )
+                if self._matrix is not None and vs:
+                    if not self._matrix.dims:
+                        self._matrix = Matrix(len(vs[0]))
+                    if len(vs[0]) == self._matrix.dims:
+                        self._matrix.set(h.id, vs, str(row[1]), float(row[2]))
 
     def embed_pending(self, limit: int = 64) -> int:
-        """Embed up to `limit` items that have no current vector yet, newest first."""
+        """Embed up to `limit` items whose vectors are missing or out of date (a long item
+        stored before it had one per window counts too), newest first."""
         if self.embedder is None:
             return 0
         with self._lock:
             rows = self._conn.execute(
                 "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM docs d "
-                "LEFT JOIN vecs v ON v.id = d.id AND v.model = ? AND v.sig = d.sig "
-                "WHERE v.id IS NULL ORDER BY d.ts DESC LIMIT ?",
-                (self.embedder.model, limit),
+                "LEFT JOIN vecs v0 ON v0.id = d.id AND v0.model = ? AND v0.part = 0 AND v0.sig = d.sig "
+                "LEFT JOIN vecs v1 ON v1.id = d.id AND v1.model = ? AND v1.part = 1 AND v1.sig = d.sig "
+                "WHERE v0.id IS NULL OR (length(d.body) > ? AND v1.id IS NULL) ORDER BY d.ts DESC LIMIT ?",
+                (self.embedder.model, self.embedder.model, EMBED_CHARS, limit),
             ).fetchall()
         hits = [_hit(r) for r in rows]
         if hits:
-            self._store_vectors(hits, self.embedder.embed([_doc_text(h) for h in hits]))
+            self._embed(hits)
         return len(hits)
 
     async def background(self, idle: Any, every_s: float = 60.0, batch: int = 64) -> None:
@@ -729,11 +789,20 @@ def _meta(text: str | None) -> dict[str, Any]:
     return m if isinstance(m, dict) else {}
 
 
-EMBED_CHARS = 1000  # what gets embedded: subject, who and the opening (long mail embeds slowly)
+EMBED_CHARS = 1000  # one window of an item's text (what embeds well)
+WINDOW_OVERLAP = 100  # windows overlap a little, so a sentence cut at an edge is in one whole
+MAX_WINDOWS = 20  # an item's first 20 windows (~18,000 characters) are embedded
 
 
-def _doc_text(h: Hit) -> str:
-    return " ".join(p for p in (h.title, h.who, h.body[:EMBED_CHARS]) if p)
+def _doc_texts(h: Hit) -> list[str]:
+    """What gets embedded for an item: its title, who and opening; then each further
+    window of the body, with the title for context."""
+    out = [" ".join(p for p in (h.title, h.who, h.body[:EMBED_CHARS]) if p)]
+    start = EMBED_CHARS - WINDOW_OVERLAP
+    while start + WINDOW_OVERLAP < len(h.body) and len(out) < MAX_WINDOWS:
+        out.append(" ".join(p for p in (h.title, h.body[start : start + EMBED_CHARS]) if p))
+        start += EMBED_CHARS - WINDOW_OVERLAP
+    return out
 
 
 def format_hits(hits: Sequence[Hit], snippets: bool = True) -> str:

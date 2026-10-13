@@ -752,6 +752,12 @@ def test_a_call_log_becomes_journal_exchanges() -> None:
     ]
     assert xs[0]["tools"] == [("weather", {"place": "Ann Arbor"})] and not xs[0]["private"]
     assert xs[1]["tools"] == [("mail_search", {"query": "from:Pat"})] and xs[1]["private"]
+    asked = ps.call_exchanges([
+        {"role": "user", "content": "What did Pat say?"},
+        {"role": "assistant", "tool_calls": [{"function": {"name": "ask_scout", "arguments": "{}"}}]},
+        {"role": "assistant", "content": "Pat says Friday."},
+    ])  # fmt: skip
+    assert asked[0]["private"]  # Scout may have answered from mail
     assert xs[0]["ts"] == 1_791_900_005.0  # microseconds to seconds
 
 
