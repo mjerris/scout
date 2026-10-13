@@ -14,7 +14,7 @@ import os
 import re
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -79,6 +79,7 @@ async def build(
     reminders: Callable[..., Awaitable[dict[str, Any]]],
     mail: Callable[..., Awaitable[list[dict[str, Any]]]],
     hours: freebusy.Hours,
+    todo: Callable[[], Awaitable[str]] | None = None,
 ) -> str:
     """The briefing text. A source that fails is named, not fatal."""
     tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), dt.time(0), now.tzinfo)
@@ -101,8 +102,37 @@ async def build(
     async def inbox() -> str:
         return mail_part(await mail(_MAIL_COUNT, True))
 
-    parts = await asyncio.gather(part("your calendar", cal), part("reminders", rem), part("mail", inbox))
-    return " ".join([greeting(now), *parts])
+    parts = list(
+        await asyncio.gather(part("your calendar", cal), part("reminders", rem), part("mail", inbox))
+    )
+    if todo is not None:
+        parts.append(await part("your tasks", todo))
+    return " ".join(p for p in [greeting(now), *parts] if p)
+
+
+def tasks_part(rows: Sequence[Any], today: dt.date) -> str:
+    """The top of the task list (tasks.ordered rows): your first three, what's overdue,
+    and what others owe you that's past due (a follow-up)."""
+    mine = [(t, why) for t, _, why in rows if t.mine]
+    owed = [t for t, _, _ in rows if not t.mine and t.due() is not None and t.due() < today]
+    out = []
+    if mine:
+        top = mine[:3]
+        out.append(
+            "Your top tasks: "
+            + "; ".join(
+                f"{t.title}" + (f", {why}" if why not in ("open", "a quick one") else "") for t, why in top
+            )
+            + "."
+        )
+        late = [t for t, _ in mine[3:] if t.due() is not None and t.due() < today]
+        if late:
+            out.append(f"{len(late)} more {'is' if len(late) == 1 else 'are'} overdue.")
+    out.extend(
+        f"{t.owner} owes you {t.title}, due {t.due():%A, %B} {t.due().day}; maybe follow up."
+        for t in owed[:2]
+    )
+    return " ".join(out)
 
 
 def local_now() -> dt.datetime:

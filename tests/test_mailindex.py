@@ -98,3 +98,48 @@ def test_mail_search_uses_the_index_and_matches_message_text() -> None:
 
 def test_mail_search_falls_back_to_mail_when_the_index_is_empty() -> None:
     assert mailindex.search("anything", 5, 180) is None
+
+
+GEMINI: dict[str, Any] = {"id": 77, "date": (NOW - dt.timedelta(days=3)).isoformat(),
+          "sender": "Gemini <gemini-notes@google.com>", "subject": "Notes: “Budget review” Oct 10, 2026", "read": True}  # fmt: skip
+GEMINI_BODY = (
+    "Summary\nThe team agreed to cut travel by 10%.\n\nNext steps\n[Mike] Send the revised budget to Pat by Friday.\n"
+    + "Details. " * 800
+)
+
+
+def test_meeting_notes_by_email_are_stored_as_meetings_in_full() -> None:
+    assert mailindex.is_meeting_summary(GEMINI["sender"], GEMINI["subject"])
+    assert mailindex.is_meeting_summary("Zoom <no-reply@zoom.us>", "Meeting summary for Weekly sync")
+    assert not mailindex.is_meeting_summary("Zoom <no-reply@zoom.us>", "Your Zoom bill")  # not a summary
+    assert not mailindex.is_meeting_summary(
+        "Pat <pat@example.com>", "Notes from lunch"
+    )  # not a notes service
+    ix = index.default()
+    mailindex._put(ix, GEMINI, GEMINI_BODY)
+    m = ix.get("mailmeeting:77")
+    assert m is not None and m.kind == "meeting" and m.title == "Budget review"
+    assert len(m.body) > 4000 and "[Mike] Send the revised budget" in m.body
+    assert m.meta == {"source": "email", "note": "mail:77", "mail_id": 77}
+    plain = ix.get("mail:77")
+    assert plain is not None and plain.kind == "mail" and len(plain.body) <= 4000
+
+
+def test_meeting_notes_from_the_last_two_weeks_are_brought_in_once() -> None:
+    queries: list[str] = []
+
+    async def run(script: str, *args: str) -> str:
+        if script == mail_mac._LIST:
+            queries.append(args[2])
+            hits = [GEMINI] if args[2] == "gemini-notes@google.com" else []
+            return json.dumps({"messages": [*hits, INBOX[1]]})  # Sam's lunch mail matches nothing
+        if script == mail_mac._READ_MANY:
+            return json.dumps({"messages": [{**GEMINI, "body": GEMINI_BODY}]})
+        raise AssertionError("unexpected Mail script")
+
+    ix = index.default()
+    assert asyncio.run(mailindex.backfill_meetings(ix, run, days=14)) == 1
+    assert queries == list(mailindex.MEETING_QUERIES) and all(q for q in queries)
+    assert ix.get("mailmeeting:77") is not None and ix.get("mailmeeting:40") is None
+    queries.clear()
+    assert asyncio.run(mailindex.backfill_meetings(ix, run, days=14)) == 0 and queries == []  # once

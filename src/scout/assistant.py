@@ -32,6 +32,8 @@ from . import (
     shared_tools,
     speech,
     starlink,
+    taskfarm,
+    tasks,
     trust,
     tier1,
 )
@@ -239,7 +241,16 @@ class Assistant:
     async def _announce_briefing(self) -> None:
         """The daily briefing (briefing.at), spoken like a timer: it waits for the floor."""
         c = self._local
-        text = await briefing.build(c.now(), c.events, c.reminders, c.mail, c.hours())
+
+        async def todo() -> str:
+            rows = tasks.ordered(
+                await asyncio.to_thread(tasks.all_tasks),
+                c.now().date(),
+                await asyncio.to_thread(tasks._people),
+            )
+            return briefing.tasks_part(rows, c.now().date())
+
+        text = await briefing.build(c.now(), c.events, c.reminders, c.mail, c.hours(), todo)
         took = await self.floor.acquire("briefing", wait=1800)
         try:
             self.speaker.chime("wake")
@@ -346,6 +357,8 @@ class Assistant:
             )
         if self.cfg.index.mail:
             self._spawn(mailindex.loop(idle))
+        if self.cfg.tasks.farm:
+            self._spawn(taskfarm.loop(idle, lambda: self.tier1))
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         while True:

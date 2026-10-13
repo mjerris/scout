@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import time
 from typing import Any
 
 from . import appdb, index, mail_mac
+from .config import load
 from .summary import essential
 
 log = logging.getLogger(__name__)
@@ -43,6 +45,35 @@ def _mail_id(m: dict[str, Any]) -> int:
     return int(m.get("mail_id") or m["id"])
 
 
+# Meeting notes and transcripts that arrive by email (docs/tasks-design.md): the sender's
+# domain, and a subject that says so. They're stored as meetings too, in full.
+_MEETING_SENDERS = re.compile(
+    r"gemini-notes@google\.com|meetings-noreply@google\.com|meet-recordings-noreply@google\.com|"
+    r"@zoom\.us|@otter\.ai|@fireflies\.ai|@fathom\.video|@tldv\.io|@email\.teams\.microsoft\.com|"
+    r"@read\.ai|@grain\.com",
+    re.I,
+)
+_MEETING_SUBJECT = re.compile(r"notes|summary|transcript|recap|action items|meeting assets", re.I)
+MEETING_QUERIES = ("gemini-notes@google.com", "meetings-noreply@google.com", "zoom.us", "otter.ai",
+                   "fireflies.ai", "fathom.video", "tldv.io", "teams.microsoft.com")  # fmt: skip
+MEETING_CHARS = 60_000
+
+
+def is_meeting_summary(sender: str, subject: str) -> bool:
+    return bool(_MEETING_SENDERS.search(sender or "")) and bool(_MEETING_SUBJECT.search(subject or ""))
+
+
+def _meeting_title(subject: str) -> str:
+    """The meeting's name: the quoted part ("Notes: “Budget review” Oct 10"), else the
+    subject without its "Meeting summary for" lead-in."""
+    if q := re.search(r"[“\"]([^”\"]+)[”\"]", subject):
+        return q.group(1).strip()
+    t = re.sub(
+        r"^\s*(?:notes|meeting summary|summary|transcript|recap)\s*(?:for|of|:)\s*", "", subject, flags=re.I
+    )
+    return t.strip() or subject
+
+
 def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
     mid = _mail_id(m)
     meta = {"mail_id": mid, "read": bool(m.get("read")), "date": m.get("date")}
@@ -57,6 +88,17 @@ def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
         ts=_ts(str(m.get("date") or "")),
         meta=meta,
     )
+    sender, subject = str(m.get("sender") or ""), str(m.get("subject") or "")
+    if body and is_meeting_summary(sender, subject):
+        ix.put(
+            f"mailmeeting:{mid}",
+            "meeting",
+            title=_meeting_title(subject),
+            body=body[:MEETING_CHARS],
+            who=sender,
+            ts=_ts(str(m.get("date") or "")),
+            meta={"source": "email", "note": f"mail:{mid}", "mail_id": mid},
+        )
 
 
 def remember(messages: list[dict[str, Any]], with_body: bool) -> int:
@@ -159,6 +201,31 @@ async def sync_pass(
     return out
 
 
+async def backfill_meetings(ix: index.Store, run: mail_mac.Runner = _slow_jxa, days: float = 14.0) -> int:
+    """Once: meeting notes and transcripts that came by email in the last `days`, found
+    by a Mail search per sender, stored in full (as mail and as meetings)."""
+    db = appdb.default()
+    db.script(_MARKS)
+    if db.sql("SELECT ts FROM mail_sync WHERE name = 'meetings'"):
+        return 0
+    found: dict[int, dict[str, Any]] = {}
+    for q in MEETING_QUERIES:
+        data = await mail_mac._call(run, mail_mac._LIST, "50", "false", q, str(int(days)))
+        for m in data.get("messages", []):
+            if isinstance(m.get("id"), int) and is_meeting_summary(
+                str(m.get("sender")), str(m.get("subject"))
+            ):
+                found[int(m["id"])] = m
+    ids = [i for i in found if ix.get(f"mailmeeting:{i}") is None]
+    for i in range(0, len(ids), CHUNK):
+        got = await mail_mac.bodies(ids[i : i + CHUNK], run, remember=False)
+        for mid, m in got.items():
+            _put(ix, {**found.get(mid, {}), **m}, str(m.get("body") or ""))
+    db.sql("INSERT OR REPLACE INTO mail_sync(name, ts) VALUES ('meetings', ?)", (time.time(),))
+    log.info("mail index: %d meeting notes from email brought in (%d found)", len(ids), len(found))
+    return len(ids)
+
+
 def search(query: str, count: int, days: int) -> dict[str, Any] | None:
     """Matching messages from the index, in mail_mac.listing's shape, or None when the
     index has no mail yet (the caller asks Mail.app instead)."""
@@ -188,6 +255,7 @@ async def loop(idle: Any, every_s: float = 1200.0) -> None:
         try:
             if idle():
                 await sync_pass(index.default())
+                await backfill_meetings(index.default(), days=load().tasks.backfill_days)
         except Exception as exc:
             log.warning("mail index pass failed: %s", exc)
         await asyncio.sleep(every_s)

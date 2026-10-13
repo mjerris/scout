@@ -188,3 +188,26 @@ def test_without_reminders_access_tasks_still_work(
     out = asyncio.run(tasks.add_text({"title": "Order filters"}))
     t = store.get("task:1")
     assert out.startswith("Added task 1") and t is not None and "reminder" not in t.meta
+
+
+def test_the_briefing_names_the_top_tasks_and_follow_ups() -> None:
+    from scout import briefing
+
+    def t(n: int, **f: Any) -> tasks.Task:
+        return tasks.Task(n, f.pop("title"), "", {"status": "open", "owner": "me", **f})
+
+    rows = tasks.ordered(
+        [
+            t(1, title="Send Pat the budget", due="2026-10-13"),
+            t(2, title="Call the insurer", importance="high"),
+            t(3, title="Order filters", effort="small"),
+            t(4, title="Renew registration", due="2026-10-01"),
+            t(5, title="Old thing", due="2026-10-02"),
+            t(6, title="the vendor quote", owner="Sam", due="2026-10-09"),
+        ],
+        TODAY,
+    )
+    said = briefing.tasks_part(rows, TODAY)
+    assert said.startswith("Your top tasks: Renew registration, overdue since Oct 1;")
+    assert "Sam owes you the vendor quote, due Friday, October 9; maybe follow up." in said
+    assert briefing.tasks_part([], TODAY) == ""
