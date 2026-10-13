@@ -12,7 +12,7 @@ result; a periodic deterministic check, with interruptions only for what's urgen
 | The record | Markdown files, `memory/tasks/0012-send-budget-to-pat.md`, one per task, indexed (kind `task`) like notes and the journal |
 | On your phone and watch | Open tasks are mirrored to the Mac's Reminders: what you owe in the list **Scout**, what others owe you in **Waiting On** (each made when missing). Completing one in Reminders completes the task |
 | Found tasks | Added directly (no suggested inbox). Each one names its source, so a wrong one is quick to drop |
-| Who reads | Claude reads meetings (Granola notes, meeting summaries that arrive by email); the local model reads other email and Slack (they stay on the Mac) |
+| Who reads | Claude (Haiku, `[tasks] extract_model`) reads meetings (Granola notes, meeting summaries that arrive by email); the local model reads other email and Slack (they stay on the Mac) |
 | What's tracked | What you owe; what others owe you (waiting on); due dates mentioned in passing |
 
 ## A task file
@@ -55,7 +55,7 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    by scout-memory, docs/slack.md): bot messages and messages without an action cue are
    skipped, and a conversation's new messages are read together, up to 3,000 characters
    per read.
-2. **Extract.** Meetings go to Claude, email and Slack to the local model, with one prompt; in
+2. **Extract.** Meetings go to Claude (Haiku; see "Which model reads meetings"), email and Slack to the local model, with one prompt; in
    strict privacy mode, meeting summaries that came by email go to the local model too.
    It returns JSON: one item per task with title, owner (`me` or a name), due date,
    importance, urgency, effort, and a short quote as evidence. Only commitments count,
@@ -74,6 +74,25 @@ Every few minutes the farm looks at items new to the store since its checkpoint
 
 Backfill: on the first run, meetings and mail from the last `[tasks] backfill_days`
 (14) are read. Older ones are left alone, since what they asked for is likely done.
+
+## Which model reads meetings
+
+Measured on 26 real meetings (scripts/bench_taskfarm.py, 2026-10-13; each found task judged
+by Sonnet as a real commitment with the right owner or not, configs unlabelled):
+
+| Reader | Precision | Real tasks found | Cost per meeting (list) | Time |
+|---|---|---|---|---|
+| Haiku 5.5, summary + transcript | 72% | 47% | $0.003 | 16 s |
+| Sonnet 5.5, summary + transcript | 61–65% | 44–45% | $0.02–0.04 | 6 s |
+| Sonnet, summary + action lines only | 61% | 41% | $0.02 | 6 s |
+| Qwen3-4B (local), summary | 52% | 34% | 0 | 14 s |
+| Qwen3-8B (local), summary | 50% | 21% | 0 | 18 s |
+
+Haiku found the most and was right the most often, at about a tenth of Sonnet's price, so
+it's the default. Sonnet agrees with itself only about 72% from run to run. The local 4B
+is the reader in strict privacy mode; the 8B was worse at telling your tasks from others'.
+The CLI runs each read without saving the session (`--no-session-persistence`), so meeting
+text isn't left in Claude Code's session files.
 
 ## Meeting summaries that arrive by email
 

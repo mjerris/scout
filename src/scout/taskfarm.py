@@ -119,13 +119,15 @@ def worth_reading(h: index.Hit) -> bool:
 def parse_found(answer: str) -> list[dict[str, Any]] | None:
     """The tasks in a model's answer (JSON, perhaps wrapped in prose or a code fence),
     or None when it isn't a valid answer (cut short, or not JSON): not the same as none."""
-    m = re.search(r"\{.*\}", answer, re.S)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except ValueError:
-        return None
+    data = None
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", answer):  # the first object that parses; prose may follow it
+        try:
+            data = dec.raw_decode(answer, m.start())[0]
+        except ValueError:
+            continue
+        if isinstance(data, dict) and "tasks" in data:
+            break
     if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
         return None
     out = []
@@ -252,6 +254,7 @@ async def claude_extract(system: str, text: str) -> str:
         model=cfg.extract_model or None,
         setting_sources=[],
         cwd=str(DATA / "state"),
+        extra_args={"no-session-persistence": None},  # the meeting text isn't kept on disk by the CLI
     )
     parts: list[str] = []
     t0 = time.monotonic()
