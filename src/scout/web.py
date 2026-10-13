@@ -24,10 +24,12 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import WSCloseCode, WSMsgType, web
 
+from . import phone_devices
 from .audio import SAMPLE_RATE, decode_to_pcm
-from .config import DATA, WebConfig
+from .config import DATA, PhoneConfig, WebConfig
 
 log = logging.getLogger(__name__)
 _COOKIE = "cv_token"
@@ -44,6 +46,17 @@ PENDING_SECONDS = 120.0  # reply audio kept for a page that is reconnecting
 PENDING_MAX = 40
 REFRESH_SECONDS = 1.0  # how often the floor/state shown on pages is rechecked
 REBIND_SECONDS = 30.0  # how often the lan/tailscale addresses are rechecked
+SW_TOKEN_TTL_S = 3600  # a subscriber token minted for the /phone test page lasts this long
+SW_TIMEOUT_S = 15.0
+_SPACE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
+)
+# The /phone page: its scripts come from here and the pinned @signalwire/js on jsDelivr;
+# the SDK talks to SignalWire over https and wss.
+_PHONE_CSP = (
+    "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https: wss:; "
+    "img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+)
 
 
 # --- what the web page needs from the assistant ---------------------------------------
@@ -138,6 +151,86 @@ def token_ok(given: str, token: str) -> bool:
     if not given or len(token) < _MIN_TOKEN_LEN:
         return False
     return hmac.compare_digest(given.encode(), token.encode())  # bytes: non-ASCII input can't raise
+
+
+# --- SignalWire subscriber tokens (the /phone test page) ------------------------------
+
+
+class PhoneTokenError(Exception):
+    """Why no token was minted; status is the HTTP status the page gets."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def phone_token_request(cfg: PhoneConfig, now: float) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """The REST call that mints a subscriber token: POST {space}/api/fabric/subscribers/tokens
+    with the project's Basic auth. SignalWire creates the subscriber (reference) on first use."""
+    if not cfg.enabled:
+        raise PhoneTokenError(409, "Phone calls are off: set [phone] enabled = true in Scout's config.")
+    missing = [k for k in ("space", "project_id", "api_token", "subscriber") if not getattr(cfg, k).strip()]
+    if missing:
+        raise PhoneTokenError(409, f"Set [phone] {', '.join(missing)} in Scout's config.")
+    space = cfg.space.strip()
+    space = space.split("://", 1)[-1].split("/", 1)[0]
+    if not _SPACE.fullmatch(space):
+        raise PhoneTokenError(
+            409, f"[phone] space {cfg.space!r} is not a host name like example.signalwire.com."
+        )
+    body = {"reference": cfg.subscriber.strip(), "expire_at": int(now) + SW_TOKEN_TTL_S}
+    headers = {
+        "Authorization": aiohttp.encode_basic_auth(cfg.project_id.strip(), cfg.api_token.strip()),
+        "Accept": "application/json",
+    }
+    return f"https://{space}/api/fabric/subscribers/tokens", headers, body
+
+
+async def _post_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
+    """POST JSON, return (status, parsed body or its text). No proxy from the environment."""
+    timeout = aiohttp.ClientTimeout(total=SW_TIMEOUT_S)
+    async with (
+        aiohttp.ClientSession(timeout=timeout, trust_env=False) as s,
+        s.post(url, json=body, headers=headers) as r,
+    ):
+        text = await r.text()
+        try:
+            return r.status, json.loads(text)
+        except ValueError:
+            return r.status, text
+
+
+def _sw_error(data: Any) -> str:
+    """SignalWire's error messages, short (never the request)."""
+    if isinstance(data, dict) and isinstance(data.get("errors"), list):
+        msgs = [
+            str(e.get("detail") or e.get("message") or e.get("code") or "")
+            for e in data["errors"]
+            if isinstance(e, dict)
+        ]
+        if any(msgs):
+            return "; ".join(m for m in msgs if m)[:300]
+    if isinstance(data, dict):
+        for k in ("error", "message"):
+            if isinstance(data.get(k), str):
+                return str(data[k])[:300]
+    return str(data)[:200]
+
+
+async def mint_subscriber_token(cfg: PhoneConfig, now: float | None = None) -> dict[str, Any]:
+    """A short-lived SignalWire subscriber token for the browser: {token, expires_at}."""
+    url, headers, body = phone_token_request(cfg, time.time() if now is None else now)
+    try:
+        status, data = await _post_json(url, headers, body)
+    except TimeoutError:
+        raise PhoneTokenError(504, f"SignalWire didn't answer within {SW_TIMEOUT_S:.0f} s.") from None
+    except aiohttp.ClientError as exc:
+        raise PhoneTokenError(502, f"Couldn't reach SignalWire: {exc}") from None
+    if status in (401, 403):
+        raise PhoneTokenError(502, f"SignalWire refused [phone] project_id / api_token (HTTP {status}).")
+    if status != 200 or not isinstance(data, dict) or not isinstance(data.get("token"), str):
+        raise PhoneTokenError(502, f"SignalWire couldn't make a token (HTTP {status}): {_sw_error(data)}")
+    return {"token": data["token"], "expires_at": body["expire_at"]}
 
 
 # --- addresses ----------------------------------------------------------------------
@@ -485,9 +578,13 @@ async def _audio_worker(hub: _Hub, conn: _Conn) -> None:
 # --- the server ---------------------------------------------------------------------
 
 
-async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
+async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None = None) -> web.AppRunner:
     token = load_token()
-    page = resources.files(__package__).joinpath("web.html").read_text()
+    phone = phone or PhoneConfig()
+    files = resources.files(__package__)
+    page = files.joinpath("web.html").read_text()
+    phone_page = files.joinpath("phone.html").read_text()
+    phone_js = {name: files.joinpath(name).read_text() for name in ("phone.js", "phone_sign.js")}
     hub = _Hub(assistant)
 
     def authed(req: web.Request, allow_query: bool = False) -> bool:
@@ -583,15 +680,62 @@ async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
         guard(req)
         return web.json_response(assistant.voice_status())
 
-    async def index(req: web.Request) -> web.StreamResponse:
+    async def api_phone_pair(req: web.Request) -> web.StreamResponse:
+        """Pair a browser (the /phone test page) like `scoutctl phone pair`: the secret is
+        returned this once."""
+        guard(req)
+        if req.content_type != "application/json":  # also forces a CORS preflight
+            raise web.HTTPUnsupportedMediaType(text="Send application/json.")
+        try:
+            b = await req.json()
+            if not isinstance(b, dict):
+                raise TypeError("the body must be a JSON object")
+            name = b.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise TypeError("name must be a non-empty string")
+            if len(name) > 64:
+                raise ValueError("name is too long (64 characters at most)")
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"status": "error", "error": str(exc)}, status=400)
+        if not phone.address.strip():
+            return web.json_response(
+                {
+                    "status": "error",
+                    "error": "Set [phone] address (what the app dials) in Scout's config first.",
+                },
+                status=409,
+            )
+        try:
+            device, secret = await asyncio.to_thread(phone_devices.pair, name)
+        except (OSError, ValueError) as exc:
+            log.warning("web: pairing a browser failed: %s", exc)
+            return web.json_response({"status": "error", "error": f"Couldn't pair: {exc}"}, status=500)
+        log.info("web: paired %s (%s) from the /phone page", device, " ".join(name.split()))
+        resp = web.json_response({"device": device, "secret": secret, "address": phone.address})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def api_phone_token(req: web.Request) -> web.StreamResponse:
+        """A short-lived SignalWire subscriber token for the /phone page."""
+        guard(req)
+        try:
+            minted = await mint_subscriber_token(phone)
+        except PhoneTokenError as exc:
+            log.warning("web: no SignalWire token: %s", exc)
+            return web.json_response({"status": "error", "error": str(exc)}, status=exc.status)
+        resp = web.json_response(minted)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def page_response(req: web.Request, text: str, csp: str) -> web.StreamResponse:
         if not authed(req, allow_query=True):
             return web.Response(
                 status=401, text="Missing or wrong token. Use ?token=<the contents of state/web_token>."
             )
-        resp = web.Response(text=page, content_type="text/html")
+        resp = web.Response(text=text, content_type="text/html")
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Referrer-Policy"] = "no-referrer"  # the URL may carry the token
-        resp.headers["Content-Security-Policy"] = "frame-ancestors 'none'"  # no clickjacking Approve
+        resp.headers["Content-Security-Policy"] = csp
         resp.set_cookie(
             _COOKIE,
             token,
@@ -600,6 +744,19 @@ async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
             samesite="Strict",
             secure=_is_https(req),
         )
+        return resp
+
+    async def index(req: web.Request) -> web.StreamResponse:
+        return page_response(req, page, "frame-ancestors 'none'")  # no clickjacking Approve
+
+    async def phone_index(req: web.Request) -> web.StreamResponse:
+        return page_response(req, phone_page, _PHONE_CSP)
+
+    async def phone_script(req: web.Request) -> web.StreamResponse:
+        if not authed(req):
+            raise web.HTTPUnauthorized()
+        resp = web.Response(text=phone_js[req.match_info["name"]], content_type="text/javascript")
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     async def ws_handler(req: web.Request) -> web.StreamResponse:
@@ -708,6 +865,10 @@ async def start(cfg: WebConfig, assistant: VoiceApp) -> web.AppRunner:
             web.post("/api/tool", api_tool),
             web.post("/api/ask", api_ask),
             web.get("/api/status", api_status),
+            web.get("/phone", phone_index),
+            web.get(r"/phone/{name:phone(?:_sign)?\.js}", phone_script),
+            web.post("/api/phone/pair", api_phone_pair),
+            web.post("/api/phone/token", api_phone_token),
         ]
     )
 

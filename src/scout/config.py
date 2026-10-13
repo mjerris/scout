@@ -323,6 +323,9 @@ class PhoneConfig:
     # The agent's address the paired app dials; it is part of each call's signature.
     address: str = ""
     call_skew_s: int = 60  # a call's signed timestamp may be this far from the Mac's clock
+    # The SignalWire subscriber the browser test page (/phone) signs in as. SignalWire creates
+    # it the first time a token is minted for it; any string works (often an email).
+    subscriber: str = "scout-owner"
 
 
 @dataclass

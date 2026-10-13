@@ -90,7 +90,7 @@ summaries only. The phone path is opt-in, and README states this plainly.
 
 ## Apps
 
-1. **Browser first**: `@signalwire/react`, pairing secret in browser storage. This proves pairing, signing,
+1. **Browser first**: the web UI's `/phone` page (`@signalwire/js` v4), pairing secret in browser storage. This proves pairing, signing,
    the agent and the webhooks end to end.
 2. **React Native**: `@signalwire/react-native` (github.com/lpradovera/signalwire-react-native-unofficial)
    on the same hooks, with CallKit and Bluetooth routing. In the truck, Scout is a

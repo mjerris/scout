@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout phone test</title>
+<style>
+  :root { --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1c1a; --muted: #6f6c66; --line: #e4e1da;
+          --accent: #c4673f; --ok: #2f7d4f; --bad: #b3402f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1a18; --panel: #24231f; --ink: #ecebe6; --muted: #9c988f; --line: #37352f;
+            --accent: #e08a62; --ok: #5cb27e; --bad: #e0705c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 480px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+  h1 { font-size: 19px; margin: 4px 0 0; font-weight: 600; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+            display: flex; flex-direction: column; gap: 10px; }
+  h2 { font-size: 15px; margin: 0; font-weight: 600; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input { font: inherit; flex: 1; min-width: 0; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--ink); }
+  button { font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.go { background: var(--ok); border-color: var(--ok); color: #fff; flex: 1; }
+  button.stop { background: var(--bad); border-color: var(--bad); color: #fff; flex: 1; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .state { font-weight: 600; }
+  .error { color: var(--bad); font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scout phone test</h1>
+  <p class="muted">Places a verified call to Scout's SignalWire agent from this browser: the call carries a
+    signature made with this browser's pairing secret.</p>
+
+  <section id="pairing">
+    <h2>Pairing</h2>
+    <div id="unpaired" class="row">
+      <input id="name" placeholder="Name for this browser" maxlength="64" autocomplete="off">
+      <button id="pair">Pair this browser</button>
+    </div>
+    <div id="paired" hidden>
+      <div>Paired as <code id="device"></code>, calling <code id="address"></code></div>
+      <div class="row" style="margin-top: 8px">
+        <button id="forget">Forget pairing</button>
+      </div>
+      <p class="muted">Forgetting here only clears this browser. To revoke the device in Scout:
+        <code>scoutctl.sh phone forget &lt;device&gt;</code>.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Call</h2>
+    <div>State: <span id="state" class="state">idle</span></div>
+    <div class="row">
+      <button id="call" class="go" disabled>Call Scout</button>
+      <button id="hangup" class="stop" disabled>Hang up</button>
+    </div>
+    <div id="error" class="error"></div>
+    <audio id="remote" autoplay playsinline></audio>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@signalwire/js@4.0.0-rc.4/dist/browser.umd.js"
+        integrity="sha384-XQDpOJlfLOS9WlweEtUDq5UumRcIn29mpUYtWwruHdx0EBP7ZPe79Jy8JXUW8EhU"
+        crossorigin="anonymous"></script>
+<script src="/phone/phone_sign.js"></script>
+<script src="/phone/phone.js"></script>
+</body>
+</html>
