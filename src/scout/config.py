@@ -214,6 +214,11 @@ class ClaudeConfig:
     # requests kept (scripts/bench_tier1.py), deciding in a median 0.7 s. It also
     # writes the email summaries Claude gets instead of email (privacy.mode).
     local_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    # Tier 1 also answers the weather, the task list, and questions about what's in
+    # Scout's memory ("what did Pat say about the budget", "when did I last change the
+    # oil"): searched locally, answered by the local model only from what it found and
+    # checked against it in code; anything else goes to Claude (scripts/bench_recall.py).
+    local_recall: bool = True
     # Prefix each request with context (date and time, running timers, recent local
     # answers) and, for calendar or mail questions, the data itself, so Claude can
     # answer in one pass instead of calling a tool first (each round trip is ~1.5-2.5 s).

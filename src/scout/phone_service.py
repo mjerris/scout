@@ -131,8 +131,9 @@ Keep each answer to one or two sentences: the most useful part first (the weathe
 the rest of today, the next thing on the calendar), then offer more if there is more.
 Use the tools for the calendar, reminders, notes, tasks, weather, places, driving routes,
 reading mail and texts, Starlink and Scout's local search. For anything else, or anything that needs Scout
-itself (what it remembers, earlier conversations, a question for Claude), call ask_scout
-with the user's request in their own words. A tool that takes a while answers that it's
+itself (what it remembers, what someone said or decided, what a note or an earlier
+conversation says, a question for Claude), call ask_scout with the user's request in their
+own words: Scout answers those on the Mac from its own records when it can. A tool that takes a while answers that it's
 looking; tell the user you're checking, and the answer is sent to you when it's ready.
 Adding calendar events or reminders, completing reminders and deleting notes take two
 steps: the tool says what it would do; read that back, and only after the user clearly
@@ -152,9 +153,10 @@ def now_line(now: Any) -> str:
 
 
 ASK_SCOUT = (
-    "Ask Scout itself: memories, earlier conversations, anything the other tools don't "
-    "cover, or anything that needs thinking (Scout asks Claude). request is what the user "
-    "wants, in their words. Returns Scout's answer to read to the user."
+    "Ask Scout itself: memories, earlier conversations, what someone said or decided in a "
+    "meeting, an email or Slack, what a note says, anything the other tools don't cover, or "
+    "anything that needs thinking. Scout answers on the Mac when it can, else asks Claude. "
+    "request is what the user wants, in their words. Returns Scout's answer to read to the user."
 )
 
 Caller = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]

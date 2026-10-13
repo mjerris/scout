@@ -409,7 +409,8 @@ only when `enabled = true`; `scripts/run-phone.sh` runs it in the foreground) li
 127.0.0.1:8768. It refuses to start without `signing_key` and `public_url`. On a call it
 offers the read-only shared tools (calendar, reminders, notes, mail, texts, weather,
 places, routes, Starlink, local search) and `ask_scout`, which answers through Scout's
-own tiers (local intents, memory, the local model, Claude on a session of its own) and
+own tiers (local intents, memory, the local model with its recall from Scout's records,
+Claude on a session of its own) and
 returns text: nothing is spoken in the room and a room conversation is left alone.
 Actions (adding a reminder or calendar event, completing a reminder, deleting a note) take
 two steps: the tool says what it would do and gives a one-time code, the agent reads it
@@ -498,6 +499,44 @@ reminders"; "ask me before adding reminders" takes it back, and "what do you do
 without asking" lists them. Adding and completing reminders, adding calendar events
 and deleting notes can be promoted; sending email always asks. After five yeses in a
 row Scout mentions the option once. Every decision is logged in `state/trust.json`.
+
+## Answered on the Mac (tier 1)
+
+Before Claude, a small local model (`claude.local_model`, Qwen3 4B on MLX) gets one
+chance at a request plain code didn't answer. It only picks a read-only lookup or
+"Claude", and plain code decides first: anything with an action word (send, reply,
+add, change, order...), judgment ("should", "why", "what do you think"), or more than
+one step or sentence ("...and text it to Carol", "...? Reply that it's fine", "... - do
+it") goes straight to Claude without asking the model. A verb asked about in the past is
+a question, not an action: "when did I last change the oil" and "what did Pat tell me"
+pass; "did you send it" (Scout's own doing) goes to Claude.
+
+What it answers: the calendar, the inbox (what an email says is summarized on the Mac),
+and with `claude.local_recall` (on by default) the weather, the task list, and
+**recall**: questions about what's in Scout's records: "what did Pat say about the Q4
+budget", "when did I last change the generator oil", "what was decided in the vendor
+meeting", "what's my wifi password". A recall searches the local store (below) by the
+question and by the model's few words, shows the model the best five records, and takes
+its answer only if it names one record, quotes it word for word, and passes checks in
+plain code: the record has the question's topic words (a note about the truck's tires
+doesn't answer "when did I rotate the RV tires"), every number in the answer is in the
+record, and nearly every other word too. Anything else, including "not found", goes to
+Claude, which still has the request's context. Emails that address an AI or are lures
+are never shown to the model. An answer that read mail, a meeting or Slack is private
+like other local answers (withheld from Claude in strict mode). The phone's "ask Scout"
+goes through the same tiers, so these are answered on the Mac by phone too.
+
+Measured with `scripts/bench_recall.py`, on a synthetic store (21 records, one a lure,
+among 300 distractors) and 100 labelled requests: 22 answerable recall questions, 15
+with no answer in the store, 10 weather and task lookups, 27 actions or judgment phrased
+as questions, and the 41 routing requests of `scripts/bench_tier1.py`:
+
+| Qwen3 4B (Instruct 2507, 4-bit) | |
+|---|---|
+| Answered locally when it should have gone to Claude | 0 of 60 (0 of 27 adversarial, 0 of 15 with no answer) |
+| Answerable recall questions answered right locally | 16 of 22, none wrong (2 more went to a mail search; the rest to Claude) |
+| Routing (weather, tasks, the original 41) | 10 of 10, 41 of 41 |
+| Time (median, on the Mac mini with Scout running) | routing 1.5 s, a recall's search and answer 2.4 s: 3.8 s in all. Claude needs at least two round trips for the same (a search, then the answer; ~1.5-2.5 s each) |
 
 ## Usage: what answered
 
