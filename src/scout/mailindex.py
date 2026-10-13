@@ -180,6 +180,10 @@ def _mark(ts: float | None = None) -> float | None:
 
 FAST_TIMEOUT_S = 30.0  # the newest-by-range listing; slower than this, the full scan is used
 FAST_RETRY_S = 6 * 3600.0  # after the range listing failed, scan in full this long before retrying
+# Off against the real Mail: on this Mac's 58k-message Google inbox the range listing ran
+# past FAST_TIMEOUT_S on 2026-10-13 even with three properties, and the fallback scan then
+# made each pass 59 s instead of 13 s. Tests still drive it with a fake `newest` runner.
+USE_NEWEST_RANGES = False
 _fast_off_until = 0.0
 
 
@@ -190,7 +194,7 @@ async def _list_newest(
     they were listed. The newest NEWEST of each inbox by range when Mail is the real one
     (or `newest` fakes it); the full id-and-date scan (_LIST) when that fails or is off."""
     global _fast_off_until
-    real = newest is None and run is _slow_jxa
+    real = USE_NEWEST_RANGES and newest is None and run is _slow_jxa
     if (real or newest is not None) and time.monotonic() >= _fast_off_until:
         try:
             return await mail_mac.newest_ids(NEWEST, newest, timeout=FAST_TIMEOUT_S), "ranges"

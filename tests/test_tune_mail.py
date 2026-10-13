@@ -214,3 +214,23 @@ def test_index_search_is_one_store_call(monkeypatch: pytest.MonkeyPatch) -> None
     assert found is not None and [m["id"] for m in found["messages"]] == [61] and calls == ["search"]
     calls.clear()
     assert mailindex.search("nothing like this", 5, 180) is None and calls == ["search"]
+
+
+def test_the_real_mail_is_scanned_not_listed_by_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured 2026-10-13: the range listing timed out on a 58k inbox, so against the
+    real Mail the pass scans; the range path stays off unless switched on."""
+    called: list[str] = []
+
+    async def newest_ids(*a: Any, **k: Any) -> list[dict[str, Any]]:
+        called.append("ranges")
+        return []
+
+    async def scan(script: str, *args: str) -> str:
+        called.append("scan")
+        return json.dumps({"messages": []})
+
+    monkeypatch.setattr(mail_mac, "newest_ids", newest_ids)
+    monkeypatch.setattr(mailindex, "_slow_jxa", scan)
+    assert mailindex.USE_NEWEST_RANGES is False
+    listed, how = asyncio.run(mailindex._list_newest(scan, None))
+    assert (listed, how, called) == ([], "scan", ["scan"])
