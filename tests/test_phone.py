@@ -347,10 +347,14 @@ def test_call_scout_posts_with_the_token(tmp_path: Path, monkeypatch: pytest.Mon
     token = tmp_path / "web_token"
     token.write_text("t" * 32 + "\n")
     monkeypatch.setattr(web_mod, "TOKEN_PATH", token)
+    phone = tmp_path / "phone_api_token"
+    monkeypatch.setattr(web_mod, "PHONE_TOKEN_PATH", phone)
     seen: list[tuple[str, str, Any]] = []
+    sent: list[str] = []
 
     async def handler(req: aioweb.Request) -> aioweb.Response:
         seen.append((req.path, req.headers.get("Authorization", ""), await req.json()))
+        sent.append(req.headers.get(web_mod.PHONE_HEADER, ""))
         return aioweb.json_response({"status": "ok", "text": "done"})
 
     async def go() -> dict[str, Any]:
@@ -371,6 +375,8 @@ def test_call_scout_posts_with_the_token(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert run(go()) == {"status": "ok", "text": "done"}
     assert seen == [("/api/tool", "Bearer " + "t" * 32, {"agent": "phone", "name": "weather", "args": {}})]
+    # scout-phone's own credential, made on first use, private
+    assert len(sent[0]) >= 32 and sent == [phone.read_text().strip()] and _mode(phone) == 0o600
 
 
 # --- Scout's side: /api/ask through the assistant ------------------------------------------
@@ -625,9 +631,7 @@ def test_a_late_answer_is_pushed_into_the_call(
         return str(first.to_dict()["response"])
 
     assert asyncio.run(run()) == ps.STILL_LOOKING
-    assert pushed == [
-        ("call-p", ps.LATE_ANSWER.format(what="places near", text="Two truck stops near Luther."))
-    ]
+    assert pushed == [("call-p", ps.late_answer("places_near", "Two truck stops near Luther."))]
     assert not agent._lookups
 
 
@@ -697,7 +701,7 @@ def test_a_late_ask_is_pushed_into_the_call(
         return str(first.to_dict()["response"])
 
     assert asyncio.run(run()) == ps.STILL_LOOKING
-    assert pushed == [("call-a", ps.LATE_ANSWER.format(what="Scout", text="You parked by the barn."))]
+    assert pushed == [("call-a", ps.late_answer("ask_scout", "You parked by the barn."))]
     assert asked == ["where did I park"] * 3
     assert not agent._lookups
 
@@ -712,6 +716,8 @@ def test_each_calls_report_is_kept_privately(
     agent = ps.PhoneAgent(
         cfg, CallCheck(ADDRESS, 60, paired[0]), FakeScout(), AUTH, "s" * 43, reports=reports
     )
+    agent.calls.bind("call-z/../x", paired[1])
+    agent.calls.bind("call-y", paired[1])  # only verified calls are kept
     agent.on_summary(
         {"text": "asked the weather"}, {"call_id": "call-z/../x", "call_log": [{"role": "user"}]}
     )
@@ -788,9 +794,7 @@ def test_a_verified_call_is_journaled_when_it_ends(paired: tuple[Path, str, str]
     hits = ix.search("weather ann arbor", semantic=False)
     assert hits and hits[0].who == "phone" and "Sunny and 61." in hits[0].body
     mail = ix.search("Pat", semantic=False)[0]
-    assert (
-        "One from Pat" not in mail.body and "mail_search(query=from:Pat)" in mail.body
-    )  # private: reference only
+    assert "One from Pat" not in mail.body and "mail_search()" in mail.body  # private: reference only
     agent._call_ended(SYNTH_LOG, {"call_id": "never-verified"})  # an unverified call writes nothing
     assert ix.count("turn") == 3
 
@@ -815,19 +819,22 @@ def test_an_action_is_prepared_then_done_once_with_its_code(paired: tuple[Path, 
     agent = _agent(paired, scout)
     args = {"title": "call Sam", "due": "2026-10-16T15:00", "list": None}
 
-    async def go() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    async def go() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
         first = (await agent._prepare_handler("reminder_add")(args, {"call_id": "call-a"})).to_dict()
         code = re.search(r"code (\d{4})", first["response"]).group(1)  # type: ignore[union-attr]
         done = (await agent._confirm({"code": code}, {"call_id": "call-a"})).to_dict()
         again = (await agent._confirm({"code": code}, {"call_id": "call-a"})).to_dict()
-        return first, done, again
+        return first, done, again, code
 
-    first, done, again = asyncio.run(go())
+    first, done, again, code = asyncio.run(go())
     assert first["response"].startswith("Not done yet. Would do: Add a reminder: call Sam, Friday at 3 PM?")
     assert first["action"] == [
         {
             "set_global_data": {
-                "semantic_state": {"pending_action": "Add a reminder: call Sam, Friday at 3 PM?"}
+                "semantic_state": {
+                    "pending_action": "Add a reminder: call Sam, Friday at 3 PM?",
+                    "pending_code": code,
+                }
             }
         }
     ]

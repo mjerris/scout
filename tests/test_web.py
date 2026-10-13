@@ -373,7 +373,7 @@ def test_tool_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
     run(main())
 
 
-def test_ask_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
+def test_ask_endpoint_needs_auth_and_validates_body(token_file: Path, phone_token: Path) -> None:
     async def main() -> None:
         async with serve() as srv, aiohttp.ClientSession() as s:
             url = srv.url + "/api/ask"
@@ -390,9 +390,65 @@ def test_ask_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
                 async with s.post(url, json=b, headers=srv.auth) as r:
                     assert r.status == 400, b
             assert srv.app.calls == []
-            async with s.post(url, json={"agent": "phone", "text": "weather?"}, headers=srv.auth) as r:
+            phone = {**srv.auth, web_mod.PHONE_HEADER: PHONE_TOKEN}
+            async with s.post(url, json={"agent": "phone", "text": "weather?"}, headers=phone) as r:
                 assert await r.json() == {"status": "ok", "text": "It's sunny.", "tier": "1"}
             assert srv.app.calls == [("ask", "phone", "weather?")]
+
+    run(main())
+
+
+PHONE_TOKEN = "p" * 43
+
+
+@pytest.fixture
+def phone_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "state" / "phone_api_token"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(PHONE_TOKEN + "\n")
+    monkeypatch.setattr(web_mod, "PHONE_TOKEN_PATH", path, raising=False)
+    return path
+
+
+def test_only_scout_phone_may_speak_for_the_phone(token_file: Path, phone_token: Path) -> None:
+    """The web token alone can't claim agent "phone" or confirmed/preview: that would skip
+    the caller's spoken yes. scout-phone sends its own credential (state/phone_api_token)."""
+
+    async def main() -> None:
+        async with serve() as srv, aiohttp.ClientSession() as s:
+            tool, ask = srv.url + "/api/tool", srv.url + "/api/ask"
+            header = getattr(web_mod, "PHONE_HEADER", "X-Scout-Phone")
+            right, wrong = {header: PHONE_TOKEN}, {header: "q" * 43}
+            refused: list[tuple[str, dict[str, Any], dict[str, str]]] = [
+                (tool, {"agent": "phone", "name": "reminder_add", "args": {}, "confirmed": True}, {}),
+                (tool, {"agent": "phone", "name": "weather", "args": {}}, wrong),
+                (tool, {"agent": "proj#1", "name": "reminder_add", "args": {}, "confirmed": True}, {}),
+                (tool, {"name": "reminder_add", "args": {}, "preview": True}, {}),
+                (ask, {"agent": "phone", "text": "weather?"}, {}),
+                (ask, {"agent": "phone", "text": "weather?"}, wrong),
+            ]
+            for url, body, extra in refused:
+                async with s.post(url, json=body, headers={**srv.auth, **extra}) as r:
+                    assert r.status == 403, body
+            assert srv.app.calls == []
+            body = {"agent": "phone", "name": "reminder_add", "args": {}, "confirmed": True}
+            async with s.post(tool, json=body, headers={**srv.auth, **right}) as r:
+                assert r.status == 200
+            async with s.post(ask, json={"agent": "phone", "text": "hi"}, headers={**srv.auth, **right}) as r:
+                assert r.status == 200
+            async with s.post(tool, json={"agent": "proj#9", "name": "weather"}, headers=srv.auth) as r:
+                assert r.status == 200  # the MCP server needs only the web token
+            async with s.post(ask, json={"text": "hi"}, headers=srv.auth) as r:
+                assert r.status == 200
+            assert [c[:3] for c in srv.app.calls] == [
+                ("tool", "phone", "reminder_add"),
+                ("ask", "phone", "hi"),
+                ("tool", "proj#9", "weather"),
+                ("ask", "session", "hi"),
+            ]
+            phone_token.unlink()  # scout-phone never ran: nothing speaks for the phone
+            async with s.post(tool, json=body, headers={**srv.auth, **right}) as r:
+                assert r.status == 403
 
     run(main())
 

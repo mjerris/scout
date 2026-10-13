@@ -49,6 +49,15 @@ async def _apple(helper: Path | None) -> bool:
 
 
 _LIMIT = 100
+_IDS_PER_CALL = 100  # reminder-get ids per helper call
+
+
+async def available(helper: Path | None = None) -> bool:
+    """Whether the Mac's Reminders (not Scout's own lists) answers right now."""
+    try:
+        return await _apple(helper)
+    except (ToolError, OSError):
+        return False
 
 
 def due_time(r: dict[str, Any]) -> dt.datetime | None:
@@ -188,9 +197,10 @@ async def add(a: dict[str, Any], helper: Path | None = None) -> str:
     )
 
 
-async def add_data(a: dict[str, Any], helper: Path | None = None) -> dict[str, Any]:
+async def add_data(a: dict[str, Any], helper: Path | None = None, mirror: bool = False) -> dict[str, Any]:
     """Add a reminder; the helper's record of it (with its id), or {"said": ...} when
-    Scout's own lists took it."""
+    Scout's own lists took it. mirror (Scout's task list): the Mac's Reminders only,
+    making the list when it's missing."""
     title = text_arg(a.get("title"), "title", 200)
     if not title:
         raise ToolError("title is required")
@@ -202,17 +212,27 @@ async def add_data(a: dict[str, Any], helper: Path | None = None) -> dict[str, A
         args += ["--due", due if "T" not in due and " " not in due else iso(t)]
     if notes := text_arg(a.get("notes"), "notes", 2000):
         args += ["--notes", notes]
+    if mirror:
+        args.append("--create-list")
     if not await _apple(helper):  # after the checks: bad arguments never touch either store
+        if mirror:
+            raise ToolError("Reminders can't be reached")
         return {"said": await locallists.add(a)}
-    r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
+    try:
+        r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
+    except ToolError as exc:
+        if not mirror or "--create-list" not in str(exc):
+            raise
+        # A helper built before --create-list: add to the list if it's there.
+        r = (await vcal(*args[:-1], helper=helper)).get("reminder", {})
     return r
 
 
-async def complete(a: dict[str, Any], helper: Path | None = None) -> str:
-    if str(a.get("id") or "").startswith("scout:"):
+async def complete(a: dict[str, Any], helper: Path | None = None, mirror: bool = False) -> str:
+    if str(a.get("id") or "").startswith("scout:") and not mirror:
         return await locallists.complete(a)
     if not await _apple(helper):
-        if _backend() == "scout":
+        if _backend() == "scout" and not mirror:
             return await locallists.complete(a)
         raise ToolError(  # a Reminders item: Scout's own lists don't have it
             "Reminders can't be reached right now, so that reminder can't be marked done yet. "
@@ -224,3 +244,54 @@ async def complete(a: dict[str, Any], helper: Path | None = None) -> str:
         raise ToolError("id and title are required (both from reminders_list)")
     r = (await vcal("reminder-complete", "--id", rid, "--title", title, helper=helper)).get("reminder", {})
     return f"Marked {r.get('title', title)} done" + (f" in {r['list']}." if r.get("list") else ".")
+
+
+async def states(ids: list[str], helper: Path | None = None) -> dict[str, Any]:
+    """Reminders by id, wherever they are and however many: {"reminders": [...], "missing":
+    [ids not found]}. The Mac's Reminders only."""
+    if not await _apple(helper):
+        raise ToolError("Reminders can't be reached")
+    out: dict[str, Any] = {"reminders": [], "missing": []}
+    for i in range(0, len(ids), _IDS_PER_CALL):
+        args = ["reminder-get"]
+        for rid in ids[i : i + _IDS_PER_CALL]:
+            args += ["--id", text_arg(rid, "id", 200)]
+        try:
+            data = await vcal(*args, helper=helper)
+        except ToolError as exc:
+            if "unknown command" not in str(exc):
+                raise
+            return await _states_from_all(ids, helper)  # a helper built before reminder-get
+        out["reminders"] += data.get("reminders", [])
+        out["missing"] += data.get("missing", [])
+    return out
+
+
+async def _states_from_all(ids: list[str], helper: Path | None) -> dict[str, Any]:
+    data = await vcal("reminders", "--include-completed", "--limit", "1000000", helper=helper)
+    want = set(ids)
+    found = [r for r in data.get("reminders", []) if str(r.get("id")) in want]
+    have = {str(r.get("id")) for r in found}
+    return {"reminders": found, "missing": [i for i in ids if i not in have]}
+
+
+async def update(a: dict[str, Any], helper: Path | None = None) -> dict[str, Any]:
+    """Change a reminder's title or due date (due "" clears it). The Mac's Reminders only."""
+    rid = text_arg(a.get("id"), "id", 200)
+    if not rid:
+        raise ToolError("id is required")
+    args = ["reminder-update", "--id", rid]
+    if "title" in a:
+        title = text_arg(a.get("title"), "title", 200)
+        if not title:
+            raise ToolError("title can't be empty")
+        args += ["--title", title]
+    if "due" in a:
+        due = text_arg(a.get("due"), "due", 40)
+        if due:
+            parse_time(due, "due")
+        args += ["--due", due or "none"]
+    if not await _apple(helper):
+        raise ToolError("Reminders can't be reached")
+    r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
+    return r

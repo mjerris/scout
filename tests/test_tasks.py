@@ -27,30 +27,40 @@ class FakeReminders:
     def __init__(self) -> None:
         self.added: list[dict[str, Any]] = []
         self.completed: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
         self.done_ids: set[str] = set()
+        self.asked: list[list[str]] = []
+        self.up = True
 
-    async def add_data(self, a: dict[str, Any], helper: Any = None) -> dict[str, Any]:
+    async def available(self, helper: Any = None) -> bool:
+        return self.up
+
+    async def add_data(self, a: dict[str, Any], helper: Any = None, mirror: bool = False) -> dict[str, Any]:
+        assert mirror  # the task mirror only ever writes to the Mac's Reminders
         self.added.append(a)
         return {"id": f"r{len(self.added)}", "title": a["title"], "list": a["list"]}
 
-    async def complete(self, a: dict[str, Any], helper: Any = None) -> str:
+    async def complete(self, a: dict[str, Any], helper: Any = None, mirror: bool = False) -> str:
+        assert mirror
         self.completed.append(a)
         return "ok"
 
-    async def reminder_data(
-        self, list_name: Any = None, include_completed: Any = False, **kw: Any
-    ) -> dict[str, Any]:
-        rs = [{"id": f"r{i + 1}", "list": a["list"], "completed": f"r{i + 1}" in self.done_ids}
-              for i, a in enumerate(self.added) if a["list"] == list_name]  # fmt: skip
-        return {"reminders": rs, "total": len(rs)}
+    async def update(self, a: dict[str, Any], helper: Any = None) -> dict[str, Any]:
+        self.updated.append(a)
+        return {"id": a["id"]}
+
+    async def states(self, ids: list[str], helper: Any = None) -> dict[str, Any]:
+        self.asked.append(list(ids))
+        known = {f"r{i + 1}" for i in range(len(self.added))}
+        return {"reminders": [{"id": i, "completed": i in self.done_ids} for i in ids if i in known],
+                "missing": [i for i in ids if i not in known]}  # fmt: skip
 
 
 @pytest.fixture
 def rem(monkeypatch: pytest.MonkeyPatch) -> FakeReminders:
     fake = FakeReminders()
-    monkeypatch.setattr(reminders_mac, "add_data", fake.add_data)
-    monkeypatch.setattr(reminders_mac, "complete", fake.complete)
-    monkeypatch.setattr(reminders_mac, "reminder_data", fake.reminder_data)
+    for name in ("available", "add_data", "complete", "update", "states"):
+        monkeypatch.setattr(reminders_mac, name, getattr(fake, name))
     monkeypatch.setattr(tasks, "_people", lambda: ["Pat"])
     return fake
 
@@ -180,9 +190,13 @@ def test_a_hand_edited_task_reaches_the_list(store: index.Index, rem: FakeRemind
 def test_without_reminders_access_tasks_still_work(
     store: index.Index, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def refuse(a: dict[str, Any], helper: Any = None) -> dict[str, Any]:
+    async def refuse(a: dict[str, Any], helper: Any = None, mirror: bool = False) -> dict[str, Any]:
         raise ToolError("Reminders access was refused")
 
+    async def up(helper: Any = None) -> bool:
+        return True
+
+    monkeypatch.setattr(reminders_mac, "available", up)
     monkeypatch.setattr(reminders_mac, "add_data", refuse)
     monkeypatch.setattr(tasks, "_people", lambda: [])
     out = asyncio.run(tasks.add_text({"title": "Order filters"}))

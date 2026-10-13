@@ -9,8 +9,12 @@
 //   vcal create --title S --start T --end T [--calendar ID] [--location S] [--notes S] [--all-day]
 //   vcal reminder-lists                 list reminder lists
 //   vcal reminders [--list NAME]... [--include-completed] [--due-before T] [--limit N]
-//   vcal reminder-add --title S [--list NAME] [--due T] [--notes S]
+//   vcal reminder-add --title S [--list NAME] [--due T] [--notes S] [--create-list]
+//   vcal reminder-get --id ID [--id ID]...      those reminders (ids not found: "missing")
+//   vcal reminder-update --id ID [--title S] [--due T|none]
 //   vcal reminder-complete --id ID [--title S]   (--title must match: a guard against a stale id)
+//
+// --create-list makes the named list (in the default list's account) when there is none.
 //
 // A list NAME matches its title ignoring case, spaces, punctuation and a trailing
 // "list" ("shopping list" finds "Shopping", "to-do" finds "To Do").
@@ -134,14 +138,43 @@ func norm(_ name: String) -> String {
     return n
 }
 
-func reminderLists(matching names: [String]) -> [EKCalendar]? {
-    if names.isEmpty { return nil }
-    let all = store.calendars(for: .reminder)
-    let found = all.filter { c in
+func findReminderLists(_ names: [String]) -> [EKCalendar] {
+    store.calendars(for: .reminder).filter { c in
         names.contains { $0 == c.calendarIdentifier || norm($0) == norm(c.title) }
     }
+}
+
+func reminderLists(matching names: [String]) -> [EKCalendar]? {
+    if names.isEmpty { return nil }
+    let found = findReminderLists(names)
     if found.isEmpty { fail("no reminder list matches \(names.joined(separator: ", "))") }
     return found
+}
+
+/// A new reminder list named `name`, in the same account as the default list.
+func createReminderList(_ name: String) -> EKCalendar {
+    guard let source = store.defaultCalendarForNewReminders()?.source else {
+        fail("no default reminder list to put a new list beside")
+    }
+    let c = EKCalendar(for: .reminder, eventStore: store)
+    c.title = name
+    c.source = source
+    do {
+        try store.saveCalendar(c, commit: true)
+    } catch {
+        fail("could not create the list \(name): \(error.localizedDescription)")
+    }
+    return c
+}
+
+/// Set a reminder's due date: a date ("2026-10-20") or a time (with an alert then).
+func setDue(_ r: EKReminder, _ due: String) {
+    let date = parseDate(due, "due")
+    let dateOnly = !due.contains("T") && !due.contains(" ")
+    var units: Set<Calendar.Component> = [.year, .month, .day]
+    if !dateOnly { units.formUnion(timeUnits) }
+    r.dueDateComponents = Calendar.current.dateComponents(units, from: date)
+    if !dateOnly { r.addAlarm(EKAlarm(absoluteDate: date)) }
 }
 
 func fetch(_ pred: NSPredicate) -> [EKReminder] {
@@ -182,7 +215,7 @@ func dueDate(_ r: EKReminder) -> Date? {
 
 let argv = CommandLine.arguments
 guard argv.count >= 2 else {
-    fail("usage: vcal status|request|calendars|events|create|reminder-lists|reminders|reminder-add|reminder-complete ...")
+    fail("usage: vcal status|request|calendars|events|create|reminder-lists|reminders|reminder-add|reminder-get|reminder-update|reminder-complete ...")
 }
 let rest = argv.dropFirst(2)
 
@@ -313,10 +346,12 @@ case "reminders":
 
 case "reminder-add":
     requireAccess(.reminder)
-    let o = options(rest)
+    let o = options(rest, bools: ["create-list"])
     guard let title = o["title"]?.last, !title.isEmpty else { fail("reminder-add needs --title") }
     let list: EKCalendar
-    if let names = o["list"], let found = reminderLists(matching: names) {
+    if let names = o["list"], o["create-list"] != nil, findReminderLists(names).isEmpty, let name = names.last {
+        list = createReminderList(name)
+    } else if let names = o["list"], let found = reminderLists(matching: names) {
         list = found[0]
     } else if let def = store.defaultCalendarForNewReminders() {
         list = def
@@ -328,20 +363,53 @@ case "reminder-add":
     r.title = title
     r.calendar = list
     if let n = o["notes"]?.last { r.notes = n }
-    if let due = o["due"]?.last {
-        let date = parseDate(due, "due")
-        let dateOnly = !due.contains("T") && !due.contains(" ")
-        var units: Set<Calendar.Component> = [.year, .month, .day]
-        if !dateOnly { units.formUnion(timeUnits) }
-        r.dueDateComponents = Calendar.current.dateComponents(units, from: date)
-        if !dateOnly { r.addAlarm(EKAlarm(absoluteDate: date)) }
-    }
+    if let due = o["due"]?.last { setDue(r, due) }
     do {
         try store.save(r, commit: true)
     } catch {
         fail("could not save: \(error.localizedDescription)")
     }
     emit(["created": true, "reminder": reminderInfo(r)])
+
+case "reminder-get":
+    requireAccess(.reminder)
+    let ids = options(rest)["id"] ?? []
+    if ids.isEmpty { fail("reminder-get needs --id") }
+    var found: [[String: Any]] = []
+    var missing: [String] = []
+    for id in ids {
+        if let r = store.calendarItem(withIdentifier: id) as? EKReminder {
+            found.append(reminderInfo(r))
+        } else {
+            missing.append(id)
+        }
+    }
+    emit(["reminders": found, "missing": missing])
+
+case "reminder-update":
+    requireAccess(.reminder)
+    let o = options(rest)
+    guard let id = o["id"]?.last, !id.isEmpty else { fail("reminder-update needs --id") }
+    guard let r = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("no reminder with id \(id)") }
+    if !(r.calendar?.allowsContentModifications ?? false) { fail("reminder list \(r.calendar?.title ?? "") is read-only") }
+    if let t = o["title"]?.last {
+        if t.isEmpty { fail("--title can't be empty") }
+        r.title = t
+    }
+    if let due = o["due"]?.last {
+        for a in r.alarms ?? [] where a.absoluteDate != nil { r.removeAlarm(a) }
+        if due == "none" {
+            r.dueDateComponents = nil
+        } else {
+            setDue(r, due)
+        }
+    }
+    do {
+        try store.save(r, commit: true)
+    } catch {
+        fail("could not save: \(error.localizedDescription)")
+    }
+    emit(["updated": true, "reminder": reminderInfo(r)])
 
 case "reminder-complete":
     requireAccess(.reminder)

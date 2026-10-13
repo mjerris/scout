@@ -10,9 +10,11 @@
 
     Pat asked for the revised numbers before Monday's review.
 
-The "- key: value" lines right after the title are the task's fields; the rest is its
-context. The number is the task's id; the index (kind "task", id task:<n>) is built from
-the files and follows edits. Only the memory service writes here.
+The "- key: value" lines right after the title (blank lines before them are skipped) are
+the task's fields; keys are lower-case letters and "_", read in any case. The rest is its
+context. The number is the task's id (tasks/.next keeps a deleted one from being reused);
+the index (kind "task", id task:<n>) is built from the files and follows edits. Only the
+memory service writes here.
 """
 
 from __future__ import annotations
@@ -24,13 +26,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .notefiles import next_number, write_atomic
+
 FIELDS = (
     "status", "owner", "due", "importance", "urgency", "effort", "pin",
     "source", "found", "done", "reminder",
 )  # fmt: skip
 STATUSES = ("open", "done", "dropped")
 _NAME = re.compile(r"^(\d+)-[^/]*\.md$")
-_FIELD = re.compile(r"^- ([a-z_]+):\s*(.*?)\s*$")
+_FIELD = re.compile(r"^- ([a-z_]+):\s*(.*?)\s*$", re.I)
+_KEY = re.compile(r"[a-z_]+")
 _lock = threading.Lock()
 
 
@@ -61,7 +66,18 @@ def _clean(value: Any) -> str:
     return " ".join(str(value).split()) if value is not None else ""
 
 
+def _key(k: Any) -> str | None:
+    """A field name as written (lower-case), or None if it can't be one."""
+    k = str(k).lower()
+    return k if _KEY.fullmatch(k) else None
+
+
+def _paragraphs(text: str) -> list[str]:
+    return [x.strip() for x in re.split(r"\n[ \t]*\n", text) if x.strip()]
+
+
 def render(title: str, fields: dict[str, Any], context: str) -> str:
+    fields = {k: v for k0, v in fields.items() if (k := _key(k0))}
     lines = [f"# {_clean(title)}"]
     for k in FIELDS:
         v = _clean(fields.get(k))
@@ -75,40 +91,46 @@ def render(title: str, fields: dict[str, Any], context: str) -> str:
 
 def read(p: Path) -> tuple[str, dict[str, str], str]:
     """(title, fields, context) of a task file."""
-    lines = p.read_text().splitlines()
+    lines = p.read_text().split("\n")  # not splitlines(): U+2028 and the like stay in the text
     title = lines.pop(0)[2:].strip() if lines and lines[0].startswith("# ") else ""
+    while lines and not lines[0].strip():
+        lines.pop(0)
     fields: dict[str, str] = {}
     while lines and (m := _FIELD.match(lines[0])):
-        fields[m.group(1)] = m.group(2)
+        fields[m.group(1).lower()] = m.group(2)
         lines.pop(0)
     return title, fields, "\n".join(lines).strip()
 
 
 def write(root: Path, title: str, fields: dict[str, Any], context: str) -> Path:
-    """A new task file, numbered one past the highest so far."""
+    """A new task file, numbered one past the highest so far (deleted ones included)."""
     with _lock:
         d = tasks_dir(root)
         d.mkdir(parents=True, exist_ok=True)
-        n = max((number(p) or 0 for p in files(root)), default=0) + 1
+        n = next_number(d, files(root))
         p = d / f"{n:04d}-{slug(title)}.md"
         f = {"status": "open", "owner": "me", "found": time.strftime("%Y-%m-%d %H:%M"), **fields}
-        p.write_text(render(title, f, context))
+        write_atomic(p, render(title, f, context))
         return p
 
 
 def update(p: Path, fields: dict[str, Any], add_context: str = "") -> None:
-    """Change some fields (a None or "" value removes one) and add to the context."""
+    """Change some fields (a None or "" value removes one) and add to the context the
+    paragraphs it doesn't already have."""
     with _lock:
         title, have, context = read(p)
         title = _clean(fields.pop("title", None)) or title
-        for k, v in fields.items():
+        for k0, v in fields.items():
+            if (k := _key(k0)) is None:
+                continue
             if v is None or _clean(v) == "":
                 have.pop(k, None)
             else:
                 have[k] = _clean(v)
-        if add_context.strip() and add_context.strip() not in context:
-            context = f"{context}\n\n{add_context.strip()}" if context else add_context.strip()
-        p.write_text(render(title, have, context))
+        old = _paragraphs(context)
+        new = [x for x in _paragraphs(add_context) if x not in old]
+        context = "\n\n".join([context.strip(), *new]).strip()
+        write_atomic(p, render(title, have, context))
 
 
 def parse(p: Path) -> list[dict[str, Any]]:

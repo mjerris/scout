@@ -388,6 +388,8 @@ async def _local_search(a: dict[str, Any]) -> str:
         for h in hits:
             if h.meta.get("private") or h.kind in _PRIVATE_KINDS:
                 h.body = ""
+            elif h.kind == "task":  # a task found in mail or a meeting: what came from there
+                h.title, h.body = tasks.shown(h.meta, h.title, h.body, pol.mode)
     return index.format_hits(hits)
 
 
