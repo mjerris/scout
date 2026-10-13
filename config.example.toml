@@ -73,6 +73,7 @@ remote_control = ""           # e.g. "scout" to show the session in Remote Contr
 auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]   # secrets stay unreadable
 auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
 extra_system_prompt = ""
+local_recall = true           # tier 1 also answers the weather, tasks and "what did Pat say about..." from Scout's records
 
 [web]
 enabled = true

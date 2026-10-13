@@ -1063,16 +1063,22 @@ class Assistant:
                 # Claude's context is fetched meanwhile, in case tier 1 passes (~1 s).
                 ctx = self._fetch_context(text) if fetch_context else None
                 decision = await self.tier1.decide(text, now)
+                # A recall may still pass after reading the records: keep fetching until it answers.
+                maybe = decision is not None and decision["tool"] == "recall"
                 if ctx is not None:
-                    if decision is None:
+                    if decision is None or maybe:
                         ctx.go.set()
                     else:  # tier 1 answers: no context needed
                         ctx.task.cancel()
                         self._context = None
                 if decision is not None:
-                    said, tier = await tier1.run(decision, now, self.privacy.summaries), 1
-                    private = decision["tool"] == "mail_summarize"
-                    self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
+                    said = await tier1.run(decision, now, self.privacy.summaries)
+                    if said is not None:  # None: the lookup couldn't answer it after all (Claude)
+                        tier, private = 1, tier1.is_private(decision)
+                        self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
+                        if ctx is not None and maybe:
+                            ctx.task.cancel()
+                            self._context = None
         except ToolError as exc:  # e.g. calendar access not allowed yet: say why
             said = f"Sorry, {exc}"
         except Exception:  # never let the local tiers lose a request: Claude takes it
@@ -1124,7 +1130,7 @@ class Assistant:
         # Wanted for tier 1, and for the email summaries Claude gets instead of email.
         if not name or not (self.cfg.claude.local_first or self.privacy.mode == "balanced"):
             return
-        model = tier1.LocalModel(name)
+        model = tier1.LocalModel(name, extra=self.cfg.claude.local_recall)
         try:
             await model.load()
         except Exception as exc:
@@ -1644,8 +1650,9 @@ class Assistant:
                 decision = await self.tier1.decide(text, now)
                 if decision is not None:
                     said = await tier1.run(decision, now, self.privacy.summaries)
-                    self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
-                    return said, "1", decision["tool"] == "mail_summarize"
+                    if said is not None:  # None: the lookup couldn't answer it after all (Claude)
+                        self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
+                        return said, "1", tier1.is_private(decision)
         except ToolError as exc:
             return f"Sorry, {exc}", "0", False
         except Exception:  # the local tiers never lose a request: Claude takes it

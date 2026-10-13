@@ -212,6 +212,7 @@ def test_unread_mail_is_summarized_locally(monkeypatch: pytest.MonkeyPatch) -> N
     said = asyncio.run(
         tier1.run({"tool": "mail_summarize", "args": {"unread_only": True}}, NOW, Summaries(_Model()))
     )
+    assert said is not None
     assert said.startswith("You have 2 unread emails. Rover says: Jennifer confirms")
     assert "pat says: Jennifer confirms" in said
 
@@ -277,5 +278,6 @@ def test_anything_from_someone_says_what_the_email_says(monkeypatch: pytest.Monk
     monkeypatch.setattr(mail_mac, "bodies", bodies)
     decision = {"tool": "mail_search", "args": {"query": "Rover"}}
     out = asyncio.run(tier1.run(decision, NOW, Summaries(Model())))
+    assert out is not None
     assert "Catherine will be home Tuesday" in out and "New message from Catherine (Wyatt)" not in out
     assert "Rover.com" not in out

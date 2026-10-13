@@ -34,7 +34,7 @@ call), since a confirmed call skips the room's spoken yes.
 |---|---|
 | Read tools (calendar, reminders, notes, tasks, mail, messages, weather, places, route, Starlink, local search) | Scout's shared tools, as SWAIG functions; mail and messages give what the privacy mode allows |
 | One-step writes to Scout's own lists (`note_add`, `task_add`, `task_done`, `task_update`) | Done at once, like at home (`task_done` also ticks off the task's reminder); the prompt tells the agent to be sure what the user wants first |
-| `ask_scout(request)` | Anything that needs Scout's own brain (memories, earlier conversations, Claude): Scout's tiers 0/1/Claude answer it as text |
+| `ask_scout(request)` | Anything that needs Scout's own brain (memories, earlier conversations, Claude): Scout's tiers 0/1/Claude answer it as text (tier 1 answers what's in Scout's records itself: recall.py) |
 | Action tools (reminder add/complete, calendar event, note delete) | Two steps: the first call returns what would happen (every field it will write; a note by its title) and a one-time code, and puts both in `semantic_state` (`pending_action`, `pending_code`); the agent reads it back; `confirm_action(code)` does it, behind a semantic gate that checks the caller's own yes in the conversation and that the code is `pending_code` (threshold 0.9). A call has one pending action: preparing another replaces it, and hanging up drops it. A confirm answers within 8 s; a re-send joins the running action, and one that's still going says it may have been done, so the agent checks before trying again |
 | Never by phone | sending email, or drafting it (that opens a window on the Mac) |
 
