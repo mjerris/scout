@@ -306,6 +306,17 @@ class StarlinkConfig:
 
 
 @dataclass
+class PhoneConfig:
+    # Talk to Scout from the phone app through SignalWire (docs/phone-design.md). Off
+    # unless turned on. api_token and signing_key are secrets: keep this file mode 600.
+    enabled: bool = False
+    space: str = ""  # e.g. "example.signalwire.com"
+    project_id: str = ""
+    api_token: str = ""
+    signing_key: str = ""
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -342,6 +353,7 @@ class Config:
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
+    phone: PhoneConfig = field(default_factory=PhoneConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)
     memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)
