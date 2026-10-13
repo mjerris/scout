@@ -45,11 +45,11 @@ def test_a_note_is_not_half_saved_when_the_index_is_down(monkeypatch: pytest.Mon
     store = index.default()
     monkeypatch.setattr(index, "default", lambda: Down())
     with pytest.raises(ToolError, match="memory service"):
-        asyncio.run(notes.add("propane is low"))
+        asyncio.run(notes.add("water filter is due"))
     assert _rows("SELECT COUNT(*) FROM notes") == [(0,)]  # a retry won't make a duplicate
     monkeypatch.setattr(index, "default", lambda: store)
-    asyncio.run(notes.add("propane is low"))
-    assert [n["title"] for n in asyncio.run(notes.find("propane"))] == ["propane is low"]
+    asyncio.run(notes.add("water filter is due"))
+    assert [n["title"] for n in asyncio.run(notes.find("filter"))] == ["water filter is due"]
     monkeypatch.setattr(index, "default", lambda: Down())
     with pytest.raises(ToolError):
         asyncio.run(notes.delete({"id": 1}))

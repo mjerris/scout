@@ -26,19 +26,17 @@ def _no_apple(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
 
 def test_notes_are_saved_found_and_deleted(_no_apple: list[tuple[str, ...]]) -> None:
     async def go() -> tuple[str, str, str, str, str]:
-        a = await notes.add_text({"text": "Propane: refilled both tanks at Tractor Supply in Cadillac, $40"})
+        a = await notes.add_text({"text": "Oil change: done at the shop in Cadillac, $40"})
         b = await notes.add_text(
             {"text": "Dump station at Mitchell State Park is free", "title": "Dump stations"}
         )
-        found = await notes.find_text({"query": "propane"})
+        found = await notes.find_text({"query": "oil"})
         gone = await notes.delete({"id": 1})
-        return a, b, found, gone, await notes.find_text({"query": "propane"})
+        return a, b, found, gone, await notes.find_text({"query": "oil"})
 
     a, b, found, gone, after = asyncio.run(go())
-    assert (
-        a == "Saved note 1: Propane: refilled both tanks at Tractor Supply in Cadillac,."[:0] + a
-    )  # shape below
-    assert a.startswith("Saved note 1: Propane: refilled both tanks") and a.endswith(".")
+    assert a == "Saved note 1: Oil change: done at the shop in Cadillac,."[:0] + a  # shape below
+    assert a.startswith("Saved note 1: Oil change: done at the shop") and a.endswith(".")
     assert b == "Saved note 2: Dump stations."
     assert found.startswith("Note 1 (") and found.endswith("Cadillac, $40")
     assert gone.startswith("Deleted note 1: ") and after == "No notes found."

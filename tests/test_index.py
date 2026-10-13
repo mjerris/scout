@@ -11,7 +11,7 @@ import pytest
 
 from scout import index
 
-SYNONYMS = {"boss": "manager", "site": "campsite", "propane": "gas"}
+SYNONYMS = {"boss": "manager", "site": "campsite"}
 
 
 class FakeEmbedder:

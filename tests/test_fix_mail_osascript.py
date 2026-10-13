@@ -59,7 +59,7 @@ def test_every_osascript_call_stops_option_parsing_before_its_arguments(
         await mac.osascript("return 1", HOSTILE)
         await mail_mac._applescript("return 1", HOSTILE)
         await mail_mac._jxa("1", HOSTILE)
-        await notes.add("propane is low")
+        await notes.add("water filter is due")
         await notes.delete({"id": 1})
 
     asyncio.run(go())
