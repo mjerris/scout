@@ -179,6 +179,9 @@ class LocalModel:
         from huggingface_hub import snapshot_download
         from mlx_lm import load
 
+        from .asr import limit_mlx_cache
+
+        limit_mlx_cache()
         path = snapshot_download(self.name, local_files_only=True)  # fetched by scripts/fetch-models.sh
         loaded = load(path)  # (model, tokenizer[, config])
         self._model, self._tok = loaded[0], loaded[1]

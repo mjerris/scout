@@ -14,18 +14,22 @@ and the newest items, found 34%.
 The vectors live in SQLite (table vecs) and, for searching, in one in-memory matrix
 (float32; 384 dimensions is ~1.5 KB a vector). An item has one vector per window of
 its text (up to 20), so a short item takes ~1.5 KB and a long one up to ~30 KB; 100,000
-vectors are ~150 MB. An idle background pass embeds new items, and a search embeds the
-few text hits still without one, so nothing is ever unreachable by full text, and
+vectors are ~150 MB. The matrix loads in the background when the service starts. An
+idle background pass embeds new items (table pending lists what still needs a vector,
+newest first), a few windows per call to the model so a search's own embedding gets in
+between; a search embeds only a few windows itself (its text hits, then the newest new
+items of the kinds it asks for), so nothing is ever unreachable by full text, and
 nothing leaves the Mac.
 
-The embedder is bge-small-en-v1.5 (ONNX on CPU through fastembed, ~0.2 GB in memory,
-loads in ~4 s); it unloads after a while idle. The model name and dimension are stored
+The embedder is bge-small-en-v1.5 (ONNX on CPU through fastembed, ~0.7 GB resident
+while loaded, loads in ~4 s); it unloads after 15 minutes idle ([index] unload_after_s). The model name and dimension are stored
 with each vector, so changing either re-embeds in the background.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -34,7 +38,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +65,7 @@ CREATE TABLE IF NOT EXISTS docs (
     sig TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS docs_kind_ts ON docs(kind, ts);
+CREATE INDEX IF NOT EXISTS docs_ts ON docs(ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
     title, body, who, content='docs', content_rowid='rowid', tokenize='porter unicode61'
 );
@@ -88,6 +93,12 @@ CREATE TABLE IF NOT EXISTS vecs (
     part INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (id, model, part)
 );
+-- Items whose text changed since their vectors were made (or that have none): put()
+-- adds them, storing their vectors removes them, so finding work never scans the store.
+CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, kind TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS pending_ts ON pending(ts);
+CREATE INDEX IF NOT EXISTS pending_kind_ts ON pending(kind, ts);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
@@ -135,9 +146,13 @@ class LocalEmbedder:
         dims: int = 0,  # 0: the model's own size
         idle_s: float = 900,
         threads: int = 2,
+        batch: int = 4,
     ) -> None:
+        # 2 threads and batches of 1-4 measured fastest on this Mac's CPU (38 docs/s in
+        # ~250 MB at batch 1); batch 16 was slower (28-32 docs/s) and took ~470 MB.
         self.name = name
         self.threads = threads
+        self.batch = batch
         self.dims = dims
         self.idle_s = idle_s
         self.model = f"{name}@{dims}" if dims else name
@@ -162,11 +177,11 @@ class LocalEmbedder:
             if self._nomic:
                 prefix = "search_query: " if query else "search_document: "
                 raw = np.array(
-                    list(self._m.embed([prefix + t for t in texts], batch_size=16)), dtype=np.float32
+                    list(self._m.embed([prefix + t for t in texts], batch_size=self.batch)), dtype=np.float32
                 )
             else:
                 f = self._m.query_embed if query else self._m.passage_embed
-                raw = np.array(list(f(list(texts), batch_size=16)), dtype=np.float32)
+                raw = np.array(list(f(list(texts), batch_size=self.batch)), dtype=np.float32)
         if self._nomic:
             # Matryoshka: layer-norm, then cut (nomic's recipe).
             raw = (raw - raw.mean(axis=1, keepdims=True)) / (raw.std(axis=1, keepdims=True) + 1e-6)
@@ -226,17 +241,6 @@ class Matrix:
 
     def _code(self, kind: str) -> int:
         return self.codes.setdefault(kind, len(self.codes))
-
-    @classmethod
-    def build(cls, dims: int, ids: list[str], kinds: list[str], vecs: np.ndarray, ts: np.ndarray) -> Matrix:
-        """A matrix of these rows at once (an item's rows next to each other)."""
-        m = cls(dims)
-        m.ids, m.vecs, m.ts = ids, vecs, ts
-        m.kind = np.fromiter((m._code(k) for k in kinds), np.int32, len(kinds))
-        m.alive = np.ones(len(ids), bool)
-        for r, id in enumerate(ids):
-            m.by_id.setdefault(id, []).append(r)
-        return m
 
     def _grow(self, n: int) -> None:
         if n <= len(self.alive):
@@ -377,24 +381,81 @@ class Index:
     _conn: sqlite3.Connection = field(init=False, repr=False)
     journal_root: Path | None = None  # where the markdown journal lives (journal.py)
     keep_private: Callable[[], bool] = lambda: False  # keep answers from mail in the journal
-    _matrix: Matrix | None = field(init=False, repr=False, default=None)  # loaded on first use
+    _matrix: Matrix | None = field(init=False, repr=False, default=None)  # see load_matrix
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
     _sync_lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
-    _pending: bool = field(init=False, repr=False, default=True)  # items may lack vectors
     _old_vecs: bool = field(init=False, repr=False, default=True)  # another model's vectors may remain
+    _counts: dict[str, int] | None = field(init=False, repr=False, default=None)  # items per kind
+    # While the matrix loads (without the lock): the items changed meanwhile, redone after.
+    _loading: threading.Event | None = field(init=False, repr=False, default=None)
+    _dirty: set[str] | None = field(init=False, repr=False, default=None)
+    # A search's embedding goes first: the background waits while one is waiting or running.
+    _turn: threading.Condition = field(init=False, repr=False, default_factory=threading.Condition)
+    _urgent: int = field(init=False, repr=False, default=0)
+    _fresh: bool = field(init=False, repr=False, default=False)  # new text since the background looked
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Safe in WAL: a power cut can lose the last commits, never the store.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA journal_size_limit=67108864")  # the WAL file shrinks back to 64 MB
+        self._conn.execute("PRAGMA analysis_limit=1000")  # PRAGMA optimize stays quick on a big store
         self._add_vector_parts()
         self._conn.executescript(_SCHEMA)
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(files)")]
         for col in ("ids", "stat"):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
+        self._fill_pending()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="index")
+
+    def _fill_pending(self) -> None:
+        """Once per model (the first start with table pending, or a new model): every item
+        without its current vectors (or, if long, only the one from before an item had one
+        per window) goes into pending. From then on put() and _store_vectors keep it."""
+        if self.embedder is None:
+            return
+        model = self.embedder.model
+        row = self._conn.execute("SELECT value FROM settings WHERE key = 'pending_model'").fetchone()
+        if row and row[0] == model:
+            return
+        t0 = time.perf_counter()
+        with self._tx():
+            n = self._conn.execute(
+                "INSERT OR IGNORE INTO pending(id, kind, ts) SELECT d.id, d.kind, d.ts FROM docs d "
+                "LEFT JOIN vecs v0 ON v0.id = d.id AND v0.model = ? AND v0.part = 0 AND v0.sig = d.sig "
+                "LEFT JOIN vecs v1 ON v1.id = d.id AND v1.model = ? AND v1.part = 1 AND v1.sig = d.sig "
+                "WHERE v0.id IS NULL OR (length(d.body) > ? AND v1.id IS NULL)",
+                (model, model, EMBED_CHARS),
+            ).rowcount
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES ('pending_model', ?)", (model,)
+            )
+        log.info("index: %d items to embed for %s (found in %.2fs)", n, model, time.perf_counter() - t0)
+
+    @contextlib.contextmanager
+    def _tx(self) -> Iterator[None]:
+        """One transaction (with the lock held), or part of the one already open."""
+        with self._lock:
+            if self._conn.in_transaction:
+                yield
+                return
+            self._conn.execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                self._counts = None  # counted again when next asked
+                raise
+            self._conn.execute("COMMIT")
+
+    def _changed(self, id: str) -> None:
+        """Note an item whose vectors, kind or time changed while the matrix loads."""
+        if self._dirty is not None:
+            self._dirty.add(id)
 
     def _add_vector_parts(self) -> None:
         """Once: vecs from before an item could have several vectors (one per window of
@@ -427,14 +488,26 @@ class Index:
         sig = _sig(title, body, who)
         meta = meta or {}
         when = ts
-        with self._lock:
+        with self._tx():
             row = self._conn.execute("SELECT kind, ts, meta, sig FROM docs WHERE id = ?", (id,)).fetchone()
             if row and (row[0], row[3]) == (kind, sig) and ts in (None, row[1]) and _meta(row[2]) == meta:
                 return False
             if when is None:
                 when = row[1] if row else time.time()
             if not row or row[3] != sig:
-                self._pending = True
+                self._conn.execute(
+                    "INSERT INTO pending(id, kind, ts) VALUES (?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, ts=excluded.ts",
+                    (id, kind, when),
+                )
+                self._fresh = True
+            elif (row[0], row[1]) != (kind, when):
+                self._conn.execute("UPDATE pending SET kind = ?, ts = ? WHERE id = ?", (kind, when, id))
+            if self._counts is not None and (not row or row[0] != kind):
+                self._counts[kind] = self._counts.get(kind, 0) + 1
+                if row:
+                    self._counts[row[0]] -= 1
+            self._changed(id)
             if self._matrix is not None:
                 if row and row[3] == sig:
                     self._matrix.touch(id, kind, when)  # same text: the vector still holds
@@ -458,9 +531,13 @@ class Index:
         return True
 
     def delete(self, id: str) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM docs WHERE id = ?", (id,))
+        with self._tx():
+            row = self._conn.execute("DELETE FROM docs WHERE id = ? RETURNING kind", (id,)).fetchone()
             self._conn.execute("DELETE FROM vecs WHERE id = ?", (id,))
+            self._conn.execute("DELETE FROM pending WHERE id = ?", (id,))
+            if row and self._counts is not None:
+                self._counts[row[0]] -= 1
+            self._changed(id)
             if self._matrix is not None:
                 self._matrix.drop(id)
 
@@ -488,20 +565,19 @@ class Index:
         return _hit(row) if row else None
 
     def count(self, kind: str | None = None) -> int:
+        """Items of a kind (or all): counted once, then kept up to date by put and delete."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT count(*) FROM docs WHERE ? IS NULL OR kind = ?", (kind, kind)
-            ).fetchone()
-            return int(row[0])
+            if self._counts is None:
+                self._counts = dict(self._conn.execute("SELECT kind, count(*) FROM docs GROUP BY kind"))
+            return sum(self._counts.values()) if kind is None else self._counts.get(kind, 0)
 
     def recent(
         self, kinds: Sequence[str] | None = None, limit: int = 20, since: float | None = None
     ) -> list[Hit]:
+        """The newest items (of these kinds, since `since`), newest first."""
+        sql, args = _recent_sql(kinds, since, limit)
         with self._lock:
-            rows = self._conn.execute(
-                _RECENT_SQL,
-                (*_filter_args(kinds, since), limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         return [_hit(r) for r in rows]
 
     def prune(self, kind: str, before: float) -> int:
@@ -721,10 +797,13 @@ class Index:
         q = fts_query(query)
         if not q:
             return []
+        where, args = _filters(kinds, since, "d.")
         with self._lock:
             rows = self._conn.execute(
-                _TEXT_SQL,
-                (q, *_filter_args(kinds, since), limit),
+                "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta, bm25(docs_fts, 3.0, 1.0, 2.0) AS r "  # noqa: S608 (only placeholders and fixed column names are joined in)
+                f"FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?{where} "
+                "ORDER BY r LIMIT ?",
+                (q, *args, limit),
             ).fetchall()
         out = []
         for row in rows:
@@ -750,21 +829,29 @@ class Index:
             semantic = bool(getattr(self.embedder, "loaded", True))
         if not semantic or self.embedder is None:
             return text[:limit]
-        # Items without a vector yet: embed a few now, text hits first, then the newest
-        # (the background does the rest), so what was just added is found by meaning.
+        # Items without a vector yet: embed a few windows now (text hits first, then the
+        # newest new items of the kinds asked for), so what was just added is found by
+        # meaning; the background does the rest. Ahead of the background: it waits
+        # between its small calls to the model while a search embeds.
         try:
             unranked, used = self._ensure_vectors(text, self.max_new_per_search, MAX_WINDOWS_PER_SEARCH)
-            if not unranked and used < MAX_WINDOWS_PER_SEARCH and (self._pending or self._old_vecs):
-                self.embed_pending(self.max_new_per_search, MAX_WINDOWS_PER_SEARCH - used)
-            q = self.embedder.embed([query], query=True)[0]
+            if used < MAX_WINDOWS_PER_SEARCH:
+                seen = {h.id for h in text}
+                new = [h for h in self._pending_of(kinds, since, self.max_new_per_search) if h.id not in seen]
+                now = _within(new, self.max_new_per_search, MAX_WINDOWS_PER_SEARCH - used, at_least_one=False)
+                if now:
+                    self._embed(now, urgent=True)
+            q = self._call_embedder([query], query=True, urgent=True)[0]
         except Exception as exc:  # the model can't load (offline, missing): full text still works
             log.warning(
                 "index: searching by meaning failed (%s: %s); full text only", type(exc).__name__, exc
             )
             return text[:limit]
         waiting = {h.id for h in unranked}
+        self.load_matrix()
         with self._lock:
-            m = self._loaded_matrix()
+            m = self._matrix
+            assert m is not None  # noqa: S101 (loaded above; never unset)
             sims = dict(m.top(q, max(limit * 4, 60), kinds, since))
             # A text hit just outside the meaning shortlist still gets its own similarity.
             sims.update(m.best([h.id for h in text if h.id not in sims and h.id not in waiting], q))
@@ -803,33 +890,100 @@ class Index:
             ).fetchall()
         return [_hit(r) for r in rows]
 
-    def _loaded_matrix(self) -> Matrix:
-        """The in-memory matrix of the embedder's current vectors (with the lock held)."""
+    def load_matrix(self) -> Matrix:
+        """The in-memory matrix of the embedder's current vectors, read from the store the
+        first time (the service does it in the background at start). The read streams rows
+        into one preallocated array through its own connection, without the lock, so the
+        store stays usable meanwhile; items changed during it are redone after. A second
+        caller waits for the read already under way."""
         if self.embedder is None:
             raise RuntimeError("no embedder")
-        if self._matrix is None:
+        while True:
+            with self._lock:
+                if self._matrix is not None:
+                    return self._matrix
+                loading = self._loading
+                if loading is None:
+                    loading = self._loading = threading.Event()
+                    self._dirty = set()
+                    break
+            loading.wait()  # another thread is reading it; if that failed, read it here
+        try:
             t0 = time.perf_counter()
-            rows = self._conn.execute(
-                "SELECT v.id, v.vec, d.kind, d.ts FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
-                "WHERE v.model = ? ORDER BY v.id, v.part",
-                (self.embedder.model,),
-            ).fetchall()
-            dims = len(rows[0][1]) // 4 if rows else 0
-            rows = [r for r in rows if len(r[1]) == dims * 4]
-            vecs = np.empty((len(rows), dims), np.float32)
-            for i, r in enumerate(rows):
-                vecs[i] = np.frombuffer(r[1], dtype=np.float32)
-            ts = np.fromiter((float(r[3]) for r in rows), np.float64, len(rows))
-            m = Matrix.build(dims, [r[0] for r in rows], [r[2] for r in rows], vecs, ts)
-            self._matrix = m
-            if rows:
+            m = self._read_matrix(self.embedder.model)
+            with self._lock:
+                for id in self._dirty or ():
+                    m = self._reload_item(m, id)
+                self._matrix = m
+            if len(m.ids):
                 log.info(
                     "index: %d items (%d vectors) in memory in %.2fs",
                     len(m),
-                    len(rows),
+                    len(m.ids),
                     time.perf_counter() - t0,
                 )
-        return self._matrix
+            return m
+        finally:
+            with self._lock:
+                self._loading, self._dirty = None, None
+            loading.set()
+
+    def _loaded_matrix(self) -> Matrix:
+        """load_matrix, by its earlier name."""
+        return self.load_matrix()
+
+    def _read_matrix(self, model: str) -> Matrix:
+        conn = sqlite3.connect(self.path)
+        try:
+            # Rows in storage order (an item's are stored together); the count (from the
+            # primary key's index) sizes the array, the join drops vectors of old text.
+            n = int(conn.execute("SELECT count(*) FROM vecs WHERE model = ?", (model,)).fetchone()[0])
+            m = Matrix(0)
+            ids: list[str] = []
+            kind = np.zeros(n, np.int32)
+            ts = np.zeros(n, np.float64)
+            vecs = np.zeros((0, 0), np.float32)
+            i = 0
+            for id, blob, k, t in conn.execute(
+                "SELECT v.id, v.vec, d.kind, d.ts FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
+                "WHERE v.model = ?",
+                (model,),
+            ):
+                if not m.dims:
+                    m.dims = len(blob) // 4
+                    vecs = np.empty((n, m.dims), np.float32)
+                if len(blob) != m.dims * 4 or i >= n:
+                    continue
+                vecs[i] = np.frombuffer(blob, np.float32)
+                kind[i] = m._code(k)
+                ts[i] = t
+                ids.append(id)
+                i += 1
+        finally:
+            conn.close()
+        m.ids, m.vecs, m.kind, m.ts = ids, vecs[:i], kind[:i], ts[:i]
+        m.alive = np.ones(i, bool)
+        for r, id in enumerate(ids):
+            m.by_id.setdefault(id, []).append(r)
+        return m
+
+    def _reload_item(self, m: Matrix, id: str) -> Matrix:
+        """Bring one item's rows in the matrix up to date with the store (lock held)."""
+        if self.embedder is None:
+            return m
+        rows = self._conn.execute(
+            "SELECT v.vec, d.kind, d.ts FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "
+            "WHERE v.id = ? AND v.model = ? ORDER BY v.part",
+            (id, self.embedder.model),
+        ).fetchall()
+        if not rows:
+            m.drop(id)
+            return m
+        if not m.dims and not len(m.ids):
+            m = Matrix(len(rows[0][0]) // 4)
+        vs = [np.frombuffer(r[0], np.float32) for r in rows if len(r[0]) == m.dims * 4]
+        m.set(id, vs, str(rows[0][1]), float(rows[0][2]))
+        return m
 
     async def asearch(self, query: str, **kw: Any) -> list[Hit]:
         return await asyncio.get_running_loop().run_in_executor(self._pool, lambda: self.search(query, **kw))
@@ -854,14 +1008,34 @@ class Index:
                 )
             }
         missing = [h for h in hits if h.id not in have]
-        now = _within(missing, max_new, max_windows)
+        # One too long for the budget waits for the background (and ranks by text).
+        now = _within(missing, max_new, max_windows, at_least_one=False)
         if now:
-            self._embed(now)
-        return missing[len(now) :], sum(len(_doc_texts(h)) for h in now)
+            self._embed(now, urgent=True)
+        done = {h.id for h in now}
+        return [h for h in missing if h.id not in done], sum(len(_doc_texts(h)) for h in now)
 
-    def _embed(self, hits: Sequence[Hit]) -> None:
+    def _call_embedder(self, texts: Sequence[str], query: bool = False, urgent: bool = False) -> np.ndarray:
+        """One call to the model. An urgent one (a search) is next in line: the background
+        waits for it before its next call (at most URGENT_WAIT_S, so it can't starve)."""
+        if self.embedder is None:
+            raise RuntimeError("no embedder")
+        if not urgent:
+            with self._turn:
+                self._turn.wait_for(lambda: self._urgent == 0, URGENT_WAIT_S)
+            return self.embedder.embed(texts, query=query)
+        with self._turn:
+            self._urgent += 1
+        try:
+            return self.embedder.embed(texts, query=query)
+        finally:
+            with self._turn:
+                self._urgent -= 1
+                self._turn.notify_all()
+
+    def _embed(self, hits: Sequence[Hit], urgent: bool = False) -> None:
         """Embed every window of these items and keep the vectors, in calls of at most
-        EMBED_BATCH_WINDOWS windows."""
+        EMBED_BATCH_WINDOWS windows (so a search waits for one small call at most)."""
         if self.embedder is None:
             raise RuntimeError("no embedder")
         t0 = time.perf_counter()
@@ -870,7 +1044,11 @@ class Index:
         while at < len(hits):
             batch = _within(hits[at:], len(hits), EMBED_BATCH_WINDOWS)
             texts = [_doc_texts(h) for h in batch]
-            flat = self.embedder.embed([t for ts in texts for t in ts])
+            all_texts = [t for ts in texts for t in ts]
+            flat = np.concatenate([
+                self._call_embedder(all_texts[j : j + EMBED_BATCH_WINDOWS], urgent=urgent)
+                for j in range(0, len(all_texts), EMBED_BATCH_WINDOWS)
+            ])  # fmt: skip
             parts, i = [], 0
             for ts in texts:
                 parts.append(flat[i : i + len(ts)])
@@ -885,7 +1063,7 @@ class Index:
         if self.embedder is None:
             raise RuntimeError("no embedder")
         model = self.embedder.model
-        with self._lock:
+        with self._tx():
             for h, vecs in zip(hits, parts, strict=True):
                 # Keyed by the sig of the text that was embedded; if the item changed while
                 # it was being embedded, drop the stale vectors (the next pass redoes them).
@@ -899,6 +1077,8 @@ class Index:
                     "INSERT INTO vecs(id, model, sig, vec, part) VALUES (?,?,?,?,?)",
                     [(h.id, model, sig, v.tobytes(), n) for n, v in enumerate(vs)],
                 )
+                self._conn.execute("DELETE FROM pending WHERE id = ?", (h.id,))
+                self._changed(h.id)
                 if self._matrix is not None and vs:
                     if not self._matrix.dims:
                         self._matrix = Matrix(len(vs[0]))
@@ -908,20 +1088,17 @@ class Index:
     def embed_pending(self, limit: int = 64, max_windows: int | None = None) -> int:
         """Embed up to `limit` items (within `max_windows` windows) whose vectors are
         missing or out of date (a long item stored before it had one per window counts
-        too), newest first. With none left, removes a batch of another model's vectors."""
+        too), newest first, from table pending. With none left, removes a batch of
+        another model's vectors."""
         if self.embedder is None:
             return 0
-        rows = []
         with self._lock:
-            if self._pending:
-                rows = self._conn.execute(
-                    "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM docs d "
-                    "LEFT JOIN vecs v0 ON v0.id = d.id AND v0.model = ? AND v0.part = 0 AND v0.sig = d.sig "
-                    "LEFT JOIN vecs v1 ON v1.id = d.id AND v1.model = ? AND v1.part = 1 AND v1.sig = d.sig "
-                    "WHERE v0.id IS NULL OR (length(d.body) > ? AND v1.id IS NULL) ORDER BY d.ts DESC LIMIT ?",
-                    (self.embedder.model, self.embedder.model, EMBED_CHARS, limit),
-                ).fetchall()
-                self._pending = bool(rows)  # a put sets it again (under this lock)
+            self._fresh = False
+            rows = self._conn.execute(
+                "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM pending p "
+                "JOIN docs d ON d.id = p.id ORDER BY p.ts DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         hits = [_hit(r) for r in rows]
         if max_windows is not None:
             hits = _within(hits, limit, max_windows)
@@ -930,6 +1107,22 @@ class Index:
         elif self._old_vecs:
             self._drop_old_vectors()
         return len(hits)
+
+    def _pending_of(self, kinds: Sequence[str] | None, since: float | None, limit: int) -> list[Hit]:
+        """The newest items (of these kinds) still waiting for vectors (indexed: cheap)."""
+        where, args = _filters(kinds, since, "p.")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM pending p "  # noqa: S608 (only placeholders and fixed column names are joined in)
+                f"JOIN docs d ON d.id = p.id WHERE 1{where} ORDER BY p.ts DESC LIMIT ?",
+                (*args, limit),
+            ).fetchall()
+        return [_hit(r) for r in rows]
+
+    def optimize(self) -> None:
+        """SQLite's own upkeep (fresh statistics for the query planner), while idle."""
+        with self._lock:
+            self._conn.execute("PRAGMA optimize")
 
     def _drop_old_vectors(self, batch: int = 5000) -> None:
         """One batch of vectors from another model (or size): the current one's are done."""
@@ -958,11 +1151,18 @@ class Index:
                 log.exception("loading the embedding model failed")
         backlog = True  # look right away after starting
         last_files = 0.0
+        last_optimize = time.monotonic()
         done = 0  # embedded in this run of batches
         while True:
             # A backlog (a first sync, a new model) is worked through batch after batch;
-            # otherwise look again every every_s.
-            await asyncio.sleep(BACKLOG_PAUSE_S if backlog else every_s)
+            # otherwise look again every every_s, or within a second of new text.
+            wait = BACKLOG_PAUSE_S if backlog else every_s
+            t0 = time.monotonic()
+            while True:
+                left = wait - (time.monotonic() - t0)
+                if left <= 0 or (not backlog and self._fresh and idle()):
+                    break
+                await asyncio.sleep(min(left, 1.0))
             backlog = False
             try:
                 if self.journal_root is not None and time.monotonic() - last_files >= every_s:
@@ -979,6 +1179,9 @@ class Index:
                         done = 0
                     if n:
                         continue
+                    if time.monotonic() - last_optimize >= OPTIMIZE_EVERY_S:
+                        last_optimize = time.monotonic()
+                        await loop.run_in_executor(self._pool, self.optimize)
                 unload = getattr(self.embedder, "unload_if_idle", None)
                 if unload is not None:
                     await loop.run_in_executor(self._pool, unload)
@@ -991,24 +1194,36 @@ class Index:
         self._pool.shutdown(wait=False)
 
 
-# Fixed filter clauses, parameterized by _filter_args: kinds (a JSON list, or NULL for
-# all) and a start time (or NULL).
-_RECENT_SQL = (
-    "SELECT id, kind, title, body, who, ts, meta FROM docs "
-    "WHERE (? IS NULL OR kind IN (SELECT value FROM json_each(?))) AND (? IS NULL OR ts >= ?) "
-    "ORDER BY ts DESC LIMIT ?"
-)
-_TEXT_SQL = (
-    "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta, bm25(docs_fts, 3.0, 1.0, 2.0) AS r "
-    "FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ? "
-    "AND (? IS NULL OR d.kind IN (SELECT value FROM json_each(?))) AND (? IS NULL OR d.ts >= ?) "
-    "ORDER BY r LIMIT ?"
-)
+# Filters are written into each statement only when given, so SQLite can use the
+# indexes (docs_kind_ts, docs_ts); "? IS NULL OR ..." would keep it from them.
+_COLS = "id, kind, title, body, who, ts, meta"
 
 
-def _filter_args(kinds: Sequence[str] | None, since: float | None) -> tuple[Any, ...]:
-    k = json.dumps(list(kinds)) if kinds else None
-    return (k, k, since, since)
+def _filters(kinds: Sequence[str] | None, since: float | None, col: str = "") -> tuple[str, list[Any]]:
+    """' AND kind IN (?,..) AND ts >= ?' (each only when given) and its arguments."""
+    sql, args = "", list[Any]()
+    if kinds:
+        sql += f" AND {col}kind IN ({','.join('?' * len(kinds))})"
+        args += list(kinds)
+    if since is not None:
+        sql += f" AND {col}ts >= ?"
+        args.append(since)
+    return sql, args
+
+
+def _recent_sql(kinds: Sequence[str] | None, since: float | None, limit: int) -> tuple[str, list[Any]]:
+    """The newest items: one index range read backwards per kind (several kinds: the
+    newest `limit` of each, merged), never a sort of the whole store."""
+    if not kinds or len(set(kinds)) == 1:
+        where, args = _filters(kinds[:1] if kinds else None, since)
+        sql = f"SELECT {_COLS} FROM docs WHERE 1{where} ORDER BY ts DESC LIMIT ?"  # noqa: S608 (only placeholders and fixed column names are joined in)
+        return sql, [*args, limit]
+    parts, args = [], []
+    for k in dict.fromkeys(kinds):
+        where, a = _filters([k], since)
+        parts.append(f"SELECT * FROM (SELECT {_COLS} FROM docs WHERE 1{where} ORDER BY ts DESC LIMIT ?)")  # noqa: S608 (only placeholders and fixed column names are joined in)
+        args += [*a, limit]
+    return " UNION ALL ".join(parts) + " ORDER BY ts DESC LIMIT ?", [*args, limit]
 
 
 def _file_stat(p: Path) -> str:
@@ -1031,8 +1246,10 @@ def _meta(text: str | None) -> dict[str, Any]:
 
 
 EMBED_CHARS = 1000  # one window of an item's text (what embeds well)
-MAX_WINDOWS_PER_SEARCH = 64  # windows a search may embed itself; the background does the rest
-EMBED_BATCH_WINDOWS = 64  # windows in one call to the model
+MAX_WINDOWS_PER_SEARCH = 8  # windows a search may embed itself (~0.25 s); the background does the rest
+EMBED_BATCH_WINDOWS = 8  # windows in one call to the model: a search waits for one call at most
+URGENT_WAIT_S = 5.0  # the background waits at most this long for searches' embedding
+OPTIMIZE_EVERY_S = 3600.0  # PRAGMA optimize while idle, this often
 WINDOW_OVERLAP = 100  # windows overlap a little, so a sentence cut at an edge is in one whole
 MAX_WINDOWS = 20  # an item's first 20 windows (~18,000 characters) are embedded
 
@@ -1048,14 +1265,14 @@ def _doc_texts(h: Hit) -> list[str]:
     return out
 
 
-def _within(hits: Sequence[Hit], max_items: int, max_windows: int) -> list[Hit]:
-    """The first of these items, up to max_items, whose windows fit in max_windows (at
-    least one item, however long)."""
+def _within(hits: Sequence[Hit], max_items: int, max_windows: int, at_least_one: bool = True) -> list[Hit]:
+    """The first of these items, up to max_items, whose windows fit in max_windows (with
+    at_least_one, the first item however long)."""
     out: list[Hit] = []
     n = 0
     for h in hits[:max_items]:
         w = len(_doc_texts(h))
-        if out and n + w > max_windows:
+        if (out or not at_least_one) and n + w > max_windows:
             break
         out.append(h)
         n += w

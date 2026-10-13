@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from test_routing import Rig, hear, make, run
 
+import scout.assistant as assistant_mod
 from scout import local_intents
 from scout.progress import STILL_WORKING, progress_phrase
 
@@ -96,6 +97,7 @@ def test_a_quick_answer_says_nothing_extra(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_a_long_wait_gets_one_more_different_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(assistant_mod, "CLAUDE_PROGRESS_S", 0.0)  # no tool call: past the Claude wait
     r = _rig(again=0.1)
     _slow_claude(monkeypatch, r, None, 0.3, "Done.")
     assert run(_turn(r, "think hard about this")) == ["One moment.", STILL_WORKING, "Done."]

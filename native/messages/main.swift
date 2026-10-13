@@ -168,18 +168,27 @@ func probeMailAccess(_ o: Options) -> Access {
           fallback: { findMailIndex(o).access })
 }
 
+/// The pipe is read to the end, its read handle closed and the process waited for, all in
+/// an autorelease pool: a probe per mail_status while access was denied once leaked a
+/// pipe each (the serve loop had no pool, so no Pipe was ever freed: 560 open after 4.7
+/// days, then accept() failed at the descriptor limit). Process closes the parent's copy
+/// of the write end itself once the child runs.
 func probe(_ args: [String], fallback: () -> Access) -> Access {
     guard let exe = Bundle.main.executableURL else { return fallback() }
-    let p = Process()
-    p.executableURL = exe
-    p.arguments = args
-    let out = Pipe()
-    p.standardOutput = out
-    p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { return fallback() }
-    p.waitUntilExit()
-    let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    return Access(rawValue: text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .denied
+    return autoreleasepool {
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        defer { try? out.fileHandleForReading.close() }
+        do { try p.run() } catch { return fallback() }
+        let data = (try? out.fileHandleForReading.readToEnd()) ?? nil  // EOF when the child exits
+        p.waitUntilExit()
+        let text = String(data: data ?? Data(), encoding: .utf8) ?? ""
+        return Access(rawValue: text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .denied
+    }
 }
 
 // MARK: - attributedBody
@@ -803,13 +812,15 @@ let allowedArgs: [String: Set<String>] = [
 ]
 
 /// Read access to one file, re-checked in a fresh process while it's missing (a grant
-/// made in System Settings shows up there at once); at most every 2 seconds.
+/// made in System Settings shows up there at once); at most every 2 seconds, or every
+/// `deniedFor` seconds while the answer is "denied" (a process per status check adds up).
 final class AccessWatch {
     let check: () -> Access
     let probe: () -> Access
     let socket: String
     private var access: Access = .denied
     private var accessAt = Date.distantPast
+    let deniedFor: TimeInterval = 60
 
     init(socket: String, check: @escaping () -> Access, probe: @escaping () -> Access) {
         self.socket = socket
@@ -823,7 +834,7 @@ final class AccessWatch {
             access = .granted
             return access
         }
-        if Date().timeIntervalSince(accessAt) < 2 { return access }
+        if Date().timeIntervalSince(accessAt) < (access == .denied ? deniedFor : 2) { return access }
         return probeAndCache()
     }
 
@@ -1213,35 +1224,49 @@ func serve(_ o: Options) -> Never {
     log.write("start pid=\(getpid()) db=\(o.db)")
     warn("serving \(o.socket)")
 
-    var timeout = timeval(tv_sec: 3, tv_usec: 0)
+    var failing: Int32 = 0  // errno of the accept() failures in a row, 0 while it works
     while true {
         let c = accept(fd, nil, nil)
-        if c < 0 { continue }
-        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        let who = peer(c)
-        let caller = "pid=\(who.pid) exe=\(who.exe)"
-        if who.uid != getuid() {
-            log.write("refused uid=\(who.uid) \(caller)")
-            close(c)
+        if c < 0 {
+            let err = errno
+            if err == EINTR || err == ECONNABORTED { continue }
+            // Out of descriptors (EMFILE/ENFILE) or worse: retrying at once spun at 100% CPU.
+            if err != failing { log.write("accept failed: \(String(cString: strerror(err)))") }
+            failing = err
+            usleep(250_000)
             continue
         }
-        guard let line = readLine(c, max: 16384),
-              let req = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
-        else {
-            log.write("bad_request \(caller)")
-            writeAll(c, jsonLine(["ok": false, "code": "bad_request", "error": "send one JSON object per line"]))
-            close(c)
-            continue
-        }
-        let (answer, op, note) = server.handle(req)
-        // Logged before answering; a successful status check isn't worth a line.
-        if !(op == "status" || op == "mail_status") || answer["ok"] as? Bool != true {
-            log.write("op=\(op.isEmpty ? "?" : op) \(note) \(caller)")
-        }
-        writeAll(c, jsonLine(answer))
-        close(c)
+        failing = 0
+        autoreleasepool { answer(c, server: server, log: log) }
     }
+}
+
+/// One connection: check the caller, read a request line, answer, close. Its own
+/// autorelease pool (in serve), so a long-running helper doesn't accumulate objects.
+func answer(_ c: Int32, server: Server, log: AccessLog) {
+    defer { close(c) }
+    var timeout = timeval(tv_sec: 3, tv_usec: 0)
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    let who = peer(c)
+    let caller = "pid=\(who.pid) exe=\(who.exe)"
+    if who.uid != getuid() {
+        log.write("refused uid=\(who.uid) \(caller)")
+        return
+    }
+    guard let line = readLine(c, max: 16384),
+          let req = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
+    else {
+        log.write("bad_request \(caller)")
+        writeAll(c, jsonLine(["ok": false, "code": "bad_request", "error": "send one JSON object per line"]))
+        return
+    }
+    let (answer, op, note) = server.handle(req)
+    // Logged before answering; a successful status check isn't worth a line.
+    if !(op == "status" || op == "mail_status") || answer["ok"] as? Bool != true {
+        log.write("op=\(op.isEmpty ? "?" : op) \(note) \(caller)")
+    }
+    writeAll(c, jsonLine(answer))
 }
 
 // MARK: - main

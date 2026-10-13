@@ -137,7 +137,8 @@ class Store:
             "limit": limit,
             "semantic": semantic,
         }
-        # By meaning it may load the model, or wait for it to finish a background batch.
+        # By meaning it may load the model first (seconds); a background batch delays it
+        # by one small call to the model at most.
         timeout = None if semantic is False else SLOW_TIMEOUT
         return [_hit(h) for h in self.c.call("/v1/search", args, timeout=timeout)["hits"]]
 

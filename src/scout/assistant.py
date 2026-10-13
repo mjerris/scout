@@ -4,6 +4,7 @@ Claude session talking through the MCP server → speech."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import logging.handlers
@@ -81,6 +82,9 @@ PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when
 # An answer built from these is private: mail and messages, and what's indexed from them.
 _PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_|^(?:local_search|task_why|tasks_list)$")
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
+# A Claude turn says its progress line ("One moment.") no sooner than this after the turn
+# began, unless a tool call has started: a quick answer would otherwise wait behind it.
+CLAUDE_PROGRESS_S = 3.0
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
 
 
@@ -103,6 +107,26 @@ def _transcript_log() -> logging.Logger:
         tx.setLevel(logging.INFO)
         tx.propagate = False  # not in the main log
     return tx
+
+
+@dataclass
+class _Heard:
+    """How the utterance that started a turn was heard: for the per-turn timing line."""
+
+    end_reason: str  # why the segmenter ended it ("turn", "pause", "max")
+    turn_prob: float | None  # the end-of-turn model's last answer
+    speech_end: float  # time.monotonic() when the clip ended
+    asr_s: float  # how long the transcription itself took
+    asr_done: float  # time.monotonic() when it was done
+
+
+@dataclass
+class _Context:
+    """The request context, fetched while tier 1 decides. Mail waits for `go`: the
+    tier 1 answer may read the inbox itself, and two listings at once slow both."""
+
+    task: asyncio.Task[str]
+    go: asyncio.Event
 
 
 @dataclass
@@ -134,6 +158,14 @@ class Assistant:
         self._confirm_barged: float | None = None  # onset of an answer said over the question
         self._barge_pending: float | None = None  # onset of speech over a reply, until its words are heard
         self._turn_text, self._turn_started, self._turn_spoke = "", 0.0, False
+        # Per-turn timing: the utterance that started it, when its answer was first said,
+        # which tier answered.
+        self._heard: _Heard | None = None  # set while _handle routes an utterance
+        self._turn_heard: _Heard | None = None
+        self._turn_answer_at, self._turn_tier = 0.0, ""
+        self._turn_claude = False  # the turn went to Claude (the progress line waits longer)
+        self._tool_started = asyncio.Event()  # the current room turn called a tool
+        self._context: _Context | None = None  # the context fetched alongside tier 1
         self._rejoined = False  # onset of a barge into a session's message
         self.asr = asr
         self.speaker = speaker
@@ -296,6 +328,8 @@ class Assistant:
     def say(self, text: str) -> None:
         """Speak where the current turn's replies go."""
         self._turn_spoke = True
+        if not self._turn_answer_at:
+            self._turn_answer_at = time.monotonic()
         if self._out["mini"]:
             self.speaker.speak(text)
         if self._out["client"]:
@@ -366,6 +400,8 @@ class Assistant:
             utt = await self.utterances.get()
             if self.mic_muted:
                 continue
+            if waiting := self.utterances.qsize():  # clips are transcribed one at a time
+                log.info("asr backlog: %d more clip%s waiting", waiting, "s" * (waiting != 1))
             try:
                 await self._handle(utt)
             except Exception:
@@ -406,7 +442,16 @@ class Assistant:
                 old.with_suffix(suffix).unlink(missing_ok=True)
 
     async def _handle(self, utt: Utterance) -> None:
+        t0 = time.monotonic()
         t = await self.asr.transcribe(utt.pcm)
+        done = time.monotonic()
+        self._heard = _Heard(utt.end_reason, utt.turn_prob, utt.ended or t0, done - t0, done)
+        try:
+            await self._hear(utt, t)
+        finally:
+            self._heard = None
+
+    async def _hear(self, utt: Utterance, t: gate.Transcript) -> None:
         t.text = self.pronounce.stt(t.text)
         self._save_utterance(utt, t)
         text = t.text
@@ -931,6 +976,10 @@ class Assistant:
         if self.busy:
             return False
         self._turn_text, self._turn_started, self._turn_spoke = text, time.monotonic(), False
+        # Heard just now (not a queued request, typed text, or a "hang on" join).
+        self._turn_heard, self._turn_answer_at, self._turn_tier = self._heard, 0.0, ""
+        self._turn_claude = False
+        self._tool_started = asyncio.Event()
         self._turn = asyncio.create_task(self._run_turn(text, speak, client))
         return True
 
@@ -957,24 +1006,38 @@ class Assistant:
 
     async def _progress_speech(self, text: str) -> None:
         """A long lookup with nothing said yet: say what's happening, once (and once more
-        if it drags on), instead of a long silence. Ticks carry on after that."""
+        if it drags on), instead of a long silence. Ticks carry on after that.
+
+        A turn that went to Claude waits until CLAUDE_PROGRESS_S after it began unless a
+        tool call started: a quick answer arriving just as the line was queued waited for it."""
         tts = self.cfg.tts
         await asyncio.sleep(tts.progress_delay_s)
+        if self._turn_claude and not self._tool_started.is_set():
+            left = self._turn_started + CLAUDE_PROGRESS_S - time.monotonic()
+            if left > 0:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._tool_started.wait(), left)
         if self._turn_spoke:
             return  # the answer is already being spoken
         if self._may_say_progress():
             said = progress_phrase(self._turn_tool or text)
             log.info("progress: %s", said)
-            self.speaker.speak(said)  # not the answer: leaves _turn_spoke and last_spoken alone
+            self._speak_progress(said)  # not the answer: leaves _turn_spoke and last_spoken alone
         if tts.progress_again_s <= 0:
             return
         await asyncio.sleep(tts.progress_again_s)
         if self._may_say_progress():
             log.info("progress: %s", STILL_WORKING)
-            self.speaker.speak(STILL_WORKING)
+            self._speak_progress(STILL_WORKING)
 
-    async def _answer_locally(self, text: str) -> bool:
-        """Tier 0: answer in plain code when the request clearly fits. True if handled."""
+    def _speak_progress(self, text: str) -> None:
+        """A progress line the speaker drops if the answer is queued before it plays."""
+        getattr(self.speaker, "speak_progress", self.speaker.speak)(text)
+
+    async def _answer_locally(self, text: str, fetch_context: bool = False) -> bool:
+        """Tier 0: answer in plain code when the request clearly fits. True if handled.
+        `fetch_context`: while tier 1 decides, start fetching Claude's request context
+        (self._context), so a request tier 1 passes on doesn't wait for it afterwards."""
         if not self.cfg.claude.local_first:
             return False
         try:
@@ -995,7 +1058,15 @@ class Assistant:
                 private = said is not None
             if said is None and self.tier1 is not None:
                 now = datetime.now().astimezone()
+                # Claude's context is fetched meanwhile, in case tier 1 passes (~1 s).
+                ctx = self._fetch_context(text) if fetch_context else None
                 decision = await self.tier1.decide(text, now)
+                if ctx is not None:
+                    if decision is None:
+                        ctx.go.set()
+                    else:  # tier 1 answers: no context needed
+                        ctx.task.cancel()
+                        self._context = None
                 if decision is not None:
                     said, tier = await tier1.run(decision, now, self.privacy.summaries), 1
                     private = decision["tool"] == "mail_summarize"
@@ -1010,6 +1081,7 @@ class Assistant:
         log.info("answered locally (tier %s): %s -> %s", tier, text, said or "(done)")
         self.emit("local", text=said or "(done)")
         self.recent_local.append((time.time(), text, said or "(done)", private))
+        self._turn_tier = "repeat" if tier is None else str(tier)
         if tier is not None:  # a repeat isn't a request of its own
             ledger.record(str(tier), time.monotonic() - self._turn_started if self._turn_started else 0.0)
         if self._silence_turn:
@@ -1060,8 +1132,20 @@ class Assistant:
         self.privacy.summaries.model = model
         log.info("tier 1 ready: %s", name)
 
-    async def _with_context(self, text: str) -> str:
-        """The request with what Claude would otherwise spend a tool call on."""
+    def _fetch_context(self, text: str) -> _Context | None:
+        """Start _with_context in the background (self._context); mail waits for `go`."""
+        if not self.cfg.claude.request_context:
+            return None
+        go = asyncio.Event()
+        task = asyncio.create_task(self._with_context(text, go))
+        task.add_done_callback(_retrieve)
+        self._context = _Context(task, go)
+        return self._context
+
+    async def _with_context(self, text: str, go: asyncio.Event | None = None) -> str:
+        """The request with what Claude would otherwise spend a tool call on. The
+        memories, the calendar and the mail are fetched at once; the mail only once `go`
+        is set, when given."""
         if not self.cfg.claude.request_context:
             return text
         now = datetime.now().astimezone()
@@ -1088,36 +1172,56 @@ class Assistant:
                 when = datetime.fromtimestamp(ts).strftime("%-I:%M %p")
                 note = "it waited for a reply" if waited else "it did not wait for a reply"
                 lines.append(f"  [{when}, session {agent}, {note}] {msg}")
-        try:
-            # The memory service: off the event loop, and its outage only costs the memories.
-            facts = await asyncio.to_thread(self.privacy.memories, self.memory, text)
-        except Exception as exc:
-            log.warning("memories unavailable, asking without them: %s", exc)
-            facts = []
+
+        async def memories() -> list[str]:
+            try:
+                # The memory service: off the event loop, and its outage only costs the memories.
+                return await asyncio.to_thread(self.privacy.memories, self.memory, text)
+            except Exception as exc:
+                log.warning("memories unavailable, asking without them: %s", exc)
+                return []
+
+        async def calendar() -> str | None:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            listing = await self._prefetch(
+                "the calendar",
+                self.privacy.calendar_events(start.isoformat(), (start + timedelta(days=2)).isoformat()),
+            )
+            if listing is None:
+                return None
+            return (
+                "Calendar, today and tomorrow (fetched just now; use it rather than calling the tool):\n"
+                + listing
+            )
+
+        async def mail() -> str | None:
+            if go is not None:
+                await go.wait()
+            listing = await self._prefetch(
+                "mail", self.privacy.mail_list(5, budget_s=privacy.PREFETCH_BUDGET_S)
+            )
+            return None if listing is None else "Newest email (fetched just now):\n" + listing
+
+        async def nothing() -> None:
+            return None
+
+        async def fetched(c: Coroutine[Any, Any, str | None]) -> str | None:
+            try:
+                return await c
+            except ToolError as exc:
+                log.info("context prefetch skipped: %s", exc)
+                return None
+
+        low = text.lower()
+        facts, cal, inbox = await asyncio.gather(
+            memories(),
+            fetched(calendar()) if _CALENDARISH.search(low) else nothing(),
+            fetched(mail()) if _MAILISH.search(low) else nothing(),
+        )
         if facts:
             lines.append("The user told Scout (memories that may bear on this request):")
             lines += [f"  - {f}" for f in facts]
-        low = text.lower()
-        try:
-            if _CALENDARISH.search(low):
-                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                listing = await self._prefetch(
-                    "the calendar",
-                    self.privacy.calendar_events(start.isoformat(), (start + timedelta(days=2)).isoformat()),
-                )
-                if listing is not None:
-                    lines.append(
-                        "Calendar, today and tomorrow (fetched just now; use it rather than calling the tool):\n"
-                        + listing
-                    )
-            if _MAILISH.search(low):
-                listing = await self._prefetch(
-                    "mail", self.privacy.mail_list(5, budget_s=privacy.PREFETCH_BUDGET_S)
-                )
-                if listing is not None:
-                    lines.append("Newest email (fetched just now):\n" + listing)
-        except ToolError as exc:
-            log.info("context prefetch skipped: %s", exc)
+        lines += [part for part in (cal, inbox) if part is not None]
         return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
 
     async def _prefetch(self, what: str, fetch: Coroutine[Any, Any, str]) -> str | None:
@@ -1171,14 +1275,22 @@ class Assistant:
         )
         replies: list[str] = []
         used: list[tuple[str, dict[str, Any]]] = []
+        self._context = None
         try:
-            if await self._answer_locally(text):
+            if await self._answer_locally(text, fetch_context=True):
                 return
+            self._turn_claude, self._turn_tier = True, "claude"
             ticks = (
                 asyncio.create_task(self._working_ticks()) if speak and self.cfg.tts.working_sound else None
             )
             self.chime("ack")
-            async for kind, data in self.brain.ask(await self._with_context(text)):
+            ctx, self._context = self._context, None
+            if ctx is not None:
+                ctx.go.set()
+                request = await ctx.task
+            else:
+                request = await self._with_context(text)
+            async for kind, data in self.brain.ask(request):
                 if kind in ("speak", "text"):
                     if kind == "text":
                         self.emit("claude", text=data)
@@ -1199,6 +1311,7 @@ class Assistant:
                     name, args = data
                     used.append((name, args if isinstance(args, dict) else {}))
                     self._turn_tool = name
+                    self._tool_started.set()
                     self.emit("tool", name=name, input=_preview(args))
                     if self.state == "speaking" and not self.speaker.busy:
                         self._set_state("thinking")
@@ -1224,6 +1337,10 @@ class Assistant:
                 ticks.cancel()
             if progress:
                 progress.cancel()
+            if self._context is not None:  # answered locally after all, or failed: not needed
+                self._context.task.cancel()
+                self._context = None
+            self._log_turn_timing()
             if replies:
                 self._spawn(self._record_turn(text, " ".join(replies), "room", False, used))
             self._set_state("idle")
@@ -1240,6 +1357,28 @@ class Assistant:
             if queued and (not self._silence_turn or rejoined) and queued.strip():
                 asyncio.get_running_loop().call_soon(self._start_queued, queued, out)
             self._silence_turn = False  # it's over: later confirmations aren't this turn's
+
+    def _log_turn_timing(self) -> None:
+        """One line of numbers per room turn (no words): how it was heard, how long the
+        answer took, which tier gave it, and how long until its audio started."""
+
+        def ms(seconds: float | None) -> str:
+            return "-" if seconds is None else f"{seconds * 1000:.0f}"
+
+        h, answer_at = self._turn_heard, self._turn_answer_at
+        first_played = getattr(self.speaker, "first_played_since", None)
+        audio_at = first_played(answer_at) if answer_at and first_played is not None else None
+        log.info(
+            "turn timing: end=%s p=%s speech_end_to_asr_done_ms=%s asr_ms=%s turn_to_answer_ms=%s "
+            "tier=%s answer_to_audio_ms=%s",
+            (h.end_reason or "-") if h else "-",
+            "-" if h is None or h.turn_prob is None else f"{h.turn_prob:.2f}",
+            ms(h.asr_done - h.speech_end) if h else "-",
+            ms(h.asr_s) if h else "-",
+            ms(answer_at - self._turn_started) if answer_at else "-",
+            self._turn_tier or "-",
+            ms(audio_at - answer_at) if audio_at is not None else "-",
+        )
 
     def _start_queued(self, text: str, out: dict[str, Any]) -> None:
         if speech.is_reset(text):

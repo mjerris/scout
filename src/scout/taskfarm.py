@@ -127,20 +127,26 @@ def parse_found(answer: str) -> list[dict[str, Any]] | None:
     return out
 
 
+_SPEAKER = re.compile(r"^[^\n:]{1,60}:[ \t]", re.M)  # "Pat Doe: " starting a transcript line
+
+
 def _norm(s: str) -> str:
-    return " ".join(re.sub("[\"'`\u2018\u2019\u201c\u201d]", "", s).lower().split())
+    """Words only, lower case: punctuation, markdown and quote marks are dropped."""
+    s = re.sub(r"(\w)['\u2019](\w)", r"\1\2", s)  # don't, it's: one word
+    return " ".join(re.findall(r"\w+", s.lower()))
 
 
 def evidenced(t: dict[str, Any], text: str) -> bool:
-    """Whether a found task's quote is in the text it was found in (case and spacing
-    aside; "..." may join pieces). A task without one, or with words the text doesn't
-    have, is dropped."""
-    parts = [_norm(p).strip(" .,;:!?") for p in re.split(r"\.\.\.|…", str(t.get("evidence") or ""))]
+    """Whether a found task's quote is in the text it was found in: its words, in order,
+    with punctuation, markdown, quote marks and transcript speaker labels aside ("..."
+    may join pieces). A task without one, or with words the text doesn't have, is
+    dropped."""
+    parts = [_norm(p) for p in re.split(r"\.\.\.|…", str(t.get("evidence") or ""))]
     parts = [p for p in parts if p]
     if not parts:
         return False
-    hay = _norm(text)
-    return all(p in hay for p in parts)
+    hay = _norm(_SPEAKER.sub("", text))
+    return all(f" {p} " in f" {hay} " for p in parts)
 
 
 class Meeting(NamedTuple):

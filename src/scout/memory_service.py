@@ -21,9 +21,11 @@ token (state/memory.token, readable by this user only):
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
 
-It runs under its own login item (com.local.scout.memory) at low CPU priority, so
-embedding never competes with listening, and it keeps running while the voice app
-restarts. memory_client.py is the other side.
+It runs under its own login item (com.local.scout.memory) at a lower CPU priority
+(nice 10), so embedding yields to listening, and it keeps running while the voice app
+restarts. Not as a Background process: that holds it to the efficiency cores and
+throttles its disk, measured 4-5 documents/s embedded instead of 28-38, and a search
+from the voice app waiting seconds behind it. memory_client.py is the other side.
 """
 
 from __future__ import annotations
@@ -281,6 +283,8 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
     log.info("scout-memory listening on %s:%d (%d documents)", host, port, ix.count())
+    if emb is not None:  # the vectors into memory now, not on the first search
+        asyncio.create_task(_load_matrix(ix))  # noqa: RUF006 (runs once, logs its own failure)
     if load().granola.api_key:
         asyncio.create_task(granola_loop(ix, load().granola))  # noqa: RUF006 (runs for the service's life)
     if cfg.semantic and cfg.background_embed:
@@ -289,6 +293,13 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         while True:  # still pick up journal edits
             await asyncio.sleep(60)
             await asyncio.get_running_loop().run_in_executor(None, _sync_files, ix)
+
+
+async def _load_matrix(ix: index.Index) -> None:
+    try:
+        await asyncio.to_thread(ix.load_matrix)
+    except Exception:
+        log.exception("loading the vectors into memory failed; the first search tries again")
 
 
 def _sync_files(ix: index.Index) -> None:

@@ -14,6 +14,18 @@ from .gate import Transcript
 
 log = logging.getLogger(__name__)
 
+# MLX keeps freed GPU buffers in a cache for reuse, unbounded by default: with Whisper and
+# the tier 1 model allocating differently sized buffers per request, the app grew from
+# 4.9 to 6.4 GB in 25 minutes. Past this limit freed buffers go back to the system.
+MLX_CACHE_LIMIT = 256 * 1024 * 1024
+
+
+def limit_mlx_cache(limit: int = MLX_CACHE_LIMIT) -> None:
+    """Cap MLX's buffer cache (process-wide; Whisper and the tier 1 model share it)."""
+    import mlx.core as mx
+
+    mx.set_cache_limit(limit)
+
 
 class Transcriber:
     def __init__(
@@ -23,6 +35,7 @@ class Transcriber:
         self.prompt = prompt or None  # default initial_prompt for transcribe()
         self.model = model
         self.language = language or None
+        limit_mlx_cache()
         # MLX work stays on one thread.
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
 

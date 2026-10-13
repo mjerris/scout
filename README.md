@@ -624,7 +624,7 @@ an entry and search follows within a minute. A phone call is written when it end
 
 **Search.** The index (`state/memory.db`) holds the journal, your facts, notes, lists,
 mail and Granola meetings. A search ranks by meaning over everything of the kinds and
-dates asked for, with a local embedding model (bge-small-en-v1.5, CPU, about 0.2 GB in
+dates asked for, with a local embedding model (bge-small-en-v1.5, CPU, a few hundred MB in
 memory), and full text (SQLite FTS5) adds a little for shared words and finds what has
 no vector yet. An idle pass embeds new items ahead of time. On a synthetic year of
 20,000 conversations and 50 questions it finds the answer in the top 5 for about
