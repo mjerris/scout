@@ -1292,18 +1292,38 @@ class Assistant:
             self._set_state("thinking" if self.busy else "idle")
         return ok
 
-    async def run_shared_tool(self, agent: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def run_shared_tool(
+        self,
+        agent: str,
+        name: str,
+        args: dict[str, Any],
+        preview: bool = False,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
         """Run a mail or calendar tool for another Claude session (via the MCP server).
         Tools that send or add something are confirmed by voice in the room first,
-        whatever that session's own permission settings say; "always" is just once."""
+        whatever that session's own permission settings say; "always" is just once.
+
+        From the phone nobody in the room is asked: the phone agent confirms with the
+        caller in two steps (phone_service.py). preview=True says what a tool would do
+        without doing it; confirmed=True, only from the phone, runs one the caller said
+        yes to. Sending email is never done from the phone."""
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
-        if agent == PHONE and (t.asks or name == "mail_send"):
+        if preview:
+            spoken, _ = describe_tool(name, args)
+            return {"status": "ok", "text": spoken}
+        if agent == PHONE and (name == "mail_send" or (t.asks and not confirmed)):
             # Nobody in the room should be asked about a call they can't hear.
             return {"status": "error", "error": f"{name} can't be used from the phone"}
+        if confirmed and agent != PHONE:
+            return {"status": "error", "error": "confirmed is only for the phone agent"}
         tr = trust.default()
-        if t.asks and tr.tier(name) == "auto":  # promoted by the user (trust.py)
+        if t.asks and confirmed:  # the caller said yes on the phone (two steps, a gate)
+            log.info("confirmed on the phone: %s", name)
+            tr.record(name, "phone", True, describe_tool(name, args)[1], by=agent)
+        elif t.asks and tr.tier(name) == "auto":  # promoted by the user (trust.py)
             log.info("allowed by trust, for %s: %s", agent, name)
             tr.record(name, "auto", True, describe_tool(name, args)[1], by=agent)
         elif t.asks:

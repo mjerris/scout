@@ -31,7 +31,7 @@ and the ledger apply the same as at home.
 |---|---|
 | Read tools (calendar, reminders, notes, weather, places, route, Starlink) | Scout's shared tools, as SWAIG functions |
 | `ask_scout(request)` | Anything that needs Scout's own brain (memory, mail, Claude): Scout's tiers 0/1/Claude answer it as text |
-| Action tools (reminder add/complete, calendar event, note delete) | Two steps: the first call returns what would happen and a one-time code; the agent reads it back; a second call with the code and the user's yes does it |
+| Action tools (reminder add/complete, calendar event, note delete) | Two steps: the first call returns what would happen and a one-time code (and puts the action in `semantic_state`); the agent reads it back; `confirm_action(code)` does it, behind a semantic gate that checks the caller's own yes in the conversation (threshold 0.9) |
 | Never by phone | sending email |
 
 Long answers: each lookup runs in the background. A tool call that has its answer
@@ -124,6 +124,6 @@ summaries only. The phone path is opt-in, and README states this plainly.
    SignalWire dashboard, with Funnel on.
 2. Pairing (QR code, device secret), signed userVariables and the per-call check.
 3. The browser app.
-4. Two-step action tools.
+4. Two-step action tools (done: prepare, read back, `confirm_action` behind a semantic gate).
 5. The React Native app with CallKit and Bluetooth.
 6. Scout calls you.

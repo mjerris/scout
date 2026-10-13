@@ -6,6 +6,7 @@ with SignalWire-style signatures computed here; Scout's local API is a fake."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -227,15 +228,14 @@ def rig(paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch) -> Itera
 def test_verified_call_gets_scout_tools(rig: Rig) -> None:
     swml = rig.swml("call-1", uvars(rig.device, rig.secret))
     names = _functions(swml)
-    want = {t.name for t in ps.PHONE_TOOLS} | {"ask_scout"}
-    assert want <= names
-    assert not names & {
-        "mail_send",
-        "calendar_create_event",
-        "reminder_add",
-        "reminder_complete",
-        "note_delete",
-    }
+    want = {t.name for t in ps.PHONE_TOOLS} | {"ask_scout", "confirm_action"}
+    actions = {"calendar_create_event", "reminder_add", "reminder_complete", "note_delete"}
+    assert want <= names and actions <= names  # actions in two steps
+    assert "mail_send" not in names  # never by phone
+    fns = {f["function"]: f for f in _ai(swml)["SWAIG"]["functions"]}
+    [gate] = fns["confirm_action"]["gates"]
+    assert gate["id"] == "caller_said_yes" and gate["threshold"] == 0.9
+    assert "two steps" in fns["reminder_add"]["description"] and "gates" not in fns["reminder_add"]
     assert _ai(swml)["global_data"] == {"device": rig.device, "verified": True}
     verbs = [next(iter(v)) for v in swml["sections"]["main"]]
     assert verbs == ["answer", "ai"]  # no goodbye
@@ -245,7 +245,11 @@ def test_verified_call_gets_scout_tools(rig: Rig) -> None:
 def test_unverified_call_gets_no_tools_and_a_goodbye(rig: Rig) -> None:
     bad = {**uvars(rig.device, rig.secret), "sig": "0" * 64}
     swml = rig.swml("call-2", bad)
-    assert not _functions(swml) & ({t.name for t in ps.PHONE_TOOLS} | {"ask_scout"})
+    assert not _functions(swml) & (
+        {t.name for t in ps.PHONE_TOOLS}
+        | {t.name for t in ps.PHONE_ACTIONS}
+        | {"ask_scout", "confirm_action"}
+    )
     main = swml["sections"]["main"]
     verbs = [next(iter(v)) for v in main]
     assert verbs[:3] == ["answer", "play", "hangup"]
@@ -789,3 +793,116 @@ def test_a_verified_call_is_journaled_when_it_ends(paired: tuple[Path, str, str]
     )  # private: reference only
     agent._call_ended(SYNTH_LOG, {"call_id": "never-verified"})  # an unverified call writes nothing
     assert ix.count("turn") == 3
+
+
+class ActionScout(FakeScout):
+    async def __call__(self, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        self.calls.append((path, body, timeout))
+        if body.get("preview"):
+            return {"status": "ok", "text": "Add a reminder: call Sam, Friday at 3 PM?"}
+        return {"status": "ok", "text": "Added reminder: call Sam."}
+
+
+def _agent(paired: tuple[Path, str, str], scout: FakeScout) -> ps.PhoneAgent:
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), scout, AUTH, "s" * 43)
+    agent.calls.bind("call-a", paired[1])
+    return agent
+
+
+def test_an_action_is_prepared_then_done_once_with_its_code(paired: tuple[Path, str, str]) -> None:
+    scout = ActionScout()
+    agent = _agent(paired, scout)
+    args = {"title": "call Sam", "due": "2026-10-16T15:00", "list": None}
+
+    async def go() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        first = (await agent._prepare_handler("reminder_add")(args, {"call_id": "call-a"})).to_dict()
+        code = re.search(r"code (\d{4})", first["response"]).group(1)  # type: ignore[union-attr]
+        done = (await agent._confirm({"code": code}, {"call_id": "call-a"})).to_dict()
+        again = (await agent._confirm({"code": code}, {"call_id": "call-a"})).to_dict()
+        return first, done, again
+
+    first, done, again = asyncio.run(go())
+    assert first["response"].startswith("Not done yet. Would do: Add a reminder: call Sam, Friday at 3 PM?")
+    assert first["action"] == [
+        {
+            "set_global_data": {
+                "semantic_state": {"pending_action": "Add a reminder: call Sam, Friday at 3 PM?"}
+            }
+        }
+    ]
+    assert done["response"] == "Added reminder: call Sam."
+    assert "isn't valid" in again["response"]  # single use
+    previewed, ran = scout.calls
+    assert previewed[1] == {
+        "agent": "phone",
+        "name": "reminder_add",
+        "args": {"title": "call Sam", "due": "2026-10-16T15:00"},
+        "preview": True,
+    }
+    assert ran[1] == {
+        "agent": "phone",
+        "name": "reminder_add",
+        "args": {"title": "call Sam", "due": "2026-10-16T15:00"},
+        "confirmed": True,
+    }
+
+
+def test_a_code_works_only_on_its_own_call_and_not_after_it_expires(
+    paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scout = ActionScout()
+    agent = _agent(paired, scout)
+    agent.calls.bind("call-b", paired[1])
+
+    async def go() -> list[str]:
+        first = (await agent._prepare_handler("note_delete")({"id": 3}, {"call_id": "call-a"})).to_dict()
+        code = re.search(r"code (\d{4})", first["response"]).group(1)  # type: ignore[union-attr]
+        other_call = (await agent._confirm({"code": code}, {"call_id": "call-b"})).to_dict()["response"]
+        monkeypatch.setattr(ps, "ACTION_TTL_S", -1.0)
+        expired = (await agent._confirm({"code": code}, {"call_id": "call-a"})).to_dict()["response"]
+        return [other_call, expired]
+
+    assert all("isn't valid" in r for r in asyncio.run(go()))
+    assert [c[1].get("confirmed") for c in scout.calls] == [None]  # only the preview reached Scout
+
+
+def test_actions_are_refused_on_an_unverified_call(paired: tuple[Path, str, str]) -> None:
+    scout = ActionScout()
+    agent = _agent(paired, scout)
+
+    async def go() -> list[str]:
+        a = await agent._prepare_handler("reminder_add")({"title": "x"}, {"call_id": "never-verified"})
+        b = await agent._confirm({"code": "1234"}, {"call_id": "never-verified"})
+        return [a.to_dict()["response"], b.to_dict()["response"]]
+
+    assert asyncio.run(go()) == [ps.REFUSED, ps.REFUSED] and scout.calls == []
+
+
+def test_phone_actions_preview_and_run_only_when_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scout import shared_tools, trust
+
+    ran: list[dict[str, Any]] = []
+
+    async def fake_add(a: dict[str, Any]) -> str:
+        ran.append(a)
+        return "Added reminder: call Sam."
+
+    t = shared_tools.BY_NAME["reminder_add"]
+    monkeypatch.setitem(shared_tools.BY_NAME, "reminder_add", dataclasses.replace(t, run=fake_add))
+
+    async def go() -> list[dict[str, Any]]:
+        r = make()
+        return [
+            await r.a.run_shared_tool(PHONE, "reminder_add", {"title": "call Sam"}, preview=True),
+            await r.a.run_shared_tool(PHONE, "reminder_add", {"title": "call Sam"}, confirmed=True),
+            await r.a.run_shared_tool("proj#1", "reminder_add", {"title": "call Sam"}, confirmed=True),
+            await r.a.run_shared_tool(PHONE, "mail_send", {"to": ["a@b.c"]}, confirmed=True),
+        ]
+
+    preview, done, not_phone, mail = run(go())
+    assert preview["status"] == "ok" and "call Sam" in preview["text"]
+    assert done == {"status": "ok", "text": "Added reminder: call Sam."} and ran == [{"title": "call Sam"}]
+    assert not_phone["status"] == "error" and "only for the phone" in not_phone["error"]
+    assert mail["status"] == "error" and "phone" in mail["error"]  # never, confirmed or not
+    assert trust.default().log[-1]["how"] == "phone" and trust.default().log[-1]["tool"] == "reminder_add"
