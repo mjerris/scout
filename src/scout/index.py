@@ -39,7 +39,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal
+from . import journal, notefiles
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -471,23 +471,51 @@ class Index:
         self.sync_file(p)
         return str(p)
 
+    def note_add(self, title: str, body: str, ts: float | None = None) -> int:
+        """A new note file (notefiles.py), indexed; returns its number."""
+        if self.journal_root is None:
+            raise RuntimeError("no journal")
+        p = notefiles.write(self.journal_root, title, body, time.time() if ts is None else ts)
+        self.sync_file(p)
+        return notefiles.number(p) or 0
+
+    def note_delete(self, n: int) -> bool:
+        """Delete note n's file and its index entry; False if there's no such note."""
+        if self.journal_root is None:
+            raise RuntimeError("no journal")
+        p = notefiles.find(self.journal_root, n)
+        if p is None:
+            return False
+        p.unlink()
+        self.sync_file(p)
+        return True
+
+    def _file_kind(self, p: Path) -> tuple[str, str, bool] | None:
+        """(kind, id prefix, whether ids match it exactly) for a file Scout keeps."""
+        if self.journal_root is not None and p.parent == notefiles.notes_dir(self.journal_root):
+            key = notefiles.id_prefix(p)
+            return ("note", key, True) if key else None
+        key = journal.id_prefix(p)
+        return ("turn", key, False) if key else None
+
     def sync_file(self, p: Path) -> int:
-        """Make the index hold exactly the entries of one journal file (or none, if it's
-        gone). Returns how many items changed."""
-        prefix = journal.id_prefix(p)
-        if prefix is None:
+        """Make the index hold exactly the items of one file (a journal day or a note),
+        or none if it's gone. Returns how many items changed."""
+        what = self._file_kind(p)
+        if what is None:
             return 0
-        items = journal.parse(p) if p.exists() else []
-        changed = sum(self.put(kind="turn", **it) for it in items)
+        kind, prefix, exact = what
+        items = (notefiles.parse(p) if kind == "note" else journal.parse(p)) if p.exists() else []
+        changed = sum(self.put(kind=kind, **it) for it in items)
         keep = {it["id"] for it in items}
         with self._lock:
-            old = [
-                r[0]
-                for r in self._conn.execute(
-                    "SELECT id FROM docs WHERE kind = 'turn' AND substr(id, 1, ?) = ?", (len(prefix), prefix)
-                )
-                if r[0] not in keep
-            ]
+            sql = (
+                "SELECT id FROM docs WHERE kind = ? AND id = ?"
+                if exact
+                else "SELECT id FROM docs WHERE kind = ? AND substr(id, 1, length(?)) = ?"
+            )
+            args = (kind, prefix) if exact else (kind, prefix, prefix)
+            old = [r[0] for r in self._conn.execute(sql, args) if r[0] not in keep]
         for id in old:
             self.delete(id)
         with self._lock:
@@ -507,7 +535,7 @@ class Index:
         with self._lock:
             known = dict(self._conn.execute("SELECT path, sig FROM files").fetchall())
         changed = 0
-        files = journal.day_files(self.journal_root)
+        files = journal.day_files(self.journal_root) + notefiles.files(self.journal_root)
         for p in files:
             if known.get(str(p)) != journal.file_sig(p):
                 changed += self.sync_file(p)
@@ -838,6 +866,8 @@ class Store(Protocol):
         self, ts: float, who: str, q: str, a: str,
         tools: Sequence[tuple[str, dict[str, Any]]] = (), private: bool = False,
     ) -> str: ...  # fmt: skip
+    def note_add(self, title: str, body: str, ts: float | None = None) -> int: ...
+    def note_delete(self, n: int) -> bool: ...
     def search(
         self, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
         limit: int = 8, semantic: bool | None = True,

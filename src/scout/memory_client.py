@@ -144,6 +144,12 @@ class Store:
     async def asearch(self, query: str, **kw: Any) -> list[index.Hit]:
         return await asyncio.get_running_loop().run_in_executor(None, lambda: self.search(query, **kw))
 
+    def note_add(self, title: str, body: str, ts: float | None = None) -> int:
+        return int(self.c.call("/v1/notes/add", {"title": title, "body": body, "ts": ts})["id"])
+
+    def note_delete(self, n: int) -> bool:
+        return bool(self.c.call("/v1/notes/delete", {"id": n})["deleted"])
+
     def journal_add(
         self,
         ts: float,

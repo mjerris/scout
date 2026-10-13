@@ -133,3 +133,59 @@ def test_old_facts_json_moves_to_markdown(tmp_path: Path) -> None:
     assert [f["text"] for f in mem.facts] == ["Sam likes tea"]
     assert "- Sam likes tea · 2026-10-13 08:00" in (tmp_path / "facts.md").read_text()
     assert not old.exists() and (tmp_path / "memory.json.moved").exists()
+
+
+def test_notes_are_files_numbered_and_indexed(tmp_path: Path) -> None:
+    from scout import notefiles
+
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    n1 = ix.note_add("Generator oil change", "Changed the Onan's oil at 412 hours.", ts=at(11, 28))
+    n2 = ix.note_add("Tire pressure", "Rear duals 80 psi cold.", ts=at(11, 30))
+    assert (n1, n2) == (1, 2)
+    p = tmp_path / "memory" / "notes" / "0001-generator-oil-change.md"
+    assert (
+        p.read_text()
+        == "# Generator oil change\n_2026-10-13 11:28_\n\nChanged the Onan's oil at 412 hours.\n"
+    )
+    h = ix.get("note:1")
+    assert h is not None and h.title == "Generator oil change" and h.ts == at(11, 28)
+    assert [x.id for x in ix.search("onan oil", semantic=False)] == ["note:1"]
+    assert notefiles.find(ix.journal_root, 2) is not None
+
+
+def test_note_ids_match_exactly(tmp_path: Path) -> None:
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    for i in range(10):
+        ix.note_add(f"note {i + 1}", f"body {i + 1}")
+    assert ix.note_delete(1) is True
+    assert ix.get("note:1") is None and ix.get("note:10") is not None  # note:1 isn't a prefix of note:10
+    assert ix.note_delete(1) is False
+
+
+def test_editing_a_note_file_reaches_search(tmp_path: Path) -> None:
+    import os
+
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    ix.note_add("Wifi", "The campground password is on the office board.")
+    p = next((tmp_path / "memory" / "notes").glob("0001-*.md"))
+    p.write_text(p.read_text().replace("office board", "Pinecone2026"))
+    os.utime(p, (time.time() + 5, time.time() + 5))
+    assert ix.sync_files() == 1
+    assert [x.id for x in ix.search("Pinecone2026", semantic=False)] == ["note:1"]
+    p.unlink()
+    assert ix.sync_files() == 1 and ix.get("note:1") is None
+
+
+def test_a_hand_made_note_file_is_picked_up(tmp_path: Path) -> None:
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    d = tmp_path / "memory" / "notes"
+    d.mkdir(parents=True)
+    (d / "0007-awning.md").write_text("# Awning\n\nThe left arm squeaks.\n")
+    ix.sync_files()
+    h = ix.get("note:7")
+    assert h is not None and h.title == "Awning" and h.body == "The left arm squeaks."
+    assert ix.note_add("Next", "after seven") == 8

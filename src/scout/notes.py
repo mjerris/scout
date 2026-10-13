@@ -1,10 +1,11 @@
-"""Notes: kept in Scout's local store (searchable by words and meaning), with a copy in
-an Apple Notes folder when `[notes] apple = true` and Notes automation is allowed (one
-macOS prompt), so they're on the phone too. Without that access, or off a Mac, notes
-simply stay in Scout."""
+"""Notes: markdown files in Scout's data folder (memory/notes/, notefiles.py), searchable
+by words and meaning, with a copy in an Apple Notes folder when `[notes] apple = true`
+and Notes automation is allowed (one macOS prompt), so they're on the phone too. Without
+that access, or off a Mac, notes simply stay in Scout."""
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -17,16 +18,8 @@ from .mac import ToolError
 
 log = logging.getLogger(__name__)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created REAL NOT NULL,
-    updated REAL NOT NULL,
-    apple_id TEXT
-);
-"""
+# Which Apple Notes note is the copy of which of Scout's (the files are the notes).
+_SCHEMA = "CREATE TABLE IF NOT EXISTS note_apple (note INTEGER PRIMARY KEY, apple_id TEXT NOT NULL);"
 MAX_CHARS = 5000
 
 _APPLE_ADD = """
@@ -90,18 +83,10 @@ async def add(text: Any, title: Any = None) -> dict[str, Any]:
     if any(ord(c) < 32 and c != "\n" for c in body):
         raise ToolError("that note has control characters")
     name = " ".join(str(title or "").split())[:120] or _title(body)
-    now = time.time()
-    ix = _ix()
-    ix.sql("INSERT INTO notes(title, body, created, updated) VALUES (?,?,?,?)", (name, body, now, now))
-    nid = ix.last_rowid
-    try:  # notes are found through the index: without it the add is undone, not half-done
-        index.default().put(f"note:{nid}", "note", title=name, body=body, ts=now)
-    except Exception:
-        ix.sql("DELETE FROM notes WHERE id = ?", (nid,))
-        raise
+    nid = await asyncio.to_thread(index.default().note_add, name, body)
     apple = await _to_apple(name, body)
     if apple:
-        ix.sql("UPDATE notes SET apple_id = ? WHERE id = ?", (apple, nid))
+        _ix().sql("INSERT OR REPLACE INTO note_apple(note, apple_id) VALUES (?, ?)", (nid, apple))
     return {"id": nid, "title": name, "apple": bool(apple)}
 
 
@@ -112,20 +97,15 @@ async def add_text(a: dict[str, Any]) -> str:
 
 async def find(query: Any, limit: int = 5) -> list[dict[str, Any]]:
     q = str(query or "").strip()
-    ix = _ix()
     store = index.default()
     hits = (
         await store.asearch(q, kinds=["note"], limit=limit, semantic=None)
         if q
-        else store.recent(["note"], limit)
+        else await asyncio.to_thread(store.recent, ["note"], limit)
     )
-    out = []
-    for h in hits:
-        nid = int(h.id.split(":", 1)[1])
-        rows = ix.sql("SELECT title, body, created FROM notes WHERE id = ?", (nid,))
-        if rows:
-            out.append({"id": nid, "title": rows[0][0], "body": rows[0][1], "created": rows[0][2]})
-    return out
+    return [
+        {"id": int(h.id.split(":", 1)[1]), "title": h.title, "body": h.body, "created": h.ts} for h in hits
+    ]
 
 
 async def find_text(a: dict[str, Any]) -> str:
@@ -143,18 +123,19 @@ async def delete(a: dict[str, Any]) -> str:
         nid = int(a.get("id") or 0)
     except (TypeError, ValueError):
         raise ToolError("id must be a note number from notes_find") from None
-    ix = _ix()
-    rows = ix.sql("SELECT title, apple_id FROM notes WHERE id = ?", (nid,))
-    if not rows:
+    store = index.default()
+    h = await asyncio.to_thread(store.get, f"note:{nid}")
+    if h is None or not await asyncio.to_thread(store.note_delete, nid):
         raise ToolError(f"there's no note {nid}")
-    index.default().delete(f"note:{nid}")  # first: if the index is down, nothing changes
-    ix.sql("DELETE FROM notes WHERE id = ?", (nid,))
-    if rows[0][1]:
+    ix = _ix()
+    rows = ix.sql("SELECT apple_id FROM note_apple WHERE note = ?", (nid,))
+    if rows:
+        ix.sql("DELETE FROM note_apple WHERE note = ?", (nid,))
         try:
-            await mac._run("/usr/bin/osascript", "-e", _APPLE_DELETE, "--", rows[0][1], timeout=30)
+            await mac._run("/usr/bin/osascript", "-e", _APPLE_DELETE, "--", rows[0][0], timeout=30)
         except (ToolError, OSError) as exc:
             log.info("Apple Notes copy of note %d not deleted: %s", nid, exc)
-    return f"Deleted note {nid}: {rows[0][0]}."
+    return f"Deleted note {nid}: {h.title}."
 
 
 def speak(found: list[dict[str, Any]]) -> str:

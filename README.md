@@ -562,8 +562,10 @@ agent can also `remember`, `forget` and `recall`.
 
 ## Notes and lists
 
-Notes live in Scout's store, searchable by words and meaning ("take a note: ...",
-"what are my notes about the generator"), with a copy in an Apple Notes folder
+Notes are markdown files in Scout's data folder, `memory/notes/0003-generator-oil.md`
+(the number is the note's id), searchable by words and meaning ("take a note: ...",
+"what are my notes about the generator"). Edit or add a file and search follows within
+a minute. There's a copy in an Apple Notes folder
 called Scout when `[notes] apple = true` and you allow Notes access (macOS asks once,
 the first time a note is saved). Lists and tasks use the Mac's Reminders; when that
 isn't available (access refused, or not a Mac) Scout keeps them itself, with the same
