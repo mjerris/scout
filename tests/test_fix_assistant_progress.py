@@ -10,7 +10,7 @@ import pytest
 from test_routing import Rig, hear, make, run
 
 from scout import local_intents
-from scout.assistant import STILL_WORKING, progress_phrase
+from scout.progress import STILL_WORKING, progress_phrase
 
 
 def _rig(again: float = 0.0) -> Rig:
