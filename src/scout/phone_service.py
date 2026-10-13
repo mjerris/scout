@@ -43,7 +43,7 @@ from signalwire.core.agent_base import AgentBase
 from signalwire.core.capabilities import user_variables
 from signalwire.core.function_result import FunctionResult
 
-from . import ledger, shared_tools
+from . import ledger, progress, shared_tools
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
 from .phone_devices import CallCheck, write_private
@@ -275,7 +275,13 @@ class PhoneAgent(AgentBase):
         if device is None or not self.check.device_ok(device):
             return
         for t in PHONE_TOOLS:
-            agent.define_tool(t.name, t.description, t.schema, self._tool_handler(t.name))
+            agent.define_tool(
+                t.name,
+                t.description,
+                t.schema,
+                self._tool_handler(t.name),
+                fillers={"default": progress.fillers(t.name)},
+            )
         agent.define_tool(
             "ask_scout",
             ASK_SCOUT,

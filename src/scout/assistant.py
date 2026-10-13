@@ -41,6 +41,7 @@ from .brain import Brain, PhoneBrain, describe_tool
 from .config import DATA, Config
 from .floor import Floor
 from .mac import ToolError
+from .progress import STILL_WORKING, progress_phrase
 from .pronounce import Pronouncer
 from .rules import Rules
 from .tools import SERVER, Timers, build_server
@@ -74,25 +75,6 @@ PHONE_TOOLS = {
 }
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
-
-# What to say while a long lookup runs, by the tool running (or the request).
-_PROGRESS = [
-    (re.compile(r"\b(e-?mails?|mail|inbox)\b"), "Checking your mail."),
-    (re.compile(r"\b(calendar|schedule|agenda|meetings?|events?)\b"), "Looking at your calendar."),
-    (re.compile(r"\b(weather|forecast|rain|winds?|temperature)\b"), "Getting the weather."),
-    (
-        re.compile(r"\b(maps?|places?|route|directions|drive|driving|near|nearest|nearby)\b"),
-        "Looking that up on the map.",
-    ),
-    (re.compile(r"web|search|fetch|look up"), "Searching."),
-]
-STILL_WORKING = "Still working on it."
-
-
-def progress_phrase(what: str) -> str:
-    """A short line for a lookup: `what` is a tool name or the request."""
-    low = what.lower().replace("_", " ")
-    return next((said for pattern, said in _PROGRESS if pattern.search(low)), "One moment.")
 
 
 def _retrieve(task: asyncio.Task[Any]) -> None:

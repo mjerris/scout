@@ -514,3 +514,12 @@ def test_now_line_names_the_day_and_zone() -> None:
 
     now = dt.datetime(2026, 10, 12, 23, 50, tzinfo=ZoneInfo("America/Detroit"))
     assert ps.now_line(now).startswith("It is now Monday, October 12, 2026, 23:50 (EDT).")
+
+
+def test_every_phone_tool_has_fillers_for_its_wait(rig: Rig) -> None:
+    swml = rig.swml("call-fill", uvars(rig.device, rig.secret))
+    funcs = {f["function"]: f for f in _ai(swml)["SWAIG"]["functions"]}
+    for t in ps.PHONE_TOOLS:
+        assert funcs[t.name]["fillers"]["default"], t.name
+    assert funcs["calendar_events"]["fillers"]["default"][0] == "Looking at your calendar."
+    assert funcs["weather"]["fillers"]["default"][0] == "Getting the weather."
