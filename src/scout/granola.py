@@ -25,11 +25,14 @@ import datetime as dt
 import email.utils
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +45,8 @@ API = "https://public-api.granola.ai"
 KIND = "meeting"
 CHUNK_CHARS = 1000  # what embeds well (index.EMBED_CHARS)
 PAGE = 30  # notes per list page (the API's maximum)
-GAP_S = 0.25  # between requests: Granola allows 5 a second sustained
+GAP_S = 0.25  # between request starts: Granola allows 5 a second sustained
+WORKERS = 3  # full notes fetched at once (each takes about a second to answer)
 TIMEOUT_S = 30.0
 MAX_WAIT_S = 60.0  # the longest a 429's Retry-After is honored
 PENDING = DATA / "state" / "granola_pending.json"
@@ -73,8 +77,18 @@ def retry_after(value: str | None, now: float | None = None) -> float:
 
 
 def fetcher(api_key: str, base: str = API, gap_s: float = GAP_S) -> Fetch:
-    """GETs to Granola's API with the key, spaced out, retrying a 429 after its wait."""
+    """GETs to Granola's API with the key, spaced out (from any number of threads, one
+    start at a time), retrying a 429 after its wait, which holds back every thread's
+    next request too."""
     last = [0.0]
+    lock = threading.Lock()
+
+    def slot() -> None:
+        with lock:  # waited out under the lock, so starts are never closer than gap_s
+            wait = last[0] + gap_s - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            last[0] = time.monotonic()
 
     def get(path: str, query: dict[str, Any]) -> dict[str, Any]:
         q = urllib.parse.urlencode({k: v for k, v in query.items() if v not in (None, "")})
@@ -87,17 +101,16 @@ def fetcher(api_key: str, base: str = API, gap_s: float = GAP_S) -> Fetch:
             },
         )
         for attempt in range(4):
-            wait = last[0] + gap_s - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            last[0] = time.monotonic()
+            slot()
             try:
                 with _opener.open(req, timeout=TIMEOUT_S) as r:
                     out: dict[str, Any] = json.loads(r.read() or b"{}")
                     return out
             except urllib.error.HTTPError as exc:
                 if exc.code == 429 and attempt < 3:
-                    time.sleep(retry_after(exc.headers.get("Retry-After")))
+                    resume = time.monotonic() + retry_after(exc.headers.get("Retry-After"))
+                    with lock:  # nobody's next request before the wait is over
+                        last[0] = max(last[0], resume - gap_s)
                     continue
                 raise GranolaError(f"{path}: HTTP {exc.code}") from None
             except (urllib.error.URLError, TimeoutError) as exc:
@@ -248,23 +261,35 @@ def _save_pending(path: Path, pending: dict[str, float]) -> None:
 
 
 def sync_pass(
-    ix: index.Store, get: Fetch, since: str | None, pending_path: Path | None = None, now: float | None = None
+    ix: index.Store,
+    get: Fetch,
+    since: str | None,
+    pending_path: Path | None = None,
+    now: float | None = None,
+    workers: int = WORKERS,
 ) -> tuple[int, int, str | None]:
     """Bring notes changed after `since` (all, when None) into the store, and ask again for
     the ones Granola hadn't finished. Returns (notes, items changed, the newest updated_at
-    listed: the next pass's `since`)."""
+    listed: the next pass's `since`). Full notes are fetched `workers` at a time (the
+    fetcher keeps the request rate); they're stored here, in listing order."""
     path = pending_path or PENDING
     now = time.time() if now is None else now
     pending = _load_pending(path)
     notes = changed = 0
     newest = since
     asked: set[str] = set()
+    # listing order: (note id, its fetch; None for a deleted note)
+    queue: deque[tuple[str, Future[dict[str, Any]] | None]] = deque()
 
-    def fetch(nid: str) -> None:
+    def settle() -> None:
         nonlocal notes, changed
-        asked.add(nid)
+        nid, fut = queue.popleft()
+        if fut is None:
+            pending.pop(nid, None)
+            changed += forget_note(ix, nid)
+            return
         try:
-            note = full_note(get, nid)
+            note = fut.result()
         except GranolaError as exc:
             if "HTTP 404" not in str(exc):
                 raise
@@ -279,6 +304,14 @@ def sync_pass(
         changed += store_note(ix, note)
         notes += 1
 
+    pool = ThreadPoolExecutor(max(1, workers), thread_name_prefix="granola")
+
+    def fetch(nid: str) -> None:
+        asked.add(nid)
+        queue.append((nid, pool.submit(full_note, get, nid)))
+        while len(queue) > workers:
+            settle()
+
     try:
         for summary in changed_notes(get, since):
             u = summary.get("updated_at")
@@ -287,12 +320,14 @@ def sync_pass(
             nid = str(summary["id"])
             if summary.get("deleted_at"):
                 asked.add(nid)
-                pending.pop(nid, None)
-                changed += forget_note(ix, nid)
+                queue.append((nid, None))
                 continue
             fetch(nid)
         for nid in [n for n in pending if n not in asked]:
             fetch(nid)
+        while queue:
+            settle()
     finally:
+        pool.shutdown(wait=True, cancel_futures=True)
         _save_pending(path, pending)
     return notes, changed, newest

@@ -1043,7 +1043,9 @@ class Assistant:
         try:
             said = await local_intents.answer(text, self._local)
             tier: int | None = 0
-            private = False  # worked out from private data (a memory, an email's text)
+            # Worked out from private data: a memory, an email's text, the title of a task
+            # found in mail, a meeting or Slack (local_intents sets ctx.private).
+            private = self._local.private
             if said is not None and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
                 private = self.last_private  # ...and is as private as what it repeats
@@ -1629,7 +1631,7 @@ class Assistant:
         try:
             said = await local_intents.answer(text, self._local, skip=local_intents.PHONE_SKIP)
             if said is not None:
-                return said, "0", False
+                return said, "0", self._local.private
             try:
                 said = await asyncio.to_thread(memory.answer, text, self.memory)
             except (ToolError, OSError) as exc:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import ctypes
+import ctypes.util
 import hmac
 import ipaddress
 import json
@@ -277,9 +279,66 @@ def _tailscale_exes() -> list[str]:
     return exes
 
 
+class _IfAddrs(ctypes.Structure):
+    pass
+
+
+_IfAddrs._fields_ = [
+    ("ifa_next", ctypes.POINTER(_IfAddrs)),
+    ("ifa_name", ctypes.c_char_p),
+    ("ifa_flags", ctypes.c_uint),
+    ("ifa_addr", ctypes.c_void_p),
+    ("ifa_netmask", ctypes.c_void_p),
+    ("ifa_dstaddr", ctypes.c_void_p),
+    ("ifa_data", ctypes.c_void_p),
+]
+_IFF_UP = 0x1
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")  # where Tailscale hands out addresses
+
+
+def _interface_ipv4s() -> list[tuple[str, str]]:
+    """(interface, IPv4 address) for every interface that's up, from getifaddrs(3): no
+    process spawned. Empty when the call isn't available."""
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    except OSError:
+        return []
+    head = ctypes.POINTER(_IfAddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        return []
+    out: list[tuple[str, str]] = []
+    try:
+        node = head
+        while node:
+            ifa = node.contents
+            if ifa.ifa_addr and ifa.ifa_flags & _IFF_UP:
+                raw = ctypes.string_at(ifa.ifa_addr, 8)
+                # BSD sockaddr: sa_len, sa_family (one byte each); Linux: a two-byte family
+                family = raw[1] if hasattr(socket, "AF_LINK") else int.from_bytes(raw[:2], "little")
+                if family == socket.AF_INET:
+                    out.append(((ifa.ifa_name or b"").decode(errors="replace"), socket.inet_ntoa(raw[4:8])))
+            node = ifa.ifa_next
+    finally:
+        libc.freeifaddrs(head)
+    return out
+
+
+def _tailscale_iface_ip() -> str | None:
+    """Tailscale's address read off the interfaces: the one 100.64.0.0/10 address on a
+    tunnel (utun on the Mac, tailscale0 elsewhere). None when there isn't exactly one."""
+    found = {
+        ip
+        for name, ip in _interface_ipv4s()
+        if name.startswith(("utun", "tailscale")) and ipaddress.ip_address(ip) in _CGNAT
+    }
+    return found.pop() if len(found) == 1 else None
+
+
 async def _tailscale_ip() -> str | None:
     from .mac import ToolError, _run
 
+    if found := _tailscale_iface_ip():
+        return found
     for exe in _tailscale_exes():
         try:
             ip = (await _run(exe, "ip", "-4", timeout=5)).splitlines()

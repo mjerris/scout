@@ -965,6 +965,14 @@ def test_the_rest_of_a_split_request_is_rejoined(monkeypatch: pytest.MonkeyPatch
         await hear(r, "forecast to start.", started=time.monotonic())
         queued, silenced = r.a._queued, r.a._silence_turn
         gate.set()
+        # Let the first turn end and the queued one run, before the loop closes: one
+        # started as asyncio.run shuts down was never finished (its cleanup then ran on
+        # a closed loop, a warning blamed on a later test).
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if r.a._queued is None and (r.a._turn is None or r.a._turn.done()):
+                break
+        assert r.a._turn is None or r.a._turn.done()
         return queued, silenced
 
     queued, silenced = run(go())
@@ -981,3 +989,27 @@ def test_conversations_are_kept_in_the_local_index() -> None:
 
     bodies = run(go())
     assert bodies and bodies[0].startswith("what time is it\nScout: It's 3:04")
+
+
+def test_a_task_answer_from_mail_is_private(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tier-0 task answer that names a task found in mail is private, like a mail
+    answer: it isn't handed to Claude as "just answered locally" context."""
+    from scout import index, reminders_mac, tasks
+
+    async def away(*a: Any, **kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(reminders_mac, "available", away)
+
+    async def go() -> tuple[bool, bool]:
+        r = make()
+        await tasks.add({"title": "Send Pat the travel cut", "from": "mail"}, index.default())
+        assert await r.a._answer_locally("what should I work on")
+        mail_private = r.a.last_private
+        await tasks.add({"title": "Order filters"}, index.default())
+        await tasks.done({"id": 1})
+        assert await r.a._answer_locally("what should I work on")
+        return mail_private, r.a.last_private
+
+    from_mail, own = run(go())
+    assert from_mail is True and own is False

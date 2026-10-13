@@ -582,8 +582,8 @@ top three and follow-ups that are overdue.
 
 **Found tasks.** Every 10 minutes while Scout is idle it reads what's new (the last two
 weeks, the first time), once each. Meetings, Granola notes and meeting notes that come
-by email, are read by Claude (`[tasks] extract_model`). Email is read by the local
-model and stays on the Mac; no-reply senders, newsletters and mail without an action
+by email, are read by Claude (`[tasks] extract_model`), a few at a time. Email and Slack
+are read by the local model and stay on the Mac; no-reply senders, newsletters and mail without an action
 cue are skipped without any AI. Found tasks are added directly, each with the quote
 that shows it and its source (`task_why`). A task that repeats an open one adds to it.
 Put your names and addresses in `[tasks] me` so it can tell your tasks from others'.
@@ -643,3 +643,12 @@ Connectors, API keys; a Business plan or above), scout-memory brings your meetin
 notes into the index every 30 minutes: the summary and the transcript, in chunks with
 each speaker named. Granola stays the record. Like mail, a meeting's text reaches
 Claude only in open privacy mode; otherwise Claude sees the title.
+
+**Slack.** With a Slack user token (`xoxp-...`) in `[slack] token`, scout-memory brings
+in the messages of every conversation you're in (channels, private channels, DMs and
+group DMs; archived and muted ones left out, and any named in `[slack] skip`) every
+15 minutes, each from where it left off (the last two weeks, the first time). A
+thread is one item with its replies. The task farm reads a conversation's new
+messages together with the local model, so Slack text stays on the Mac; bot messages
+and messages without an action cue are skipped. Like mail, Slack text reaches Claude
+only in open privacy mode. Making the app and its token: [docs/slack.md](docs/slack.md).

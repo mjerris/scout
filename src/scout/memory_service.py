@@ -269,6 +269,32 @@ async def granola_loop(ix: index.Index, cfg: Any, state: Path = GRANOLA_STATE) -
         await asyncio.sleep(max(1.0, cfg.every_min) * 60)
 
 
+SLACK_STATE = DATA / "state" / "slack.json"
+
+
+async def slack_loop(ix: index.Index, cfg: Any, state: Path = SLACK_STATE) -> None:
+    """Every cfg.every_min minutes: Slack messages new since each conversation's last pass."""
+    from . import slack
+
+    get = slack.fetcher(cfg.token)
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            t0 = time.monotonic()
+            msgs, changed = await loop.run_in_executor(
+                None, lambda: slack.sync_pass(ix, get, cfg.backfill_days, cfg.skip, state)
+            )
+            if changed:
+                log.info(
+                    "slack: %d messages (%d items changed) in %.0f s", msgs, changed, time.monotonic() - t0
+                )
+        except slack.SlackError as exc:
+            log.warning("slack: sync failed: %s", exc)
+        except Exception:
+            log.exception("slack: sync failed")
+        await asyncio.sleep(max(1.0, cfg.every_min) * 60)
+
+
 async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     cfg = load().index
     emb = index.LocalEmbedder(cfg.model, cfg.dims, cfg.unload_after_s) if cfg.semantic else None
@@ -287,6 +313,8 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         asyncio.create_task(_load_matrix(ix))  # noqa: RUF006 (runs once, logs its own failure)
     if load().granola.api_key:
         asyncio.create_task(granola_loop(ix, load().granola))  # noqa: RUF006 (runs for the service's life)
+    if load().slack.token:
+        asyncio.create_task(slack_loop(ix, load().slack))  # noqa: RUF006 (runs for the service's life)
     if cfg.semantic and cfg.background_embed:
         await ix.background(lambda: True)  # embeds, and re-reads edited journal files
     else:

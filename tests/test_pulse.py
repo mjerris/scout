@@ -51,8 +51,12 @@ def test_says_what_matters_once() -> None:
         "Reminder: Call Sam, due at 3 PM.",
     ]
     assert asyncio.run(p.check(NOW + dt.timedelta(minutes=5))) == []  # each said once
-    later = asyncio.run(p.check(dt.datetime(2026, 10, 12, 15, 40, tzinfo=TZ)))
-    assert later == ["Heads up: Dentist in 20 minutes."]
+    # A heads-up comes within the lead (10 minutes), and the pulse wakes up for it.
+    early = dt.datetime(2026, 10, 12, 15, 40, tzinfo=TZ)
+    assert asyncio.run(p.check(early)) == []
+    assert p.wait(early) == 10 * 60
+    later = asyncio.run(p.check(early + dt.timedelta(minutes=10)))
+    assert later == ["Heads up: Dentist in 10 minutes."]
 
 
 def test_missing_calendar_access_is_skipped() -> None:

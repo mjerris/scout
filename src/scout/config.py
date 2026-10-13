@@ -353,6 +353,17 @@ class GranolaConfig:
 
 
 @dataclass
+class SlackConfig:
+    # Slack messages in Scout's local search and the task farm (src/scout/slack.py,
+    # docs/slack.md): a Slack user token (xoxp-...) from an app made in your workspace.
+    # Empty: off. The token is only ever sent to slack.com.
+    token: str = ""
+    every_min: float = 15.0  # how often to look for new messages
+    backfill_days: float = 14.0  # the first time, read each conversation this far back
+    skip: list[str] = field(default_factory=list)  # channel names (or DM names) never read
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -391,6 +402,7 @@ class Config:
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     phone: PhoneConfig = field(default_factory=PhoneConfig)
     granola: GranolaConfig = field(default_factory=GranolaConfig)
+    slack: SlackConfig = field(default_factory=SlackConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)

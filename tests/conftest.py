@@ -70,6 +70,16 @@ def _own_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
 
 
 @pytest.fixture(autouse=True)
+def _fresh_access_checks() -> None:
+    """Calendar and Reminders remember access for minutes: each test starts asking anew."""
+    import scout.calendar_mac as calendar_mac
+    import scout.reminders_mac as reminders_mac
+
+    calendar_mac._cal_access.clear()
+    reminders_mac._access.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_apps(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may drive a real app (Notes, Mail, Reminders...) through osascript. Tests
     fake mac._run; one that forgets fails here instead of changing the user's data."""
