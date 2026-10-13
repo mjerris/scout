@@ -11,7 +11,7 @@ import re
 import time
 import wave
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -75,6 +75,8 @@ PHONE_TOOLS = {
         "list_timers",
     )
 }
+PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
+_PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_")  # an answer built from these is private
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
 
@@ -248,16 +250,20 @@ class Assistant:
             if took:
                 self.floor.release("briefing")
 
-    async def _record_turn(self, request: str, reply: str, by: str, private: bool) -> None:
-        """Keep the exchange in the local index, so "what did I ask about X" can find it."""
-        now = time.time()
+    async def _record_turn(
+        self,
+        request: str,
+        reply: str,
+        who: str,
+        private: bool,
+        tools: Sequence[tuple[str, dict[str, Any]]] = (),
+    ) -> None:
+        """Keep the exchange in the journal (memory/journal/, indexed), so "what did I ask
+        about X" can find it. The tools line says what was used, not what it returned."""
+        private = private or any(_PRIVATE_TOOL.match(trust.base(n)) for n, _ in tools)
         try:
             # The store may be the memory service: off the event loop.
-            await asyncio.to_thread(
-                self.index.put,
-                f"turn:{now:.3f}", "turn", title=request, body=f"{request}\nScout: {reply}",
-                ts=now, meta={"by": by, "private": private},
-            )  # fmt: skip
+            await asyncio.to_thread(self.index.journal_add, time.time(), who, request, reply, tools, private)
         except (ToolError, OSError) as exc:  # the memory service is down: only this record is lost
             log.warning("recording the conversation failed: %s", exc)
         except Exception:
@@ -1005,7 +1011,7 @@ class Assistant:
             if hint := mail_mac.take_setup_hint():  # a slow mail search: offer the one-time fix
                 self.say(hint)
             await self.speaker.wait_idle()
-        await self._record_turn(text, said or "(done)", f"tier {tier}", private)
+        await self._record_turn(text, said or "(done)", "room", private)
         return True
 
     def relay(self, session: str, text: str) -> str:
@@ -1150,6 +1156,7 @@ class Assistant:
             else None
         )
         replies: list[str] = []
+        used: list[tuple[str, dict[str, Any]]] = []
         try:
             if await self._answer_locally(text):
                 return
@@ -1176,6 +1183,7 @@ class Assistant:
                     replies.append(data)
                 elif kind == "tool":
                     name, args = data
+                    used.append((name, args if isinstance(args, dict) else {}))
                     self._turn_tool = name
                     self.emit("tool", name=name, input=_preview(args))
                     if self.state == "speaking" and not self.speaker.busy:
@@ -1203,7 +1211,7 @@ class Assistant:
             if progress:
                 progress.cancel()
             if replies:
-                self._spawn(self._record_turn(text, " ".join(replies), "claude", False))
+                self._spawn(self._record_turn(text, " ".join(replies), "room", False, used))
             self._set_state("idle")
             # The follow-up window is for a reply the room heard; a phone-only turn opens none.
             heard_in_room = self._out["mini"]
@@ -1399,7 +1407,8 @@ class Assistant:
             log.info("phone: answered locally (tier %s): %s -> %s", tier, text, said)
             ledger.record(tier, time.monotonic() - t0, client=agent)
             self.emit("local", text=said, client=agent)
-            await self._record_turn(text, said, f"{agent} tier {tier}", private)
+            if agent != PHONE_AGENT:  # the phone service keeps the whole call
+                await self._record_turn(text, said, agent, private)
             return {"status": "ok", "text": said, "tier": tier}
         if self._phone_brain is None:
             server, names = build_server(self.timers, memory=self.memory)  # no relaying to sessions
@@ -1426,7 +1435,8 @@ class Assistant:
             }
         reply = speech.to_speech(" ".join(replies)) or "Done."
         self.emit("claude", text=reply, client=agent)
-        self._spawn(self._record_turn(text, reply, f"{agent} claude", False))
+        if agent != PHONE_AGENT:  # the phone service keeps the whole call
+            self._spawn(self._record_turn(text, reply, agent, False))
         return {"status": "ok", "text": reply, "tier": "claude"}
 
     async def _local_text(self, text: str) -> tuple[str | None, str, bool]:

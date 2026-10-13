@@ -1,5 +1,6 @@
 """Scout's memory: facts the user tells it ("remember that my dentist is Dr. Lee",
-"Pat is my manager"), kept on this Mac in state/memory.json.
+"Pat is my manager"), kept on this Mac in memory/facts.md: one "- fact · date" line
+each, which the user can edit; an edit is picked up on the next read.
 
 Plain code answers "remember...", "what do you know about...", "who is my
 dentist" and "forget..." (tier 0, `answer`). Claude sees a memory only when it
@@ -8,6 +9,7 @@ the room agent can add or drop one with its remember / forget tools."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -44,28 +46,100 @@ def keywords(text: str) -> set[str]:
     return out
 
 
+FACTS_HEADER = (
+    "# What Scout remembers\n\n"
+    'One fact per line, starting with "- ". Edit freely; the date after a fact is when it was said.\n\n'
+)
+_FACT_LINE = re.compile(r"^- (.+?)(?: · (\d{4}-\d\d-\d\d)(?: (\d\d:\d\d))?)?\s*$")
+
+
+def parse_facts(text: str, default_ts: float = 0.0) -> list[dict[str, Any]]:
+    out = []
+    for line in text.splitlines():
+        m = _FACT_LINE.match(line.strip())
+        if not m or not m.group(1).strip():
+            continue
+        ts = default_ts
+        if m.group(2):
+            with contextlib.suppress(ValueError):
+                ts = time.mktime(time.strptime(f"{m.group(2)} {m.group(3) or '00:00'}", "%Y-%m-%d %H:%M"))
+        out.append({"text": m.group(1).strip(), "ts": ts})
+    return out
+
+
+def render_facts(facts: list[dict[str, Any]]) -> str:
+    lines = [
+        f"- {f['text']}"
+        + (f" · {time.strftime('%Y-%m-%d %H:%M', time.localtime(f['ts']))}" if f.get("ts") else "")
+        for f in facts
+    ]
+    return FACTS_HEADER + "\n".join(lines) + ("\n" if lines else "")
+
+
 class Memory:
-    def __init__(self, path: Path) -> None:
+    """Facts in a markdown file (facts.md), or JSON for an older path; `legacy`, a JSON
+    file from before facts.md, is brought over once."""
+
+    def __init__(self, path: Path, legacy: Path | None = None) -> None:
         self.path = path
         self.facts: list[dict[str, Any]] = []
         self.on_change: Callable[[], None] | None = None  # e.g. re-index (index.py)
         # The memory service runs requests on several threads: one change at a time.
         self._lock = threading.RLock()
+        self._mtime = 0.0
+        if legacy is not None and legacy.exists() and not path.exists():
+            try:
+                old = json.loads(legacy.read_text())
+                self.facts = [f for f in old.get("facts", []) if isinstance(f, dict) and f.get("text")]
+                self._save()
+                legacy.rename(legacy.with_suffix(legacy.suffix + ".moved"))
+                log.info("moved %d facts to %s", len(self.facts), path)
+            except (OSError, ValueError) as exc:
+                log.warning("facts in %s not moved (%s)", legacy, exc)
+        self._load()
+
+    def _load(self) -> None:
         try:
-            data = json.loads(path.read_text())
-            self.facts = [f for f in data.get("facts", []) if isinstance(f, dict) and f.get("text")]
+            st = self.path.stat()
+            text = self.path.read_text()
+            if self.path.suffix == ".md":
+                self.facts = parse_facts(text, st.st_mtime)
+            else:
+                data = json.loads(text)
+                self.facts = [f for f in data.get("facts", []) if isinstance(f, dict) and f.get("text")]
+            self._mtime = st.st_mtime
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
-            log.warning("memory file %s unreadable (%s); starting empty", path, exc)
+            log.warning("memory file %s unreadable (%s); starting empty", self.path, exc)
+
+    def refresh(self) -> None:
+        """Re-read the file if it was edited since (by the user, by hand)."""
+        try:
+            m = self.path.stat().st_mtime
+        except OSError:
+            return
+        if m != self._mtime:
+            with self._lock:
+                self._load()
+            if self.on_change is not None:
+                try:
+                    self.on_change()
+                except Exception:
+                    log.exception("memory change hook failed")
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                f.write(json.dumps({"facts": self.facts}, indent=1))
+                f.write(
+                    render_facts(self.facts)
+                    if self.path.suffix == ".md"
+                    else json.dumps({"facts": self.facts}, indent=1)
+                )
             Path(tmp).replace(self.path)
+            self._mtime = self.path.stat().st_mtime
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -93,6 +167,7 @@ class Memory:
             raise ToolError("that has control characters")
         # The same fact said again (in other small words) replaces the old copy.
         new = keywords(fact)
+        self.refresh()
         with self._lock:
             self.facts = [
                 f for f in self.facts if f["text"].lower() != fact.lower() and keywords(f["text"]) != new
@@ -107,6 +182,7 @@ class Memory:
         want = keywords(about)
         if not want:
             return []
+        self.refresh()
         return [f["text"] for f in reversed(self.facts) if want <= keywords(f["text"])]
 
     def forget(self, about: str) -> list[str]:
@@ -120,11 +196,13 @@ class Memory:
     def relevant(self, request: str, limit: int = 5) -> list[str]:
         """Facts sharing a content word with the request, most overlap (then newest) first."""
         want = keywords(request)
+        self.refresh()
         scored = [(len(want & keywords(f["text"])), i, f["text"]) for i, f in enumerate(self.facts)]
         hits = sorted((s for s in scored if s[0]), reverse=True)
         return [t for _, _, t in hits[:limit]]
 
     def newest(self, limit: int = 10) -> list[str]:
+        self.refresh()
         return [f["text"] for f in reversed(self.facts[-limit:])]
 
 

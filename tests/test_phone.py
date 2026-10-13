@@ -722,3 +722,64 @@ def test_each_calls_report_is_kept_privately(
     assert names == ["call-y-end.json", "call-zx-summary.json"]
     end = next(reports.glob("*-call-y-end.json"))
     assert json.loads(end.read_text())["call_log"] == [{"role": "assistant"}]
+
+
+SYNTH_LOG = [
+    {"role": "system", "content": "You are Scout...", "timestamp": 1_791_900_000_000_000},
+    {"role": "assistant", "content": "Hi, it's Scout.", "timestamp": 1_791_900_002_000_000},
+    {"role": "user", "content": "What's the weather", "timestamp": 1_791_900_005_000_000},
+    {"role": "user", "content": "in Ann Arbor?", "timestamp": 1_791_900_006_000_000},
+    {"role": "system-log", "action": "filler", "content": "Checking the weather.", "timestamp": 1_791_900_007_000_000},
+    {"role": "assistant-manual", "content": "Checking the weather.", "timestamp": 1_791_900_007_000_000},
+    {"role": "assistant", "content": "", "timestamp": 1_791_900_008_000_000,
+     "tool_calls": [{"function": {"name": "weather", "arguments": "{\"place\": \"Ann Arbor\"}"}}]},
+    {"role": "tool", "content": "Sunny, 61 F...", "timestamp": 1_791_900_009_000_000},
+    {"role": "assistant", "content": "Sunny and 61.", "timestamp": 1_791_900_010_000_000},
+    {"role": "user", "content": "Any mail from Pat?", "timestamp": 1_791_900_020_000_000},
+    {"role": "assistant", "content": "", "timestamp": 1_791_900_021_000_000,
+     "tool_calls": [{"function": {"name": "mail_search", "arguments": "{\"query\": \"from:Pat\"}"}}]},
+    {"role": "assistant", "content": "One from Pat about Friday.", "timestamp": 1_791_900_023_000_000},
+    {"role": "user", "content": "Bye", "timestamp": 1_791_900_030_000_000},
+]  # fmt: skip
+
+
+def test_a_call_log_becomes_journal_exchanges() -> None:
+    xs = ps.call_exchanges(SYNTH_LOG)
+    assert [(x["q"], x["a"]) for x in xs] == [
+        ("What's the weather in Ann Arbor?", "Sunny and 61."),
+        ("Any mail from Pat?", "One from Pat about Friday."),
+        ("Bye", ""),
+    ]
+    assert xs[0]["tools"] == [("weather", {"place": "Ann Arbor"})] and not xs[0]["private"]
+    assert xs[1]["tools"] == [("mail_search", {"query": "from:Pat"})] and xs[1]["private"]
+    assert xs[0]["ts"] == 1_791_900_005.0  # microseconds to seconds
+
+
+def test_odd_call_logs_dont_break_it() -> None:
+    assert ps.call_exchanges([]) == []
+    assert ps.call_exchanges([{"role": "assistant", "content": "hello"}, "junk"]) == []  # type: ignore[list-item]
+    bad = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"function": {"name": "x", "arguments": "{nope"}}]},
+    ]
+    assert ps.call_exchanges(cast(Any, bad))[0]["tools"] == [("x", {})]
+
+
+def test_a_verified_call_is_journaled_when_it_ends(paired: tuple[Path, str, str], tmp_path: Path) -> None:
+    from scout import index
+
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), FakeScout(), AUTH, "s" * 43,
+                          journal=lambda log: ps.journal_call(log, ix))  # fmt: skip
+    agent.calls.bind("call-j", paired[1])
+    agent._call_ended(SYNTH_LOG, {"call_id": "call-j"})
+    hits = ix.search("weather ann arbor", semantic=False)
+    assert hits and hits[0].who == "phone" and "Sunny and 61." in hits[0].body
+    mail = ix.search("Pat", semantic=False)[0]
+    assert (
+        "One from Pat" not in mail.body and "mail_search(query=from:Pat)" in mail.body
+    )  # private: reference only
+    agent._call_ended(SYNTH_LOG, {"call_id": "never-verified"})  # an unverified call writes nothing
+    assert ix.count("turn") == 3

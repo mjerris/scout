@@ -14,6 +14,10 @@ token (state/memory.token, readable by this user only):
     POST /v1/search {query, kinds, since, limit, semantic} -> {hits}
     POST /v1/memories/add {text} | /forget {about} | /matching {about}
     POST /v1/memories/relevant {request, limit} | /newest {limit} | /list
+    POST /v1/journal/add {ts, who, q, a, tools, private}  -> {file}
+
+Scout's own records are markdown files under memory/ (journal.py; facts.md), the
+index is built from them, and edits to them are picked up within a minute.
 
 It runs under its own login item (com.local.scout.memory) at low CPU priority, so
 embedding never competes with listening, and it keeps running while the voice app
@@ -25,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import secrets
@@ -45,6 +50,8 @@ log = logging.getLogger("scout.memory_service")
 DB = DATA / "state" / "memory.db"
 TOKEN = DATA / "state" / "memory.token"
 OLD_DB = DATA / "state" / "scout.db"  # where the store lived inside the app before
+ROOT = DATA / "memory"  # the markdown files: journal/, facts.md
+OLD_FACTS = DATA / "state" / "memory.json"  # facts before facts.md
 
 
 def token(path: Path = TOKEN) -> str:
@@ -89,6 +96,26 @@ def migrate(ix: index.Index, old: Path = OLD_DB) -> int:
         return moved
     finally:
         src.close()
+
+
+def migrate_turns(ix: index.Index) -> int:
+    """Once: conversations indexed before the journal (ids "turn:<time>") become journal
+    entries, so the files hold every one."""
+    if ix.journal_root is None:
+        return 0
+    with ix._lock:
+        rows = ix._conn.execute(
+            "SELECT id, title, body, ts, meta FROM docs WHERE kind = 'turn' AND id LIKE 'turn:%' ORDER BY ts"
+        ).fetchall()
+    for id, title, body, ts, meta in rows:
+        m = index._meta(meta)
+        answer = body.split("\nScout: ", 1)[1] if "\nScout: " in body else ""
+        who = "phone" if str(m.get("by", "")).startswith("phone") else "room"
+        ix.journal_add(float(ts), who, title, answer, private=bool(m.get("private")))
+        ix.delete(id)
+    if rows:
+        log.info("moved %d conversations into the journal", len(rows))
+    return len(rows)
 
 
 def _hit(h: index.Hit) -> dict[str, Any]:
@@ -146,6 +173,9 @@ class Service:
             "/v1/memories/relevant": lambda a: {"facts": self.relevant(str(a.get("request") or ""), int(a.get("limit") or 5))},
             "/v1/memories/newest": lambda a: {"facts": self.memory.newest(int(a.get("limit") or 10))},
             "/v1/memories/list": lambda a: {"facts": list(self.memory.facts)},
+            "/v1/journal/add": lambda a: {"file": self.ix.journal_add(
+                float(a["ts"]), str(a.get("who") or "room"), str(a.get("q") or ""), str(a.get("a") or ""),
+                [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")))},
         }  # fmt: skip
         for path, fn in routes.items():
             r.add_post(path, self._handler(fn))
@@ -189,20 +219,53 @@ class Service:
         return handle
 
 
-async def serve(host: str, port: int, db: Path = DB) -> None:
+GRANOLA_STATE = DATA / "state" / "granola.json"
+
+
+async def granola_loop(ix: index.Index, cfg: Any, state: Path = GRANOLA_STATE) -> None:
+    """Every cfg.every_min minutes: Granola notes changed since the last pass."""
+    from . import granola
+
+    get = granola.fetcher(cfg.api_key)
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            since = json.loads(state.read_text()).get("updated_after") if state.exists() else None
+            t0 = time.monotonic()
+            notes, changed, newest = await loop.run_in_executor(None, granola.sync_pass, ix, get, since)
+            if newest != since:
+                state.write_text(json.dumps({"updated_after": newest}))
+            if notes:
+                log.info("granola: %d notes (%d items) in %.0f s", notes, changed, time.monotonic() - t0)
+        except granola.GranolaError as exc:
+            log.warning("granola: sync failed: %s", exc)
+        except Exception:
+            log.exception("granola: sync failed")
+        await asyncio.sleep(max(1.0, cfg.every_min) * 60)
+
+
+async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     cfg = load().index
     emb = index.LocalEmbedder(cfg.model, cfg.dims, cfg.unload_after_s) if cfg.semantic else None
     ix = index.Index(db, emb, cfg.min_similarity)
+    ix.journal_root = root
+    ix.keep_private = lambda: load().privacy.mode == "open"
     migrate(ix)
-    svc = Service(ix, Memory(DATA / "state" / "memory.json"), token())
+    migrate_turns(ix)
+    ix.sync_files()
+    svc = Service(ix, Memory(root / "facts.md", legacy=OLD_FACTS), token())
     runner = web.AppRunner(svc.app(), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
     log.info("scout-memory listening on %s:%d (%d documents)", host, port, ix.count())
+    if load().granola.api_key:
+        asyncio.create_task(granola_loop(ix, load().granola))  # noqa: RUF006 (runs for the service's life)
     if cfg.semantic and cfg.background_embed:
-        await ix.background(lambda: True)
+        await ix.background(lambda: True)  # embeds, and re-reads edited journal files
     else:
-        await asyncio.Event().wait()
+        while True:  # still pick up journal edits
+            await asyncio.sleep(60)
+            await asyncio.get_running_loop().run_in_executor(None, ix.sync_files)
 
 
 def main() -> None:
