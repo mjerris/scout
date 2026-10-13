@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import logging
 import secrets
 import stat
@@ -498,3 +499,18 @@ def test_phone_brain_refuses_what_would_ask(tmp_path: Path) -> None:
     assert "mcp__voice_app__weather" not in opts.disallowed_tools
     assert "remote-control" not in opts.extra_args
     assert run(b._ask("Bash", {"command": "ls -la /"})) is False
+
+
+def test_a_verified_call_knows_the_date(rig: Rig) -> None:
+    swml = rig.swml("call-date", uvars(rig.device, rig.secret))
+    sections = {s["title"]: s["body"] for s in _ai(swml)["prompt"]["pom"]}
+    assert "It is now" in sections["Now"]
+    assert re.search(r"\d{4}-\d{2}-\d{2}", sections["Now"])
+
+
+def test_now_line_names_the_day_and_zone() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    now = dt.datetime(2026, 10, 12, 23, 50, tzinfo=ZoneInfo("America/Detroit"))
+    assert ps.now_line(now).startswith("It is now Monday, October 12, 2026, 23:50 (EDT).")
