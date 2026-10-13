@@ -50,10 +50,10 @@ def served(tmp_path: Path) -> Iterator[tuple[memory_client.Client, memory_servic
 
 def test_store_and_search_over_http(served: tuple[memory_client.Client, Any]) -> None:
     store = memory_client.Store(served[0])
-    assert store.put("n1", "note", "Propane", "Refilled propane in Cadillac", ts=100) is True
-    assert store.put("n1", "note", "Propane", "Refilled propane in Cadillac", ts=100) is False
+    assert store.put("n1", "note", "Oil change", "Oil changed in Cadillac", ts=100) is True
+    assert store.put("n1", "note", "Oil change", "Oil changed in Cadillac", ts=100) is False
     store.put("m1", "memory", "Pat is my manager", "Pat is my manager", ts=200)
-    assert [h.id for h in store.search("propane", semantic=False)] == ["n1"]
+    assert [h.id for h in store.search("oil", semantic=False)] == ["n1"]
     assert store.search("who is my boss")[0].id == "m1"  # by meaning
     assert store.count() == 2 and store.count("note") == 1
     assert [h.id for h in store.recent(["note", "memory"], 5)] == ["m1", "n1"]

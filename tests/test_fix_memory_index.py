@@ -77,14 +77,14 @@ class RewritingEmbedder(FakeEmbedder):
     def embed(self, texts: Sequence[str], query: bool = False) -> np.ndarray:
         if self.ix is not None and not query:
             ix, self.ix = self.ix, None
-            ix.put("mail:1", "mail", "Propane", "The full body: refilled propane in Cadillac", ts=5)
+            ix.put("mail:1", "mail", "Oil change", "The full body: oil changed in Cadillac", ts=5)
         return super().embed(texts, query)
 
 
 def test_a_vector_is_not_kept_for_text_that_changed_while_embedding(scratch: Path) -> None:
     emb = RewritingEmbedder()
     ix = index.Index(scratch / "m.db", emb)
-    ix.put("mail:1", "mail", "Propane", "", ts=5)  # subject only
+    ix.put("mail:1", "mail", "Oil change", "", ts=5)  # subject only
     emb.ix = ix
     assert ix.embed_pending() == 1  # embedded the subject-only text; the body arrived meanwhile
     assert ix.embed_pending() == 1  # so the full mail still needs its own vector
