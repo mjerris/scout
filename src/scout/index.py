@@ -39,7 +39,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, notefiles
+from . import journal, notefiles, taskfiles
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -490,11 +490,33 @@ class Index:
         self.sync_file(p)
         return True
 
+    def task_add(self, title: str, fields: dict[str, Any], context: str = "") -> int:
+        """A new task file (taskfiles.py), indexed; returns its number."""
+        if self.journal_root is None:
+            raise RuntimeError("no journal")
+        p = taskfiles.write(self.journal_root, title, fields, context)
+        self.sync_file(p)
+        return taskfiles.number(p) or 0
+
+    def task_update(self, n: int, fields: dict[str, Any], add_context: str = "") -> bool:
+        """Change task n's fields (None removes one) and add context; False if no such task."""
+        if self.journal_root is None:
+            raise RuntimeError("no journal")
+        p = taskfiles.find(self.journal_root, n)
+        if p is None:
+            return False
+        taskfiles.update(p, dict(fields), add_context)
+        self.sync_file(p)
+        return True
+
     def _file_kind(self, p: Path) -> tuple[str, str, bool] | None:
         """(kind, id prefix, whether ids match it exactly) for a file Scout keeps."""
         if self.journal_root is not None and p.parent == notefiles.notes_dir(self.journal_root):
             key = notefiles.id_prefix(p)
             return ("note", key, True) if key else None
+        if self.journal_root is not None and p.parent == taskfiles.tasks_dir(self.journal_root):
+            key = taskfiles.id_prefix(p)
+            return ("task", key, True) if key else None
         key = journal.id_prefix(p)
         return ("turn", key, False) if key else None
 
@@ -505,7 +527,8 @@ class Index:
         if what is None:
             return 0
         kind, prefix, exact = what
-        items = (notefiles.parse(p) if kind == "note" else journal.parse(p)) if p.exists() else []
+        parse = {"note": notefiles.parse, "task": taskfiles.parse}.get(kind, journal.parse)
+        items = parse(p) if p.exists() else []
         changed = sum(self.put(kind=kind, **it) for it in items)
         keep = {it["id"] for it in items}
         with self._lock:
@@ -535,7 +558,8 @@ class Index:
         with self._lock:
             known = dict(self._conn.execute("SELECT path, sig FROM files").fetchall())
         changed = 0
-        files = journal.day_files(self.journal_root) + notefiles.files(self.journal_root)
+        root = self.journal_root
+        files = journal.day_files(root) + notefiles.files(root) + taskfiles.files(root)
         for p in files:
             if known.get(str(p)) != journal.file_sig(p):
                 changed += self.sync_file(p)
@@ -868,6 +892,8 @@ class Store(Protocol):
     ) -> str: ...  # fmt: skip
     def note_add(self, title: str, body: str, ts: float | None = None) -> int: ...
     def note_delete(self, n: int) -> bool: ...
+    def task_add(self, title: str, fields: dict[str, Any], context: str = "") -> int: ...
+    def task_update(self, n: int, fields: dict[str, Any], add_context: str = "") -> bool: ...
     def search(
         self, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
         limit: int = 8, semantic: bool | None = True,
