@@ -27,6 +27,7 @@ so tokens survive restarts). Both files are mode 0600, made on first run.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from signalwire.core.function_result import FunctionResult
 from . import ledger, progress, shared_tools
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
+from .phone_devices import PATH as DEVICES
 from .phone_devices import CallCheck, write_private
 
 log = logging.getLogger("scout.phone")
@@ -55,6 +57,13 @@ SECRET = DATA / "state" / "phone.secret"
 AGENT = "phone"  # how Scout's local API knows these calls
 BIND_TTL_S = 4 * 3600.0  # a verified call's binding lasts at most this long
 TOOL_TIMEOUT_S = 90.0
+# SignalWire stops waiting for a tool after about 10 s (seen on a live call: it re-sent
+# places_near every 10-13 s, in silence). Answer by then; a slow lookup keeps running.
+TOOL_DEADLINE_S = 8.0
+STILL_LOOKING = (
+    "Still looking that up. Tell the user it's taking a moment, then call this tool again "
+    "with the same arguments to get the answer."
+)
 ASK_TIMEOUT_S = 40.0  # Scout itself answers within 20 s ("still working" after that)
 REFUSED = "This call isn't verified, so I can't do that."
 GOODBYE = "Sorry, this phone isn't paired with Scout. Goodbye."
@@ -171,39 +180,57 @@ def call_id_of(body: Any) -> str | None:
 
 
 class Calls:
-    """Verified calls: call_id -> (device, when bound). In memory, with a TTL."""
+    """Verified calls: call_id -> (device, when bound, wall clock), with a TTL. Kept on
+    disk when given a path, so a restart (an update) doesn't cut off a call in progress."""
 
-    def __init__(self, ttl_s: float = BIND_TTL_S) -> None:
+    def __init__(self, ttl_s: float = BIND_TTL_S, path: Path | None = None) -> None:
         self.ttl_s = ttl_s
+        self.path = path
         self._calls: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()  # the SDK runs per-call config in worker threads
+        if path is not None:
+            try:
+                data = json.loads(path.read_text())
+                now = time.time()
+                self._calls = {
+                    str(c): (str(d), float(at)) for c, (d, at) in data.items() if now - float(at) <= ttl_s
+                }
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+
+    def _save(self) -> None:  # with the lock held
+        if self.path is not None:
+            write_private(self.path, json.dumps(self._calls))
 
     def bind(self, call_id: str, device: str) -> None:
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             for c in [c for c, (_, at) in self._calls.items() if now - at > self.ttl_s]:
                 del self._calls[c]
             self._calls[call_id] = (device, now)
+            self._save()
 
     def device(self, call_id: str | None) -> str | None:
         if not call_id:
             return None
         with self._lock:
             got = self._calls.get(call_id)
-        if got is None or time.monotonic() - got[1] > self.ttl_s:
+        if got is None or time.time() - got[1] > self.ttl_s:
             return None
         return got[0]
 
     def elapsed(self, call_id: str | None) -> float | None:
         with self._lock:
             got = self._calls.get(call_id or "")
-        return time.monotonic() - got[1] if got else None
+        return time.time() - got[1] if got else None
 
     def end(self, call_id: str | None) -> float | None:
         """Forget a call; how long it was bound, if it was."""
         with self._lock:
             got = self._calls.pop(call_id or "", None)
-        return time.monotonic() - got[1] if got else None
+            if got:
+                self._save()
+        return time.time() - got[1] if got else None
 
 
 class PhoneAgent(AgentBase):
@@ -217,6 +244,7 @@ class PhoneAgent(AgentBase):
         scout: Caller = call_scout,
         auth: tuple[str, str] | None = None,
         secret: str | None = None,
+        calls: Calls | None = None,
     ) -> None:
         super().__init__(
             name="scout",
@@ -230,7 +258,8 @@ class PhoneAgent(AgentBase):
         )
         self.check = check
         self.scout = scout
-        self.calls = Calls()
+        self.calls = calls if calls is not None else Calls()
+        self._lookups: dict[str, asyncio.Task[dict[str, Any]]] = {}  # lookups past the deadline
         self.prompt_add_section("Scout", body=PROMPT)
         self.set_post_prompt(
             "Summarize the call in one or two sentences: what was asked and what was answered."
@@ -312,12 +341,27 @@ class PhoneAgent(AgentBase):
             if self.verified(raw_data, name) is None:
                 return FunctionResult(REFUSED)
             body = {"agent": AGENT, "name": name, "args": {k: v for k, v in args.items() if v is not None}}
-            r = await self.scout("/api/tool", body, TOOL_TIMEOUT_S)
+            r = await self._within_deadline(json.dumps(body, sort_keys=True), body)
+            if r is None:
+                return FunctionResult(STILL_LOOKING)
             if r.get("status") == "ok":
                 return FunctionResult(str(r.get("text", "")))
             return FunctionResult(f"Not done: {r.get('error', r)}")
 
         return handle
+
+    async def _within_deadline(self, key: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        """Scout's answer to a tool call, or None if it isn't ready by the deadline. The
+        lookup keeps going; the same call asked again picks it up."""
+        task = self._lookups.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self.scout("/api/tool", body, TOOL_TIMEOUT_S))
+            self._lookups[key] = task
+        done, _ = await asyncio.wait({task}, timeout=TOOL_DEADLINE_S)
+        if not done:
+            return None
+        self._lookups.pop(key, None)
+        return task.result()
 
     async def _ask(self, args: dict[str, Any], raw_data: dict[str, Any] | None = None) -> FunctionResult:
         if self.verified(raw_data, "ask_scout") is None:
@@ -378,7 +422,9 @@ def config_problem(cfg: PhoneConfig) -> str | None:
 def build(cfg: PhoneConfig, scout: Caller = call_scout, devices: Path | None = None) -> PhoneAgent:
     """The agent for this config. Webhook URLs and signature checks use public_url."""
     os.environ["SWML_PROXY_URL_BASE"] = cfg.public_url.rstrip("/")  # read by the SDK, here and per request
-    return PhoneAgent(cfg, CallCheck(cfg.address, cfg.call_skew_s, devices), scout)
+    state = (devices or DEVICES).parent
+    check = CallCheck(cfg.address, cfg.call_skew_s, devices, nonces=state / "phone_nonces.json")
+    return PhoneAgent(cfg, check, scout, calls=Calls(path=state / "phone_calls.json"))
 
 
 def main() -> None:

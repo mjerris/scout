@@ -138,12 +138,21 @@ class CallCheck:
     """Checks the userVariables a call arrives with. Nonces are remembered in memory for
     twice the allowed clock skew (a nonce older than that fails on its timestamp anyway)."""
 
-    def __init__(self, address: str, skew_s: float, path: Path | None = None) -> None:
+    def __init__(
+        self, address: str, skew_s: float, path: Path | None = None, nonces: Path | None = None
+    ) -> None:
         self.address = address
         self.skew_s = skew_s
         self.path = path
-        self._seen: dict[str, float] = {}  # nonce -> forget after (monotonic)
+        self.nonces = nonces  # kept on disk, so a restart can't reopen a replay window
+        self._seen: dict[str, float] = {}  # nonce -> forget after (wall clock)
         self._lock = threading.Lock()
+        if nonces is not None:
+            try:
+                data = json.loads(nonces.read_text())
+                self._seen = {str(n): float(u) for n, u in data.items() if float(u) > time.time()}
+            except (OSError, ValueError, AttributeError):
+                pass
 
     def device_ok(self, device: str) -> bool:
         """Still paired and not revoked (read fresh: forgetting a phone works at once)."""
@@ -182,13 +191,15 @@ class CallCheck:
             return Verdict(False, device, "device secret unreadable")
         if not hmac.compare_digest(want.encode(), sig.strip().lower().encode()):
             return Verdict(False, device, "bad signature")
-        mono = time.monotonic()
+        wall = time.time()
         with self._lock:
-            for n in [n for n, until in self._seen.items() if until < mono]:
+            for n in [n for n, until in self._seen.items() if until < wall]:
                 del self._seen[n]
             if nonce in self._seen:
                 return Verdict(False, device, "nonce replayed")
-            self._seen[nonce] = mono + 2 * self.skew_s
+            self._seen[nonce] = wall + 2 * self.skew_s
+            if self.nonces is not None:
+                write_private(self.nonces, json.dumps(self._seen))
         return Verdict(True, device)
 
 

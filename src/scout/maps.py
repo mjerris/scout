@@ -25,7 +25,6 @@ from .mac import ToolError
 OVERPASS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
 )
 TRY = aiohttp.ClientTimeout(total=12)
 OSRM = "https://router.project-osrm.org"

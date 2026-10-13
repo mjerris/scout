@@ -523,3 +523,72 @@ def test_every_phone_tool_has_fillers_for_its_wait(rig: Rig) -> None:
         assert funcs[t.name]["fillers"]["default"], t.name
     assert funcs["calendar_events"]["fillers"]["default"][0] == "Looking at your calendar."
     assert funcs["weather"]["fillers"]["default"][0] == "Getting the weather."
+
+
+# --- restarts and slow lookups --------------------------------------------------------------
+
+
+def test_a_verified_call_survives_a_restart(tmp_path: Path) -> None:
+    path = tmp_path / "calls.json"
+    ps.Calls(path=path).bind("call-r", "dev1")
+    assert ps.Calls(path=path).device("call-r") == "dev1"  # a new process reads it back
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    again = ps.Calls(path=path)
+    again.end("call-r")
+    assert ps.Calls(path=path).device("call-r") is None
+
+
+def test_an_expired_call_is_not_reloaded(tmp_path: Path) -> None:
+    path = tmp_path / "calls.json"
+    path.write_text(json.dumps({"old": ["dev1", time.time() - ps.BIND_TTL_S - 5]}))
+    assert ps.Calls(path=path).device("old") is None
+
+
+def test_a_nonce_stays_used_across_a_restart(paired: tuple[Path, str, str], tmp_path: Path) -> None:
+    path, device, secret = paired
+    nonces = tmp_path / "nonces.json"
+    good = uvars(device, secret)
+    assert CallCheck(ADDRESS, 60, path, nonces=nonces).check(good).ok
+    assert CallCheck(ADDRESS, 60, path, nonces=nonces).check(good).reason == "nonce replayed"
+
+
+def test_build_keeps_call_state_beside_the_devices(paired: tuple[Path, str, str]) -> None:
+    path, _, _ = paired
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.build(cfg, FakeScout(), devices=path)
+    assert agent.calls.path == path.parent / "phone_calls.json"
+    assert agent.check.nonces == path.parent / "phone_nonces.json"
+
+
+class SlowScout(FakeScout):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def __call__(self, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        self.calls.append((path, body, timeout))
+        await self.release.wait()
+        return {"status": "ok", "text": "Two truck stops near Luther."}
+
+
+def test_a_slow_tool_answers_in_time_and_keeps_going(
+    paired: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ps, "TOOL_DEADLINE_S", 0.05)
+    scout = SlowScout()
+    cfg = PhoneConfig(enabled=True, signing_key=KEY, public_url=PUBLIC, address=ADDRESS)
+    agent = ps.PhoneAgent(cfg, CallCheck(ADDRESS, 60, paired[0]), scout, AUTH, "s" * 43)
+    agent.calls.bind("call-s", paired[1])
+    handle = agent._tool_handler("places_near")
+    args = {"what": "diesel", "near": "Luther, Michigan"}
+
+    async def run() -> tuple[str, str]:
+        first = await handle(args, {"call_id": "call-s"})
+        scout.release.set()
+        second = await handle(args, {"call_id": "call-s"})
+        return first.to_dict()["response"], second.to_dict()["response"]
+
+    first, second = asyncio.run(run())
+    assert first == ps.STILL_LOOKING
+    assert second == "Two truck stops near Luther."
+    assert len(scout.calls) == 1  # the second ask picked up the same lookup

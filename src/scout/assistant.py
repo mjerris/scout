@@ -59,7 +59,9 @@ _CALENDARISH = re.compile(
 _MAILISH = re.compile(r"\b(e-?mails?|inbox|mail|messages? from)\b")
 ROOM = "room"
 PHONE = "phone"  # the agent name scout-phone uses for its calls
-ASK_DEADLINE_S = 20.0  # an ask from the phone answers within this, or says it's still working
+ASK_DEADLINE_S = (
+    7.0  # an ask from the phone answers within this, or says it's still working (SignalWire waits ~10 s)
+)
 ASK_KEEP_S = 600.0  # a late answer waits this long for the phone to ask again
 ASK_STILL_WORKING = "I'm still working on that; ask me again in a moment."
 # Scout's own tools a phone request may use through Claude: the shared tools that never
