@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Manage Scout's background app.
 #   scoutctl.sh status | restart | logs [N] | uninstall [--purge]
+#   scoutctl.sh phone pair <name> | list | forget <device>   (phones paired with scout-phone)
 # uninstall stops and removes the login item; --purge also deletes Scout's data
 # folder (config, saved rules, models, logs). Removing the plugin itself is
 # `claude plugin uninstall scout`.
@@ -11,6 +12,8 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 MESSAGES_LABEL=com.local.scout.messages
 MESSAGES_PLIST="$HOME/Library/LaunchAgents/$MESSAGES_LABEL.plist"
+PHONE_LABEL=com.local.scout.phone
+PHONE_PLIST="$HOME/Library/LaunchAgents/$PHONE_LABEL.plist"
 
 case "${1:-status}" in
 status)
@@ -43,6 +46,11 @@ restart)
     launchctl kickstart -k "$DOMAIN/$LABEL"
     echo "restarted"
     ;;
+phone)
+    shift
+    UV_PROJECT_ENVIRONMENT="$DATA/venv" exec uv run --frozen --quiet --project "$DATA/current" \
+        python -m scout.phone_devices "$@"
+    ;;
 logs)
     tail -n "${2:-40}" "$DATA/logs/scout.log" "$DATA/logs/install.log" 2>/dev/null
     ;;
@@ -50,6 +58,8 @@ uninstall)
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     rm -f "$PLIST" "$DATA/current"
     echo "removed the login item"
+    launchctl bootout "$DOMAIN/$PHONE_LABEL" 2>/dev/null || true
+    rm -f "$PHONE_PLIST"
     launchctl bootout "$DOMAIN/$MESSAGES_LABEL" 2>/dev/null || true
     rm -f "$MESSAGES_PLIST" "$DATA/state/messages.sock" "$DATA/state/messages_token"
     echo "removed the Messages helper's login item (turn off scout-messages in System Settings, Privacy and Security, Full Disk Access)"
@@ -61,7 +71,7 @@ uninstall)
     fi
     ;;
 *)
-    echo "usage: $0 status | restart | logs [N] | uninstall [--purge]" >&2
+    echo "usage: $0 status | restart | logs [N] | uninstall [--purge] | phone pair <name>|list|forget <device>" >&2
     exit 2
     ;;
 esac

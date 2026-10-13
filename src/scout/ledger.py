@@ -24,7 +24,8 @@ _lock = threading.Lock()
 
 
 def record(tier: str, latency_s: float, path: Path | None = None, **extra: Any) -> None:
-    """tier: "0", "1" or "claude"; extra: cost_usd, turns, input_tokens, output_tokens..."""
+    """tier: "0", "1", "claude", or "phone" for a phone call's events;
+    extra: cost_usd, turns, input_tokens, output_tokens, client..."""
     row = {"ts": round(time.time(), 3), "tier": tier, "latency_s": round(latency_s, 3), **extra}
     p = path or PATH
     try:
@@ -66,7 +67,8 @@ def rows(since: float, path: Path | None = None) -> list[dict[str, Any]]:
 
 
 def summary(since: float, path: Path | None = None) -> dict[str, Any]:
-    rs = rows(since, path)
+    # Requests only: the phone's call events (tier "phone") are not requests.
+    rs = [r for r in rows(since, path) if r.get("tier") in ("0", "1", "claude")]
     by = {t: [r for r in rs if r.get("tier") == t] for t in ("0", "1", "claude")}
     claude = by["claude"]
     lat = sorted(r["latency_s"] for r in claude) if claude else []

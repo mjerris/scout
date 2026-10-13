@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import json
 import logging
@@ -614,3 +615,66 @@ class Brain:
                 await asyncio.wait_for(client.disconnect(), 5)
             except Exception:
                 log.exception("disconnect failed")
+
+
+# --- requests from the phone ------------------------------------------------------------
+
+PHONE_PROMPT = """\
+# Phone
+This request comes from the user's phone, through Scout's phone agent (an assistant on the
+call that reads your reply to the caller), not from the room. Reply in a few short, plain
+sentences. Nothing you do here is heard in the room. Actions that need the user's spoken
+yes in the room (sending mail, adding events or reminders, deleting notes, opening pages,
+running commands, anything that would ask) can't be done from the phone: say so briefly and
+suggest doing it at home."""
+
+PHONE_REFUSED = (
+    "Not available from the phone: this needs the user's spoken yes in the room. "
+    "Tell the user briefly that they can do it at home."
+)
+
+
+async def _no_confirm(spoken: str, detail: str) -> bool:
+    return False  # nobody in the room is asked about a phone request
+
+
+class PhoneBrain(Brain):
+    """Claude for requests from the phone: its own session, so a room turn is never
+    disturbed, and it never asks in the room. Only what runs without a spoken yes is
+    allowed (the phone_tools among Scout's own, the auto-allow list, harmless commands);
+    anything else is refused with a reason Claude can pass on."""
+
+    def __init__(
+        self,
+        cfg: ClaudeConfig,
+        tool_server: McpSdkServerConfig,
+        tool_names: list[str],
+        phone_tools: set[str],
+        rules: Rules,
+    ) -> None:
+        self._all_tools = list(tool_names)
+        extra = "\n".join(p for p in (cfg.extra_system_prompt, PHONE_PROMPT) if p)
+        phone_cfg = dataclasses.replace(cfg, remote_control="", extra_system_prompt=extra)
+        allowed = [t for t in tool_names if t in phone_tools]
+        super().__init__(phone_cfg, _no_confirm, tool_server, allowed, rules, lambda kind, text: None)
+
+    def _options(self) -> ClaudeAgentOptions:
+        opts = super()._options()
+        denied = [t for t in self._all_tools if t not in self.tool_names]
+        return dataclasses.replace(opts, disallowed_tools=[*opts.disallowed_tools, *denied])
+
+    def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
+        if reason := super()._forbidden(name, args):
+            return reason
+        runs_unasked = self._auto_allowed(name, args) or (
+            name not in ("Bash", "WebFetch", *ASKING_TOOLS)
+            and (name in self.cfg.auto_allow_tools or name in self.tool_names)
+        )
+        if not runs_unasked:
+            log.info("phone: refused %s (it would need a spoken yes)", name)
+            return PHONE_REFUSED
+        return None
+
+    async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
+        log.info("phone: refused %s (it would need a spoken yes)", name)
+        return False

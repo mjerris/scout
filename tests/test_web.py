@@ -113,6 +113,10 @@ class StubApp:
         self.calls.append(("tool", agent, name, args))
         return {"status": "ok", "text": "No events in that range."}
 
+    async def ask(self, agent: str, text: str, deadline: float = 20.0) -> dict[str, Any]:
+        self.calls.append(("ask", agent, text))
+        return {"status": "ok", "text": "It's sunny.", "tier": "1"}
+
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None:
         self.calls.append(("say", text, speak, client))
         if self.text_gate is not None:
@@ -355,6 +359,30 @@ def test_tool_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
             async with s.post(url, json=body, headers=srv.auth) as r:
                 assert await r.json() == {"status": "ok", "text": "No events in that range."}
             assert srv.app.calls == [("tool", "proj#9", "calendar_events", {"start": "2026-10-08"})]
+
+    run(main())
+
+
+def test_ask_endpoint_needs_auth_and_validates_body(token_file: Path) -> None:
+    async def main() -> None:
+        async with serve() as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/ask"
+            async with s.post(url, json={"agent": "phone", "text": "weather?"}) as r:
+                assert r.status == 401
+            bad: list[object] = [
+                [],
+                {"text": ""},
+                {"text": 5},
+                {"text": "x", "agent": 3},
+                {"text": "x" * 2001},
+            ]
+            for b in bad:
+                async with s.post(url, json=b, headers=srv.auth) as r:
+                    assert r.status == 400, b
+            assert srv.app.calls == []
+            async with s.post(url, json={"agent": "phone", "text": "weather?"}, headers=srv.auth) as r:
+                assert await r.json() == {"status": "ok", "text": "It's sunny.", "tier": "1"}
+            assert srv.app.calls == [("ask", "phone", "weather?")]
 
     run(main())
 

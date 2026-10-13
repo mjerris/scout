@@ -314,6 +314,15 @@ class PhoneConfig:
     project_id: str = ""
     api_token: str = ""
     signing_key: str = ""
+    # scout-phone listens here; only Tailscale Funnel reaches it from outside.
+    host: str = "127.0.0.1"
+    port: int = 8768
+    # The Funnel base SignalWire calls, e.g. "https://<mac>.<tailnet>.ts.net:8443". Webhook
+    # URLs and request signatures are built on it, so it must be exactly what SignalWire uses.
+    public_url: str = ""
+    # The agent's address the paired app dials; it is part of each call's signature.
+    address: str = ""
+    call_skew_s: int = 60  # a call's signed timestamp may be this far from the Mac's clock
 
 
 @dataclass

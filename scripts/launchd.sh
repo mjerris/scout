@@ -1,7 +1,9 @@
 #!/bin/sh
 # Install/uninstall a user LaunchAgent that starts scout at login and restarts it if it dies.
-#   scripts/launchd.sh install | uninstall | restart | status [memory]
+#   scripts/launchd.sh install | uninstall | restart | status [memory|phone]
 # With "memory": the scout-memory service (memories and local search) instead.
+# With "phone": scout-phone (calls from the paired phone app); it stays down after a clean
+# exit, which is what it does when [phone] is off or incomplete.
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -14,11 +16,18 @@ LABEL=com.local.scout
 PROGRAM=run.sh
 PROCESS=Interactive
 LOG=launchd
+KEEPALIVE='<true/>'
 if [ "${2:-}" = memory ]; then
   LABEL=com.local.scout.memory
   PROGRAM=run-memory.sh
   PROCESS=Background  # embedding gives way to listening and speaking
   LOG=memory
+elif [ "${2:-}" = phone ]; then
+  LABEL=com.local.scout.phone
+  PROGRAM=run-phone.sh
+  PROCESS=Background
+  LOG=phone
+  KEEPALIVE='<dict><key>SuccessfulExit</key><false/></dict>'
 fi
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
@@ -36,7 +45,7 @@ install)
   <key>ProgramArguments</key><array><string>$ROOT_XML/scripts/$PROGRAM</string></array>
   <key>WorkingDirectory</key><string>$ROOT_XML</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>$KEEPALIVE
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ExitTimeOut</key><integer>15</integer>
   <key>ProcessType</key><string>$PROCESS</string>
@@ -70,5 +79,5 @@ uninstall)
   ;;
 restart) launchctl kickstart -k "$DOMAIN/$LABEL" ;;
 status) launchctl print "$DOMAIN/$LABEL" | grep -E "state|pid|last exit" ;;
-*) echo "usage: $0 install|uninstall|restart|status [memory]" >&2; exit 2 ;;
+*) echo "usage: $0 install|uninstall|restart|status [memory|phone]" >&2; exit 2 ;;
 esac
