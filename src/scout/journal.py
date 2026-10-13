@@ -13,7 +13,8 @@ The files are the record; the local index (kind "turn") is built from them and r
 when a file changes, so an edit or a deleted entry is reflected in search. Results Scout
 already keeps elsewhere aren't copied in: the tools line names what was used (a mail
 id, a place), and an answer built from mail or messages is kept only in "open" privacy
-mode. Only the memory service writes here (one writer, so the room and the phone never
+mode (otherwise its tools line keeps only ids). Such an entry's heading ends in
+" · private". Only the memory service writes here (one writer, so the room and the phone never
 interleave a line).
 """
 
@@ -33,6 +34,9 @@ PRIVATE_ANSWER = "(answered from mail or messages; not kept here)"
 _MAX_ARG = 80  # a tool argument longer than this is cut in the tools line
 _ENTRY = re.compile(r"^## (\d\d:\d\d(?::\d\d)?) · ([^\n]*)\n(.*?)(?=^## |\Z)", re.S | re.M)
 _DAY = re.compile(r"(\d{4}-\d\d-\d\d)\.md$")
+_PRIVATE = " · private"
+# What a private entry's tools line keeps outside "open" mode: references, not text.
+_ID_KEYS = {"id", "ids", "mail_id", "message_id", "event_id", "note"}
 _lock = threading.Lock()
 
 
@@ -55,12 +59,15 @@ def _line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def tools_line(tools: Iterable[tuple[str, dict[str, Any]]]) -> str:
+def tools_line(tools: Iterable[tuple[str, dict[str, Any]]], ids_only: bool = False) -> str:
+    """The tools used, with their arguments; `ids_only` keeps only ids, numbers and yes/no."""
     parts = []
     for name, args in tools:
         shown = []
         for k, v in (args or {}).items():
             if v in (None, "", [], {}):
+                continue
+            if ids_only and k not in _ID_KEYS and not isinstance(v, (int, float)):
                 continue
             s = _line(v if isinstance(v, str) else json.dumps(v))
             shown.append(f"{k}={s[: _MAX_ARG - 1] + '…' if len(s) > _MAX_ARG else s}")
@@ -70,10 +77,12 @@ def tools_line(tools: Iterable[tuple[str, dict[str, Any]]]) -> str:
 
 def render(e: Entry, keep_private: bool) -> str:
     t = dt.datetime.fromtimestamp(e.ts)
-    answer = PRIVATE_ANSWER if e.private and not keep_private else _line(e.a)
-    out = f"## {t:%H:%M:%S} · {_line(e.who) or 'room'}\n**Q:** {_line(e.q)}\n**A:** {answer}\n"
+    hide = e.private and not keep_private
+    answer = PRIVATE_ANSWER if hide else _line(e.a) or "(none)"
+    who = (_line(e.who) or "room") + (_PRIVATE if e.private else "")
+    out = f"## {t:%H:%M:%S} · {who}\n**Q:** {_line(e.q) or '(none)'}\n**A:** {answer}\n"
     if e.tools:
-        out += f"tools: {tools_line(e.tools)}\n"
+        out += f"tools: {tools_line(e.tools, ids_only=hide)}\n"
     return out + "\n"
 
 
@@ -85,13 +94,23 @@ def append(root: Path, e: Entry, keep_private: bool) -> Path:
         if not p.exists():
             d = dt.datetime.fromtimestamp(e.ts)
             p.write_text(f"# {d:%A, %B} {d.day}, {d:%Y}\n\n")
+        last = b""
+        with p.open("rb") as f:
+            if f.seek(0, 2):
+                f.seek(-1, 2)
+                last = f.read(1)
         with p.open("a") as f:
+            if last not in (b"", b"\n"):  # edited by hand: a new line, or the entry joins the last one
+                f.write("\n")
             f.write(render(e, keep_private))
     return p
 
 
 def parse(p: Path, text: str | None = None) -> list[dict[str, Any]]:
-    """A day file's entries as index items (kind "turn"), id journal:<date>T<time>."""
+    """A day file's entries as index items (kind "turn"), id journal:<date>T<time>.
+
+    A clock time in the hour that repeats when clocks fall back is read as the first
+    pass, until the times in the file go back: from then on, as the second."""
     m = _DAY.search(p.name)
     if not m:
         return []
@@ -99,15 +118,24 @@ def parse(p: Path, text: str | None = None) -> list[dict[str, Any]]:
     text = p.read_text() if text is None else text
     out: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
+    prev: float | None = None
+    fell_back = False
     for hhmm, who, body in _ENTRY.findall(text):
         clock = hhmm if len(hhmm) == 8 else hhmm + ":00"
         try:
-            ts = dt.datetime.strptime(f"{day} {clock}", "%Y-%m-%d %H:%M:%S").timestamp()
+            naive = dt.datetime.strptime(f"{day} {clock}", "%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
-        q = re.search(r"^\*\*Q:\*\*\s*(.*)$", body, re.M)
-        a = re.search(r"^\*\*A:\*\*\s*(.*)$", body, re.M)
-        tools = re.search(r"^tools:\s*(.*)$", body, re.M)
+        ts, second = naive.timestamp(), naive.replace(fold=1).timestamp()
+        if second != ts and (fell_back or (prev is not None and ts <= prev)):
+            fell_back, ts = True, second
+        prev = ts
+        private = who.endswith(_PRIVATE)
+        if private:
+            who = who[: -len(_PRIVATE)]
+        q = re.search(r"^\*\*Q:\*\*[ \t]*(.*)$", body, re.M)
+        a = re.search(r"^\*\*A:\*\*[ \t]*(.*)$", body, re.M)
+        tools = re.search(r"^tools:[ \t]*(.*)$", body, re.M)
         key = f"journal:{day}T{clock}"
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1:
@@ -125,7 +153,10 @@ def parse(p: Path, text: str | None = None) -> list[dict[str, Any]]:
                 "body": "\n".join(x for x in lines if x) or body.strip(),
                 "who": who.strip(),
                 "ts": ts,
-                "meta": {"file": str(p.relative_to(p.parents[3])) if len(p.parents) > 3 else p.name},
+                "meta": {
+                    "file": str(p.relative_to(p.parents[3])) if len(p.parents) > 3 else p.name,
+                    **({"private": True} if private else {}),
+                },
             }
         )
     return out

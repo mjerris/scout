@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import datetime as dt
 import json
 import logging
 import os
@@ -102,7 +103,8 @@ def migrate(ix: index.Index, old: Path = OLD_DB) -> int:
 
 def migrate_turns(ix: index.Index) -> int:
     """Once: conversations indexed before the journal (ids "turn:<time>") become journal
-    entries, so the files hold every one."""
+    entries, so the files hold every one. Claude's answers count as private (they may
+    come from mail); a turn already in its day's file (a run cut short) isn't added twice."""
     if ix.journal_root is None:
         return 0
     with ix._lock:
@@ -112,12 +114,27 @@ def migrate_turns(ix: index.Index) -> int:
     for id, title, body, ts, meta in rows:
         m = index._meta(meta)
         answer = body.split("\nScout: ", 1)[1] if "\nScout: " in body else ""
-        who = "phone" if str(m.get("by", "")).startswith("phone") else "room"
-        ix.journal_add(float(ts), who, title, answer, private=bool(m.get("private")))
+        by = str(m.get("by", "")).lower()
+        who = "phone" if by.startswith("phone") else "room"
+        if not _in_journal(ix, float(ts), title):
+            ix.journal_add(float(ts), who, title, answer, private=bool(m.get("private")) or "claude" in by)
         ix.delete(id)
     if rows:
         log.info("moved %d conversations into the journal", len(rows))
     return len(rows)
+
+
+def _in_journal(ix: index.Index, ts: float, question: str) -> bool:
+    """Whether the day's journal already has an entry at this second with this question."""
+    base = f"journal:{dt.datetime.fromtimestamp(ts):%Y-%m-%dT%H:%M:%S}"
+    want = " ".join(question.split())
+    for n in range(1, 100):
+        h = ix.get(base if n == 1 else f"{base}-{n}")
+        if h is None:
+            return False
+        if h.title == want:
+            return True
+    return False
 
 
 def _hit(h: index.Hit) -> dict[str, Any]:
@@ -258,7 +275,7 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     ix.keep_private = lambda: load().privacy.mode == "open"
     migrate(ix)
     migrate_turns(ix)
-    ix.sync_files()
+    _sync_files(ix)
     svc = Service(ix, Memory(root / "facts.md", legacy=OLD_FACTS), token())
     runner = web.AppRunner(svc.app(), access_log=None)
     await runner.setup()
@@ -271,7 +288,15 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     else:
         while True:  # still pick up journal edits
             await asyncio.sleep(60)
-            await asyncio.get_running_loop().run_in_executor(None, ix.sync_files)
+            await asyncio.get_running_loop().run_in_executor(None, _sync_files, ix)
+
+
+def _sync_files(ix: index.Index) -> None:
+    """Pick up edited files; a failure is logged and tried again next time, never fatal."""
+    try:
+        ix.sync_files()
+    except Exception:
+        log.exception("re-reading the memory files failed")
 
 
 def main() -> None:

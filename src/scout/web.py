@@ -34,6 +34,11 @@ from .config import DATA, PhoneConfig, WebConfig
 log = logging.getLogger(__name__)
 _COOKIE = "cv_token"
 TOKEN_PATH = DATA / "state" / "web_token"
+# scout-phone's own credential (it makes the file): only a request carrying it may act for
+# the phone (agent "phone", preview, confirmed), since confirmed skips the room's spoken yes.
+PHONE_TOKEN_PATH = DATA / "state" / "phone_api_token"
+PHONE_HEADER = "X-Scout-Phone"
+PHONE_AGENT = "phone"  # phone_service.AGENT
 _MIN_TOKEN_LEN = 16  # shorter (or empty) token files are replaced, never accepted
 
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
@@ -153,6 +158,16 @@ def token_ok(given: str, token: str) -> bool:
     if not given or len(token) < _MIN_TOKEN_LEN:
         return False
     return hmac.compare_digest(given.encode(), token.encode())  # bytes: non-ASCII input can't raise
+
+
+def phone_ok(req: web.Request) -> bool:
+    """The request carries scout-phone's credential (read each time: scout-phone may
+    make it after Scout starts). No file, no phone."""
+    try:
+        token = PHONE_TOKEN_PATH.read_text().strip()
+    except OSError:
+        return False
+    return token_ok(req.headers.get(PHONE_HEADER, ""), token)
 
 
 # --- SignalWire subscriber tokens (the /phone test page) ------------------------------
@@ -659,6 +674,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("preview and confirmed must be true or false")
         except (ValueError, TypeError) as exc:
             return web.json_response({"status": "error", "error": str(exc)}, status=400)
+        if (agent == PHONE_AGENT or preview or confirmed) and not phone_ok(req):
+            raise web.HTTPForbidden(text="Only scout-phone may act for the phone.")
         return web.json_response(
             await assistant.run_shared_tool(
                 agent or "session", name, args, preview=preview, confirmed=confirmed
@@ -683,6 +700,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("agent must be a string")
         except (ValueError, TypeError) as exc:
             return web.json_response({"status": "error", "error": str(exc)}, status=400)
+        if agent == PHONE_AGENT and not phone_ok(req):
+            raise web.HTTPForbidden(text="Only scout-phone may act for the phone.")
         return web.json_response(await assistant.ask(agent or "session", text))
 
     async def api_status(req: web.Request) -> web.StreamResponse:

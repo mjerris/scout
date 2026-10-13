@@ -12,9 +12,11 @@ in the top 5 for 78-82% of them; full text alone, or meaning over just the text 
 and the newest items, found 34%.
 
 The vectors live in SQLite (table vecs) and, for searching, in one in-memory matrix
-(float32; 384 dimensions is ~1.5 KB an item, 150 MB per 100,000). An idle background
-pass embeds new items, and a search embeds the few text hits still without one, so
-nothing is ever unreachable by full text, and nothing leaves the Mac.
+(float32; 384 dimensions is ~1.5 KB a vector). An item has one vector per window of
+its text (up to 20), so a short item takes ~1.5 KB and a long one up to ~30 KB; 100,000
+vectors are ~150 MB. An idle background pass embeds new items, and a search embeds the
+few text hits still without one, so nothing is ever unreachable by full text, and
+nothing leaves the Mac.
 
 The embedder is bge-small-en-v1.5 (ONNX on CPU through fastembed, ~0.2 GB in memory,
 loads in ~4 s); it unloads after a while idle. The model name and dimension are stored
@@ -27,6 +29,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -73,7 +76,9 @@ CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
 END;
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
-    sig TEXT NOT NULL
+    sig TEXT NOT NULL,
+    ids TEXT,  -- the items it held when last read (JSON list); NULL: not known yet
+    stat TEXT  -- its size and modified time then: unchanged, it isn't read again
 );
 CREATE TABLE IF NOT EXISTS vecs (
     id TEXT NOT NULL,
@@ -111,6 +116,11 @@ class Embedder(Protocol):
 
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+LOAD_RETRY_S = 600.0  # after the model fails to load (offline, missing), wait this long to try again
+
+
+class EmbedderUnavailable(RuntimeError):
+    """The model failed to load a little while ago; not tried again yet."""
 
 
 class LocalEmbedder:
@@ -134,25 +144,20 @@ class LocalEmbedder:
         self._nomic = name.startswith("nomic-ai/")
         self._m: Any = None
         self._used = 0.0
+        self._failed_at: float | None = None  # when loading last failed
         self._lock = threading.Lock()
 
     def embed(self, texts: Sequence[str], query: bool = False) -> np.ndarray:
         with self._lock:
             if self._m is None:
-                from fastembed import TextEmbedding
-
-                t0 = time.perf_counter()
-                MODELS.mkdir(parents=True, exist_ok=True)
-                # Few threads: embedding never takes the cores listening and speaking need.
-                # The copy on disk first, without asking Hugging Face; download only if absent.
+                if self._failed_at is not None and time.monotonic() - self._failed_at < LOAD_RETRY_S:
+                    raise EmbedderUnavailable(f"embedder {self.name} failed to load; retrying later")
                 try:
-                    self._m = TextEmbedding(
-                        self.name, cache_dir=str(MODELS), threads=self.threads, local_files_only=True
-                    )
-                except Exception as exc:  # any failure to load locally: download
-                    log.info("embedder %s not on disk (%s); downloading", self.name, type(exc).__name__)
-                    self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
-                log.info("embedder %s loaded in %.1fs", self.name, time.perf_counter() - t0)
+                    self._load()
+                except Exception:
+                    self._failed_at = time.monotonic()
+                    raise
+                self._failed_at = None
             self._used = time.monotonic()
             if self._nomic:
                 prefix = "search_query: " if query else "search_document: "
@@ -169,6 +174,22 @@ class LocalEmbedder:
             raw = raw[:, : self.dims]
         out: np.ndarray = raw / (np.linalg.norm(raw, axis=1, keepdims=True) + 1e-9)
         return out
+
+    def _load(self) -> None:
+        from fastembed import TextEmbedding
+
+        t0 = time.perf_counter()
+        MODELS.mkdir(parents=True, exist_ok=True)
+        # Few threads: embedding never takes the cores listening and speaking need.
+        # The copy on disk first, without asking Hugging Face; download only if absent.
+        try:
+            self._m = TextEmbedding(
+                self.name, cache_dir=str(MODELS), threads=self.threads, local_files_only=True
+            )
+        except Exception as exc:  # any failure to load locally: download
+            log.info("embedder %s not on disk (%s); downloading", self.name, type(exc).__name__)
+            self._m = TextEmbedding(self.name, cache_dir=str(MODELS), threads=self.threads)
+        log.info("embedder %s loaded in %.1fs", self.name, time.perf_counter() - t0)
 
     @property
     def loaded(self) -> bool:
@@ -194,12 +215,28 @@ class Matrix:
         self.ids: list[str] = []  # the item of each row
         self.by_id: dict[str, list[int]] = {}
         self.vecs = np.zeros((0, dims), np.float32)
-        self.kinds: list[str] = []
+        self.kind = np.zeros(0, np.int32)  # each row's kind, as a code
+        self.codes: dict[str, int] = {}
         self.ts = np.zeros(0, np.float64)
         self.alive = np.zeros(0, bool)
+        self.dead = 0  # dropped rows not yet reclaimed
 
     def __len__(self) -> int:
         return len(self.by_id)
+
+    def _code(self, kind: str) -> int:
+        return self.codes.setdefault(kind, len(self.codes))
+
+    @classmethod
+    def build(cls, dims: int, ids: list[str], kinds: list[str], vecs: np.ndarray, ts: np.ndarray) -> Matrix:
+        """A matrix of these rows at once (an item's rows next to each other)."""
+        m = cls(dims)
+        m.ids, m.vecs, m.ts = ids, vecs, ts
+        m.kind = np.fromiter((m._code(k) for k in kinds), np.int32, len(kinds))
+        m.alive = np.ones(len(ids), bool)
+        for r, id in enumerate(ids):
+            m.by_id.setdefault(id, []).append(r)
+        return m
 
     def _grow(self, n: int) -> None:
         if n <= len(self.alive):
@@ -207,6 +244,7 @@ class Matrix:
         cap = max(n, 2 * len(self.alive), 256)
         for name, fill in (
             ("vecs", np.zeros((cap, self.dims), np.float32)),
+            ("kind", np.zeros(cap, np.int32)),
             ("ts", np.zeros(cap)),
             ("alive", np.zeros(cap, bool)),
         ):
@@ -217,33 +255,38 @@ class Matrix:
     def set(self, id: str, vecs: Sequence[np.ndarray], kind: str, ts: float) -> None:
         """An item's vectors (all its windows), replacing any it had."""
         self.drop(id)
-        rows = []
-        for v in vecs:
-            r = len(self.ids)
-            self._grow(r + 1)
-            self.ids.append(id)
-            self.kinds.append(kind)
-            self.vecs[r], self.ts[r], self.alive[r] = v, ts, True
-            rows.append(r)
-        if rows:
-            self.by_id[id] = rows
+        if not len(vecs):
+            return
+        r = len(self.ids)
+        self._grow(r + len(vecs))
+        rows = list(range(r, r + len(vecs)))
+        self.ids.extend([id] * len(vecs))
+        self.vecs[r : r + len(vecs)] = np.asarray(vecs, np.float32)
+        self.kind[r : r + len(vecs)] = self._code(kind)
+        self.ts[r : r + len(vecs)] = ts
+        self.alive[r : r + len(vecs)] = True
+        self.by_id[id] = rows
 
     def drop(self, id: str) -> None:
-        for r in self.by_id.pop(id, []):
-            self.alive[r] = False
-        if len(self.ids) > 1024 and int(self.alive[: len(self.ids)].sum()) < len(self.ids) // 2:
+        rows = self.by_id.pop(id, None)
+        if not rows:
+            return
+        self.alive[rows] = False
+        self.dead += len(rows)
+        if len(self.ids) > 1024 and self.dead > len(self.ids) // 2:
             self._compact()
 
     def touch(self, id: str, kind: str, ts: float) -> None:
-        for r in self.by_id.get(id, []):
-            self.kinds[r], self.ts[r] = kind, ts
+        rows = self.by_id.get(id)
+        if rows:
+            self.kind[rows], self.ts[rows] = self._code(kind), ts
 
     def _compact(self) -> None:
-        keep = [r for r in range(len(self.ids)) if self.alive[r]]
+        keep = np.flatnonzero(self.alive[: len(self.ids)])
         self.ids = [self.ids[r] for r in keep]
-        self.kinds = [self.kinds[r] for r in keep]
-        self.vecs, self.ts = self.vecs[keep].copy(), self.ts[keep].copy()
+        self.vecs, self.kind, self.ts = self.vecs[keep], self.kind[keep], self.ts[keep]
         self.alive = np.ones(len(keep), bool)
+        self.dead = 0
         self.by_id = {}
         for r, id in enumerate(self.ids):
             self.by_id.setdefault(id, []).append(r)
@@ -257,31 +300,38 @@ class Matrix:
             return []
         mask = self.alive[:n].copy()
         if kinds:
-            want = set(kinds)
-            mask &= np.fromiter((kd in want for kd in self.kinds), bool, n)
+            mask &= np.isin(self.kind[:n], [self.codes[kd] for kd in kinds if kd in self.codes])
         if since is not None:
             mask &= self.ts[:n] >= since
-        rows = np.flatnonzero(mask)
-        if not len(rows):
+        kept = int(np.count_nonzero(mask))
+        if not kept:
             return []
-        sims = self.vecs[rows] @ q
+        # Score every row in place and rule out the filtered ones; gather rows (a copy)
+        # only when the filter keeps few of them.
+        rows: np.ndarray | None = None
+        if kept * 8 < n:
+            rows = np.flatnonzero(mask)
+            sims = self.vecs[rows] @ q
+        else:
+            sims = self.vecs[:n] @ q
+            sims[~mask] = -np.inf
         # Enough rows to find k distinct items (an item's windows can crowd the top).
-        shortlist = min(len(rows), k * 8)
+        shortlist = min(kept, k * 8)
         while True:
-            if shortlist < len(rows):
+            if shortlist < len(sims):
                 part = np.argpartition(-sims, shortlist - 1)[:shortlist]
             else:
-                part = np.arange(len(rows))
+                part = np.arange(len(sims))
             out: dict[str, float] = {}
             for i in part[np.argsort(-sims[part], kind="stable")]:
-                id = self.ids[rows[i]]
+                id = self.ids[rows[i] if rows is not None else i]
                 if id not in out:
                     out[id] = float(sims[i])
                     if len(out) == k:
                         return list(out.items())
-            if shortlist >= len(rows):
+            if shortlist >= kept:
                 return list(out.items())
-            shortlist = min(len(rows), shortlist * 4)
+            shortlist = min(kept, shortlist * 4)
 
     def best(self, ids: Sequence[str], q: np.ndarray) -> dict[str, float]:
         """The similarity of each of these items (that has vectors): its best window."""
@@ -310,6 +360,10 @@ def fts_query(text: str) -> str:
     return " OR ".join(f'"{t}"' for t in terms)
 
 
+def _file_sig(data: bytes) -> str:
+    return hashlib.blake2b(data, digest_size=8).hexdigest()  # as journal.file_sig
+
+
 def _sig(*parts: str) -> str:
     return hashlib.blake2b("\x1f".join(parts).encode(), digest_size=8).hexdigest()
 
@@ -326,6 +380,9 @@ class Index:
     _matrix: Matrix | None = field(init=False, repr=False, default=None)  # loaded on first use
     _lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
     _pool: ThreadPoolExecutor = field(init=False, repr=False)
+    _sync_lock: threading.RLock = field(init=False, repr=False, default_factory=threading.RLock)
+    _pending: bool = field(init=False, repr=False, default=True)  # items may lack vectors
+    _old_vecs: bool = field(init=False, repr=False, default=True)  # another model's vectors may remain
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -333,6 +390,10 @@ class Index:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._add_vector_parts()
         self._conn.executescript(_SCHEMA)
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(files)")]
+        for col in ("ids", "stat"):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="index")
 
     def _add_vector_parts(self) -> None:
@@ -372,6 +433,8 @@ class Index:
                 return False
             if when is None:
                 when = row[1] if row else time.time()
+            if not row or row[3] != sig:
+                self._pending = True
             if self._matrix is not None:
                 if row and row[3] == sig:
                     self._matrix.touch(id, kind, when)  # same text: the vector still holds
@@ -521,51 +584,133 @@ class Index:
         return ("turn", key, False) if key else None
 
     def sync_file(self, p: Path) -> int:
-        """Make the index hold exactly the items of one file (a journal day or a note),
-        or none if it's gone. Returns how many items changed."""
+        """Make the index hold exactly the items of one file (a journal day, a note or a
+        task), or none if it's gone. Returns how many items changed. An item another
+        file also holds (a renamed file, two with one number) stays, as that file has it."""
         what = self._file_kind(p)
         if what is None:
             return 0
         kind, prefix, exact = what
-        parse = {"note": notefiles.parse, "task": taskfiles.parse}.get(kind, journal.parse)
-        items = parse(p) if p.exists() else []
-        changed = sum(self.put(kind=kind, **it) for it in items)
-        keep = {it["id"] for it in items}
-        with self._lock:
-            sql = (
-                "SELECT id FROM docs WHERE kind = ? AND id = ?"
-                if exact
-                else "SELECT id FROM docs WHERE kind = ? AND substr(id, 1, length(?)) = ?"
-            )
-            args = (kind, prefix) if exact else (kind, prefix, prefix)
-            old = [r[0] for r in self._conn.execute(sql, args) if r[0] not in keep]
-        for id in old:
-            self.delete(id)
-        with self._lock:
-            if p.exists():
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO files(path, sig) VALUES (?, ?)", (str(p), journal.file_sig(p))
-                )
-            else:
-                self._conn.execute("DELETE FROM files WHERE path = ?", (str(p),))
-        return changed + len(old)
+        # One sync at a time, from one read of the file: two at once could each delete
+        # what the other just put, or record a sig of bytes they didn't parse.
+        with self._sync_lock:
+            try:
+                stat = _file_stat(p)  # before the read: an edit during it shows next time
+                data: bytes | None = p.read_bytes()
+            except FileNotFoundError:
+                stat, data = "", None
+            items = self._parse(kind, p, data) if data is not None else []
+            changed = sum(self.put(kind=kind, **it) for it in items)
+            keep = {it["id"] for it in items}
+            with self._lock:
+                row = self._conn.execute("SELECT ids FROM files WHERE path = ?", (str(p),)).fetchone()
+                if row and row[0] is not None:
+                    held = set(json.loads(row[0]))
+                elif row or exact:  # read before ids were kept: what its name covers
+                    sql = (
+                        "SELECT id FROM docs WHERE kind = ? AND id = ?"
+                        if exact
+                        else "SELECT id FROM docs WHERE kind = ? AND substr(id, 1, length(?)) = ?"
+                    )
+                    held = {
+                        r[0]
+                        for r in self._conn.execute(sql, (kind, prefix) if exact else (kind, prefix, prefix))
+                    }
+                else:
+                    held = set()  # a file never read: nothing here is from it
+                old = held - keep
+                others = self._holders(old, p)
+            gone = [id for id in old if id not in others]
+            for id in gone:
+                self.delete(id)
+            with self._lock:
+                if data is not None:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO files(path, sig, ids, stat) VALUES (?, ?, ?, ?)",
+                        (str(p), _file_sig(data), json.dumps(sorted(keep)), stat),
+                    )
+                else:
+                    self._conn.execute("DELETE FROM files WHERE path = ?", (str(p),))
+            # What another file holds too is now that file's version.
+            for q in sorted(set(others.values())):
+                changed += self.sync_file(Path(q))
+        return changed + len(gone)
+
+    def _holders(self, ids: set[str], p: Path) -> dict[str, str]:
+        """Which other known file holds each of these items (with the lock held)."""
+        if not ids:
+            return {}
+        rows = self._conn.execute(
+            "SELECT j.value, f.path FROM files f, json_each(f.ids) j WHERE f.path != ? "
+            "AND j.value IN (SELECT value FROM json_each(?))",
+            (str(p), json.dumps(sorted(ids))),
+        )
+        return {str(id): str(path) for id, path in rows}
+
+    def _parse(self, kind: str, p: Path, data: bytes) -> list[dict[str, Any]]:
+        """A file's items from these bytes (bad UTF-8 replaced, not refused)."""
+        text = data.decode("utf-8", "replace")
+        if kind == "turn":
+            return journal.parse(p, text)
+        parse = notefiles.parse if kind == "note" else taskfiles.parse
+        try:
+            if text.encode() == data:
+                return parse(p)
+        except UnicodeDecodeError:  # changed under us to bad bytes: parse the text read
+            pass
+        # Bad bytes: parse a cleaned copy (same name and time) beside the store.
+        tmp = self.path.parent / ".sync-tmp" / p.name
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            tmp.write_text(text)
+            st = p.stat() if p.exists() else None
+            if st is not None:
+                os.utime(tmp, (st.st_atime, st.st_mtime))
+            return parse(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def sync_files(self) -> int:
-        """Re-index journal files that changed, appeared or went away since last time
-        (an edit, a deleted entry, a file restored from a backup). Returns items changed."""
+        """Re-index journal, note and task files that changed, appeared or went away
+        since last time (an edit, a deleted entry, a renamed file, a file restored from a
+        backup). A file that can't be read is skipped and tried again next time. Returns
+        items changed."""
         if self.journal_root is None:
             return 0
         with self._lock:
-            known = dict(self._conn.execute("SELECT path, sig FROM files").fetchall())
+            known = {
+                path: (sig, ids is not None, stat)
+                for path, sig, ids, stat in self._conn.execute("SELECT path, sig, ids, stat FROM files")
+            }
         changed = 0
         root = self.journal_root
         files = journal.day_files(root) + notefiles.files(root) + taskfiles.files(root)
+        # What went away first, so an item that moved to another file is put back by it.
+        for path in sorted(set(known) - {str(p) for p in files}):
+            changed += self._try_sync(Path(path))
         for p in files:
-            if known.get(str(p)) != journal.file_sig(p):
-                changed += self.sync_file(p)
-        for path in set(known) - {str(p) for p in files}:
-            changed += self.sync_file(Path(path))
+            sig, has_ids, stat = known.get(str(p), ("", False, None))
+            try:
+                now = _file_stat(p)
+                if has_ids and stat == now:
+                    continue  # same size and time: not read at all
+                same = has_ids and sig == journal.file_sig(p)
+            except OSError as exc:
+                log.warning("index: can't read %s: %s", p, exc)
+                continue
+            if same:  # touched but not changed: remember the new time, skip the parse
+                with self._lock:
+                    self._conn.execute("UPDATE files SET stat = ? WHERE path = ?", (now, str(p)))
+            else:
+                changed += self._try_sync(p)
         return changed
+
+    def _try_sync(self, p: Path) -> int:
+        try:
+            return self.sync_file(p)
+        except Exception:
+            log.exception("index: couldn't index %s; trying again next time", p)
+            return 0
 
     # --- searching ------------------------------------------------------------------
 
@@ -607,10 +752,16 @@ class Index:
             return text[:limit]
         # Items without a vector yet: embed a few now, text hits first, then the newest
         # (the background does the rest), so what was just added is found by meaning.
-        unranked = self._ensure_vectors(text, self.max_new_per_search)
-        if not unranked:  # the text hits didn't use up the budget
-            self.embed_pending(self.max_new_per_search)
-        q = self.embedder.embed([query], query=True)[0]
+        try:
+            unranked, used = self._ensure_vectors(text, self.max_new_per_search, MAX_WINDOWS_PER_SEARCH)
+            if not unranked and used < MAX_WINDOWS_PER_SEARCH and (self._pending or self._old_vecs):
+                self.embed_pending(self.max_new_per_search, MAX_WINDOWS_PER_SEARCH - used)
+            q = self.embedder.embed([query], query=True)[0]
+        except Exception as exc:  # the model can't load (offline, missing): full text still works
+            log.warning(
+                "index: searching by meaning failed (%s: %s); full text only", type(exc).__name__, exc
+            )
+            return text[:limit]
         waiting = {h.id for h in unranked}
         with self._lock:
             m = self._loaded_matrix()
@@ -664,17 +815,20 @@ class Index:
                 (self.embedder.model,),
             ).fetchall()
             dims = len(rows[0][1]) // 4 if rows else 0
-            m = Matrix(dims)
-            item: list[np.ndarray] = []
-            for i, (id, blob, kind, ts) in enumerate(rows):
-                if len(blob) == dims * 4:
-                    item.append(np.frombuffer(blob, dtype=np.float32))
-                if i + 1 == len(rows) or rows[i + 1][0] != id:
-                    m.set(id, item, kind, float(ts))
-                    item = []
+            rows = [r for r in rows if len(r[1]) == dims * 4]
+            vecs = np.empty((len(rows), dims), np.float32)
+            for i, r in enumerate(rows):
+                vecs[i] = np.frombuffer(r[1], dtype=np.float32)
+            ts = np.fromiter((float(r[3]) for r in rows), np.float64, len(rows))
+            m = Matrix.build(dims, [r[0] for r in rows], [r[2] for r in rows], vecs, ts)
             self._matrix = m
             if rows:
-                log.info("index: %d vectors in memory in %.2fs", len(m), time.perf_counter() - t0)
+                log.info(
+                    "index: %d items (%d vectors) in memory in %.2fs",
+                    len(m),
+                    len(rows),
+                    time.perf_counter() - t0,
+                )
         return self._matrix
 
     async def asearch(self, query: str, **kw: Any) -> list[Hit]:
@@ -682,13 +836,14 @@ class Index:
 
     # --- vectors (lazy) ---------------------------------------------------------------
 
-    def _ensure_vectors(self, hits: Sequence[Hit], max_new: int) -> list[Hit]:
-        """Embed up to `max_new` of these items that have no current vectors; returns the
-        ones left without (the background pass does them)."""
+    def _ensure_vectors(self, hits: Sequence[Hit], max_new: int, max_windows: int) -> tuple[list[Hit], int]:
+        """Embed up to `max_new` of these items that have no current vectors, within
+        `max_windows` windows; returns the ones left without (the background pass does
+        them) and the windows embedded."""
         if self.embedder is None:
             raise RuntimeError("no embedder")
         if not hits:
-            return []
+            return [], 0
         with self._lock:
             have = {
                 r[0]
@@ -699,26 +854,32 @@ class Index:
                 )
             }
         missing = [h for h in hits if h.id not in have]
-        if missing[:max_new]:
-            self._embed(missing[:max_new])
-        return missing[max_new:]
+        now = _within(missing, max_new, max_windows)
+        if now:
+            self._embed(now)
+        return missing[len(now) :], sum(len(_doc_texts(h)) for h in now)
 
     def _embed(self, hits: Sequence[Hit]) -> None:
-        """Embed every window of these items and keep the vectors."""
+        """Embed every window of these items and keep the vectors, in calls of at most
+        EMBED_BATCH_WINDOWS windows."""
         if self.embedder is None:
             raise RuntimeError("no embedder")
         t0 = time.perf_counter()
-        texts = [_doc_texts(h) for h in hits]
-        flat = self.embedder.embed([t for ts in texts for t in ts])
-        parts, at = [], 0
-        for ts in texts:
-            parts.append(flat[at : at + len(ts)])
-            at += len(ts)
-        self._store_vectors(hits, parts)
-        if len(flat) > len(hits) or time.perf_counter() - t0 > 1:
-            log.debug(
-                "embedded %d items (%d windows) in %.2fs", len(hits), len(flat), time.perf_counter() - t0
-            )
+        windows = 0
+        at = 0
+        while at < len(hits):
+            batch = _within(hits[at:], len(hits), EMBED_BATCH_WINDOWS)
+            texts = [_doc_texts(h) for h in batch]
+            flat = self.embedder.embed([t for ts in texts for t in ts])
+            parts, i = [], 0
+            for ts in texts:
+                parts.append(flat[i : i + len(ts)])
+                i += len(ts)
+            self._store_vectors(batch, parts)
+            windows += len(flat)
+            at += len(batch)
+        if windows > len(hits) or time.perf_counter() - t0 > 1:
+            log.debug("embedded %d items (%d windows) in %.2fs", len(hits), windows, time.perf_counter() - t0)
 
     def _store_vectors(self, hits: Sequence[Hit], parts: Sequence[np.ndarray]) -> None:
         if self.embedder is None:
@@ -744,23 +905,45 @@ class Index:
                     if len(vs[0]) == self._matrix.dims:
                         self._matrix.set(h.id, vs, str(row[1]), float(row[2]))
 
-    def embed_pending(self, limit: int = 64) -> int:
-        """Embed up to `limit` items whose vectors are missing or out of date (a long item
-        stored before it had one per window counts too), newest first."""
+    def embed_pending(self, limit: int = 64, max_windows: int | None = None) -> int:
+        """Embed up to `limit` items (within `max_windows` windows) whose vectors are
+        missing or out of date (a long item stored before it had one per window counts
+        too), newest first. With none left, removes a batch of another model's vectors."""
         if self.embedder is None:
             return 0
+        rows = []
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM docs d "
-                "LEFT JOIN vecs v0 ON v0.id = d.id AND v0.model = ? AND v0.part = 0 AND v0.sig = d.sig "
-                "LEFT JOIN vecs v1 ON v1.id = d.id AND v1.model = ? AND v1.part = 1 AND v1.sig = d.sig "
-                "WHERE v0.id IS NULL OR (length(d.body) > ? AND v1.id IS NULL) ORDER BY d.ts DESC LIMIT ?",
-                (self.embedder.model, self.embedder.model, EMBED_CHARS, limit),
-            ).fetchall()
+            if self._pending:
+                rows = self._conn.execute(
+                    "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta FROM docs d "
+                    "LEFT JOIN vecs v0 ON v0.id = d.id AND v0.model = ? AND v0.part = 0 AND v0.sig = d.sig "
+                    "LEFT JOIN vecs v1 ON v1.id = d.id AND v1.model = ? AND v1.part = 1 AND v1.sig = d.sig "
+                    "WHERE v0.id IS NULL OR (length(d.body) > ? AND v1.id IS NULL) ORDER BY d.ts DESC LIMIT ?",
+                    (self.embedder.model, self.embedder.model, EMBED_CHARS, limit),
+                ).fetchall()
+                self._pending = bool(rows)  # a put sets it again (under this lock)
         hits = [_hit(r) for r in rows]
+        if max_windows is not None:
+            hits = _within(hits, limit, max_windows)
         if hits:
             self._embed(hits)
+        elif self._old_vecs:
+            self._drop_old_vectors()
         return len(hits)
+
+    def _drop_old_vectors(self, batch: int = 5000) -> None:
+        """One batch of vectors from another model (or size): the current one's are done."""
+        if self.embedder is None:
+            return
+        with self._lock:
+            n = self._conn.execute(
+                "DELETE FROM vecs WHERE rowid IN (SELECT rowid FROM vecs WHERE model != ? LIMIT ?)",
+                (self.embedder.model, batch),
+            ).rowcount
+            if n < batch:
+                self._old_vecs = False
+        if n:
+            log.info("index: removed %d vectors of an old model", n)
 
     async def background(self, idle: Any, every_s: float = 60.0, batch: int = 64) -> None:
         """Embed new items ahead of time while Scout is idle; unload the model when unused.
@@ -790,7 +973,7 @@ class Index:
                 if idle():
                     n = await loop.run_in_executor(self._pool, self.embed_pending, batch)
                     done += n
-                    backlog = n == batch
+                    backlog = n == batch or self._old_vecs
                     if done and not backlog:
                         log.info("index: embedded %d new items ahead of time", done)
                         done = 0
@@ -828,6 +1011,12 @@ def _filter_args(kinds: Sequence[str] | None, since: float | None) -> tuple[Any,
     return (k, k, since, since)
 
 
+def _file_stat(p: Path) -> str:
+    """A file's size and modified time (ns): what tells an unchanged file without reading it."""
+    st = p.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
 def _hit(row: Sequence[Any]) -> Hit:
     id, kind, title, body, who, ts, meta = row
     return Hit(id, kind, title, body, who, float(ts), _meta(meta))
@@ -842,6 +1031,8 @@ def _meta(text: str | None) -> dict[str, Any]:
 
 
 EMBED_CHARS = 1000  # one window of an item's text (what embeds well)
+MAX_WINDOWS_PER_SEARCH = 64  # windows a search may embed itself; the background does the rest
+EMBED_BATCH_WINDOWS = 64  # windows in one call to the model
 WINDOW_OVERLAP = 100  # windows overlap a little, so a sentence cut at an edge is in one whole
 MAX_WINDOWS = 20  # an item's first 20 windows (~18,000 characters) are embedded
 
@@ -854,6 +1045,20 @@ def _doc_texts(h: Hit) -> list[str]:
     while start + WINDOW_OVERLAP < len(h.body) and len(out) < MAX_WINDOWS:
         out.append(" ".join(p for p in (h.title, h.body[start : start + EMBED_CHARS]) if p))
         start += EMBED_CHARS - WINDOW_OVERLAP
+    return out
+
+
+def _within(hits: Sequence[Hit], max_items: int, max_windows: int) -> list[Hit]:
+    """The first of these items, up to max_items, whose windows fit in max_windows (at
+    least one item, however long)."""
+    out: list[Hit] = []
+    n = 0
+    for h in hits[:max_items]:
+        w = len(_doc_texts(h))
+        if out and n + w > max_windows:
+            break
+        out.append(h)
+        n += w
     return out
 
 

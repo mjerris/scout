@@ -71,14 +71,15 @@ ASK_STILL_WORKING = "I'm still working on that; ask me again in a moment."
 PHONE_TOOLS = {
     f"mcp__{SERVER}__{n}"
     for n in (
-        *(t.name for t in shared_tools.SHARED if not t.asks and t.name != "mail_send"),
+        *(t.name for t in shared_tools.SHARED if not t.asks and t.name not in ("mail_send", "mail_draft")),
         "recall",
         "remember",
         "list_timers",
     )
 }
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
-_PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_")  # an answer built from these is private
+# An answer built from these is private: mail and messages, and what's indexed from them.
+_PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_|^(?:local_search|task_why|tasks_list)$")
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
 
@@ -1320,14 +1321,23 @@ class Assistant:
         From the phone nobody in the room is asked: the phone agent confirms with the
         caller in two steps (phone_service.py). preview=True says what a tool would do
         without doing it; confirmed=True, only from the phone, runs one the caller said
-        yes to. Sending email is never done from the phone."""
+        yes to. Email is never sent or drafted from the phone."""
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
-        if preview:
-            spoken, _ = describe_tool(name, args)
+        if preview:  # the read-back: exactly what would be done
+            spoken, _ = describe_tool(name, args, full=True)
+            if name == "note_delete":
+                try:
+                    nid = int(args.get("id") or 0)
+                except (TypeError, ValueError):
+                    return {"status": "error", "error": "id must be a note number from notes_find"}
+                h = await asyncio.to_thread(index.default().get, f"note:{nid}")
+                if h is None:
+                    return {"status": "error", "error": f"there's no note {nid}"}
+                spoken = f"Delete note {nid}, {h.title}?"
             return {"status": "ok", "text": spoken}
-        if agent == PHONE and (name == "mail_send" or (t.asks and not confirmed)):
+        if agent == PHONE and (name in ("mail_send", "mail_draft") or (t.asks and not confirmed)):
             # Nobody in the room should be asked about a call they can't hear.
             return {"status": "error", "error": f"{name} can't be used from the phone"}
         if confirmed and agent != PHONE:

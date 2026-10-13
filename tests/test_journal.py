@@ -100,7 +100,8 @@ def test_old_indexed_turns_move_into_the_journal(tmp_path: Path) -> None:
     assert ix.get("turn:1.000") is None
     [h] = ix.search("starlink", semantic=False)
     assert h.id == "journal:2026-10-13T07:30:00" and h.who == "phone"
-    assert "**A:** Yes, online." in journal.path_for(ix.journal_root, at(7, 30)).read_text()
+    # Claude's answer may have come from mail: kept as private, like a new one would be.
+    assert f"**A:** {journal.PRIVATE_ANSWER}" in journal.path_for(ix.journal_root, at(7, 30)).read_text()
     assert memory_service.migrate_turns(ix) == 0
 
 
@@ -189,3 +190,30 @@ def test_a_hand_made_note_file_is_picked_up(tmp_path: Path) -> None:
     h = ix.get("note:7")
     assert h is not None and h.title == "Awning" and h.body == "The left arm squeaks."
     assert ix.note_add("Next", "after seven") == 8
+
+
+def test_unchanged_files_arent_read_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    ix = index.Index(tmp_path / "m.db", None)
+    ix.journal_root = tmp_path / "memory"
+    ix.journal_add(at(10, 0), "room", "Where is the spare key?", "In the tackle box.")
+    ix.note_add("Wifi", "On the office board.")
+    reads: list[str] = []
+    real_sig = journal.file_sig
+
+    def counting_sig(p: Path) -> str:
+        reads.append(p.name)
+        return real_sig(p)
+
+    monkeypatch.setattr(journal, "file_sig", counting_sig)
+    assert ix.sync_files() == 0 and reads == []  # nothing changed: not a byte read
+    day = journal.path_for(ix.journal_root, at(10, 0))
+    os.utime(day, (time.time() + 5, time.time() + 5))  # touched, same content
+    assert ix.sync_files() == 0 and reads == [day.name]  # read once to check, not parsed
+    reads.clear()
+    assert ix.sync_files() == 0 and reads == []  # and not again
+    day.write_text(day.read_text().replace("tackle box", "glovebox"))
+    os.utime(day, (time.time() + 10, time.time() + 10))
+    assert ix.sync_files() == 1  # changed: read and parsed
+    assert [h.id for h in ix.search("glovebox", semantic=False)] == ["journal:2026-10-13T10:00:00"]

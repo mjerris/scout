@@ -1,6 +1,7 @@
 """Scout's memory: facts the user tells it ("remember that my dentist is Dr. Lee",
 "Pat is my manager"), kept on this Mac in memory/facts.md: one "- fact · date" line
-each, which the user can edit; an edit is picked up on the next read.
+each (at the start of the line; an indented bullet isn't a fact), which the user can edit;
+an edit is picked up on the next read, and a change keeps the file's other lines as they are.
 
 Plain code answers "remember...", "what do you know about...", "who is my
 dentist" and "forget..." (tier 0, `answer`). Claude sees a memory only when it
@@ -53,27 +54,52 @@ FACTS_HEADER = (
 _FACT_LINE = re.compile(r"^- (.+?)(?: · (\d{4}-\d\d-\d\d)(?: (\d\d:\d\d))?)?\s*$")
 
 
+def _parse_line(line: str, default_ts: float) -> dict[str, Any] | None:
+    """The fact on a line, if it is one: "- " at the very start."""
+    m = _FACT_LINE.match(line)
+    if not m or not m.group(1).strip():
+        return None
+    ts = default_ts
+    if m.group(2):
+        with contextlib.suppress(ValueError, OverflowError):
+            ts = time.mktime(time.strptime(f"{m.group(2)} {m.group(3) or '00:00'}", "%Y-%m-%d %H:%M"))
+    return {"text": m.group(1).strip(), "ts": ts}
+
+
+def _lines(text: str) -> list[str]:
+    lines = text.split("\n")  # not splitlines(): U+2028 and the like aren't line breaks here
+    return lines[:-1] if lines and lines[-1] == "" else lines
+
+
 def parse_facts(text: str, default_ts: float = 0.0) -> list[dict[str, Any]]:
-    out = []
-    for line in text.splitlines():
-        m = _FACT_LINE.match(line.strip())
-        if not m or not m.group(1).strip():
-            continue
-        ts = default_ts
-        if m.group(2):
-            with contextlib.suppress(ValueError):
-                ts = time.mktime(time.strptime(f"{m.group(2)} {m.group(3) or '00:00'}", "%Y-%m-%d %H:%M"))
-        out.append({"text": m.group(1).strip(), "ts": ts})
-    return out
+    return [f for line in _lines(text) if (f := _parse_line(line, default_ts))]
+
+
+def _render_line(f: dict[str, Any]) -> str:
+    when = f" · {time.strftime('%Y-%m-%d %H:%M', time.localtime(f['ts']))}" if f.get("ts") else ""
+    return f"- {f['text']}{when}"
 
 
 def render_facts(facts: list[dict[str, Any]]) -> str:
-    lines = [
-        f"- {f['text']}"
-        + (f" · {time.strftime('%Y-%m-%d %H:%M', time.localtime(f['ts']))}" if f.get("ts") else "")
-        for f in facts
-    ]
+    lines = [_render_line(f) for f in facts]
     return FACTS_HEADER + "\n".join(lines) + ("\n" if lines else "")
+
+
+def _ts(value: Any) -> float:
+    """A fact's time from JSON: seconds, or 0 if it isn't a usable time."""
+    try:
+        ts = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return ts if 0 <= ts < 1e11 else 0.0  # also NaN and times localtime() can't show
+
+
+def _from_json(data: Any) -> list[dict[str, Any]]:
+    facts = data.get("facts", []) if isinstance(data, dict) else []
+    return [
+        {"text": str(f["text"]), "ts": _ts(f.get("ts"))}
+        for f in facts if isinstance(f, dict) and f.get("text")
+    ]  # fmt: skip
 
 
 class Memory:
@@ -86,15 +112,17 @@ class Memory:
         self.on_change: Callable[[], None] | None = None  # e.g. re-index (index.py)
         # The memory service runs requests on several threads: one change at a time.
         self._lock = threading.RLock()
-        self._mtime = 0.0
+        self._mtime = 0.0  # of the file as last read or written; 0 if there was none
+        # facts.md as last read or written, each line with its fact (None for other text),
+        # so a change rewrites only the lines of facts that came or went.
+        self._lines: list[tuple[str, dict[str, Any] | None]] = []
         if legacy is not None and legacy.exists() and not path.exists():
             try:
-                old = json.loads(legacy.read_text())
-                self.facts = [f for f in old.get("facts", []) if isinstance(f, dict) and f.get("text")]
+                self.facts = _from_json(json.loads(legacy.read_text()))
                 self._save()
                 legacy.rename(legacy.with_suffix(legacy.suffix + ".moved"))
                 log.info("moved %d facts to %s", len(self.facts), path)
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, TypeError) as exc:
                 log.warning("facts in %s not moved (%s)", legacy, exc)
         self._load()
 
@@ -103,30 +131,53 @@ class Memory:
             st = self.path.stat()
             text = self.path.read_text()
             if self.path.suffix == ".md":
-                self.facts = parse_facts(text, st.st_mtime)
+                self._lines = [(line, _parse_line(line, st.st_mtime)) for line in _lines(text)]
+                self.facts = [f for _, f in self._lines if f is not None]
             else:
-                data = json.loads(text)
-                self.facts = [f for f in data.get("facts", []) if isinstance(f, dict) and f.get("text")]
+                self.facts = _from_json(json.loads(text))
             self._mtime = st.st_mtime
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
             log.warning("memory file %s unreadable (%s); starting empty", self.path, exc)
 
+    def _catch_up(self) -> bool:
+        """Re-read the file if it changed since it was last read or written (an edit by
+        hand), or forget the facts if it was deleted. Whether anything changed."""
+        with self._lock:
+            try:
+                m = self.path.stat().st_mtime
+            except FileNotFoundError:
+                if not self._mtime:
+                    return False
+                self.facts, self._lines, self._mtime = [], [], 0.0
+                return True
+            except OSError:
+                return False
+            if m == self._mtime:
+                return False
+            self._load()
+            return True
+
     def refresh(self) -> None:
-        """Re-read the file if it was edited since (by the user, by hand)."""
-        try:
-            m = self.path.stat().st_mtime
-        except OSError:
-            return
-        if m != self._mtime:
-            with self._lock:
-                self._load()
-            if self.on_change is not None:
-                try:
-                    self.on_change()
-                except Exception:
-                    log.exception("memory change hook failed")
+        """Re-read the file if it was edited (or deleted) since, by the user, by hand."""
+        if self._catch_up() and self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                log.exception("memory change hook failed")
+
+    def _merged(self) -> str:
+        """facts.md with the current facts: the lines of facts that are gone dropped, new
+        facts added at the end, every other line as it was."""
+        keep = {id(f) for f in self.facts}
+        lines = self._lines or [(line, None) for line in _lines(FACTS_HEADER)]
+        lines = [(line, f) for line, f in lines if f is None or id(f) in keep]
+        placed = {id(f) for _, f in lines if f is not None}
+        lines += [(_render_line(f), f) for f in self.facts if id(f) not in placed]
+        self._lines = lines
+        self.facts = [f for _, f in lines if f is not None]
+        return "\n".join(line for line, _ in lines) + "\n"
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +185,7 @@ class Memory:
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(
-                    render_facts(self.facts)
+                    self._merged()
                     if self.path.suffix == ".md"
                     else json.dumps({"facts": self.facts}, indent=1)
                 )
@@ -169,11 +220,17 @@ class Memory:
         new = keywords(fact)
         self.refresh()
         with self._lock:
+            self._catch_up()  # an edit saved since the refresh above
             self.facts = [
                 f for f in self.facts if f["text"].lower() != fact.lower() and keywords(f["text"]) != new
             ]
             self.facts.append({"text": fact, "ts": time.time()})
-            del self.facts[:-MAX_FACTS]
+            if len(self.facts) > MAX_FACTS:  # too many: the oldest go, wherever they are in the file
+                oldest = sorted(self.facts, key=lambda f: float(f.get("ts") or 0))[
+                    : len(self.facts) - MAX_FACTS
+                ]
+                gone = {id(f) for f in oldest}
+                self.facts = [f for f in self.facts if id(f) not in gone]
             self._save()
         return fact
 
@@ -187,7 +244,7 @@ class Memory:
 
     def forget(self, about: str) -> list[str]:
         with self._lock:
-            gone = self.matching(about)
+            gone = self.matching(about)  # re-reads an edited file, under the lock
             if gone:
                 self.facts = [f for f in self.facts if f["text"] not in gone]
                 self._save()

@@ -139,9 +139,11 @@ def _where(path: str) -> str:
     return f"{p.name} in {p.parent.name}" if p.parent.name else p.name
 
 
-def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
+def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[str, str]:
     """(short spoken question, full description for the web page). The page puts
-    the actual command or path first, untruncated, then the agent's description."""
+    the actual command or path first, untruncated, then the agent's description.
+    full=True: the question also names every field an event or reminder will get (the
+    phone's read-back, where there is no page to look at)."""
     if name == "Bash":
         cmd = args.get("command", "")
         words = _command_words(cmd)
@@ -161,11 +163,15 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
         verb = "Fetch" if name == "WebFetch" else "Open"
         return f"{verb} {host}?", f"{verb.lower()} {url}"
     if name in CALENDAR_WRITE_TOOLS or name == "calendar_create_event":
-        return _describe_event(args)
+        spoken, detail = _describe_event(args)
+        extra = (("end", "ending", True), ("location", "at", False), ("notes", "notes:", False))
+        return (_with(spoken, args, extra) if full else spoken), detail
     if name in MAIL_SEND_TOOLS or name == "mail_send":
         return _describe_mail(args)
     if name in REMINDER_WRITE_TOOLS or name in ("reminder_add", "reminder_complete"):
-        return _describe_reminder(name, args)
+        spoken, detail = _describe_reminder(name, args)
+        add = full and not name.endswith("reminder_complete")
+        return (_with(spoken, args, (("notes", "notes:", False),)) if add else spoken), detail
     if name in NOTE_WRITE_TOOLS or name == "note_delete":
         return f"Delete note {args.get('id')}?", f"delete note {args.get('id')}"
     if name.startswith("mcp__"):
@@ -173,6 +179,24 @@ def describe_tool(name: str, args: dict[str, Any]) -> tuple[str, str]:
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
         return f"Use {tool}?", f"use {tool} from {server}"
     return f"Use {name}?", f"use the {name} tool"
+
+
+def _with(spoken: str, args: dict[str, Any], fields: tuple[tuple[str, str, bool], ...]) -> str:
+    """The question with these fields added: (key, label, is a date or time)."""
+    parts = []
+    for key, label, is_time in fields:
+        v = args.get(key)
+        if v in (None, ""):
+            continue
+        text = str(v)[:200]
+        if is_time:
+            try:
+                t = dt.datetime.fromisoformat(text)
+                text = t.strftime("%A %B %-d") + (t.strftime(", %-I:%M %p") if "T" in text else "")
+            except ValueError:
+                pass
+        parts.append(f"{label} {text}")
+    return spoken.rstrip("?") + "".join(f", {p}" for p in parts) + "?"
 
 
 def _describe_mail(args: dict[str, Any]) -> tuple[str, str]:

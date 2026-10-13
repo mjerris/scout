@@ -66,7 +66,8 @@ class FakeGranola:
 
 
 @pytest.fixture
-def ix(tmp_path: Any) -> index.Index:
+def ix(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> index.Index:
+    monkeypatch.setattr(granola, "PENDING", tmp_path / "pending.json")
     return index.Index(tmp_path / "m.db", None)
 
 
@@ -115,9 +116,9 @@ def test_an_unfinished_note_is_asked_for_again(ix: index.Index) -> None:
     waiting = note("not_dddddddddddddd", "2026-10-02T12:00:00Z")
     api = FakeGranola([done, waiting], unfinished={waiting["id"]})
     notes, _, newest = granola.sync_pass(ix, api, None)
-    assert notes == 1 and newest is not None and newest < waiting["updated_at"]
+    assert notes == 1 and newest == done["updated_at"]  # the resume point moves on past it
     api.unfinished.clear()
-    assert granola.sync_pass(ix, api, newest)[0] >= 1
+    assert granola.sync_pass(ix, api, newest)[0] == 1  # asked for by id
     assert ix.get("granola:not_dddddddddddddd") is not None
 
 

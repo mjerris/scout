@@ -19,10 +19,10 @@ def store(monkeypatch: pytest.MonkeyPatch) -> index.Index:
     s = index.default()
     assert isinstance(s, index.Index)
 
-    async def no_reminders(a: dict[str, Any], helper: Any = None) -> dict[str, Any]:
-        return {}
+    async def no_reminders(helper: Any = None) -> bool:
+        return False
 
-    monkeypatch.setattr(reminders_mac, "add_data", no_reminders)
+    monkeypatch.setattr(reminders_mac, "available", no_reminders)
     monkeypatch.setattr(tasks, "_people", lambda: [])
     return s
 
@@ -75,8 +75,10 @@ def test_answers_are_parsed_leniently() -> None:
     assert taskfarm.parse_found('{"tasks": [{"title": "Send it"}, {"title": ""}, "junk"]}') == [
         {"title": "Send it"}
     ]
-    assert taskfarm.parse_found("I couldn't find any.") == []
-    assert taskfarm.parse_found("{not json}") == []
+    assert taskfarm.parse_found('{"tasks": []}') == []
+    assert taskfarm.parse_found("I couldn't find any.") is None  # not an answer: not "none"
+    assert taskfarm.parse_found("{not json}") is None
+    assert taskfarm.parse_found('{"tasks": [{"title": "Send') is None  # cut short
 
 
 def test_meetings_and_mail_become_tasks_once(store: index.Index, tmp_path: Path) -> None:
@@ -100,10 +102,12 @@ def test_meetings_and_mail_become_tasks_once(store: index.Index, tmp_path: Path)
         {"title": "Get the vendor quote", "owner": "Pat Doe", "due": None, "evidence": "I'll get you the vendor quote."},
     ]})  # fmt: skip
     local = Fake(
-        {"claim 88231": [{"title": "Call Maria about claim 88231", "owner": "me", "effort": "small"}]}
-    )
+        {"claim 88231": [{"title": "Call Maria about claim 88231", "owner": "me", "effort": "small",
+                          "evidence": "call Maria at the insurer"}]}
+    )  # fmt: skip
     state = tmp_path / "farm.json"
-    c = asyncio.run(taskfarm.farm_pass(store, claude, local, now=NOW, state_path=state))
+    later = time.time() + taskfarm.SETTLE_S + 1  # the meeting has settled
+    c = asyncio.run(taskfarm.farm_pass(store, claude, local, now=later, state_path=state))
     assert c == {"read": 2, "added": 3, "merged": 0, "skipped": 1}
     titles = {tasks.of(h).title: tasks.of(h) for h in store.recent(["task"], limit=10)}
     assert set(titles) == {"Send Pat the travel cut", "Get the vendor quote", "Call Maria about claim 88231"}
@@ -116,7 +120,7 @@ def test_meetings_and_mail_become_tasks_once(store: index.Index, tmp_path: Path)
         len(claude.read) == 1 and "Mike, can you send" in claude.read[0]
     )  # summary and transcript, one read
     assert len(local.read) == 1 and "news@" not in local.read[0]
-    again = asyncio.run(taskfarm.farm_pass(store, claude, local, now=NOW, state_path=state))
+    again = asyncio.run(taskfarm.farm_pass(store, claude, local, now=later, state_path=state))
     assert again["read"] == 0 and len(claude.read) == 1  # read once
 
 
@@ -149,7 +153,7 @@ def test_old_items_are_left_alone_and_failures_are_retried(store: index.Index, t
         calls["n"] += 1
         if calls["n"] == 1:
             raise TimeoutError("the model is busy")
-        return '{"tasks": [{"title": "Do the new thing"}]}'
+        return '{"tasks": [{"title": "Do the new thing", "evidence": "do the new thing"}]}'
 
     state = tmp_path / "s.json"
     first = asyncio.run(taskfarm.farm_pass(store, None, flaky, now=NOW, state_path=state))

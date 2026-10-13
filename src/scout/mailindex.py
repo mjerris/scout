@@ -45,22 +45,52 @@ def _mail_id(m: dict[str, Any]) -> int:
     return int(m.get("mail_id") or m["id"])
 
 
-# Meeting notes and transcripts that arrive by email (docs/tasks-design.md): the sender's
-# domain, and a subject that says so. They're stored as meetings too, in full.
-_MEETING_SENDERS = re.compile(
-    r"gemini-notes@google\.com|meetings-noreply@google\.com|meet-recordings-noreply@google\.com|"
-    r"@zoom\.us|@otter\.ai|@fireflies\.ai|@fathom\.video|@tldv\.io|@email\.teams\.microsoft\.com|"
-    r"@read\.ai|@grain\.com",
-    re.I,
-)
-_MEETING_SUBJECT = re.compile(r"notes|summary|transcript|recap|action items|meeting assets", re.I)
+# Meeting notes and transcripts that arrive by email (docs/tasks-design.md): from a
+# notes service's own address or domain (the address itself, not the display name; a
+# subdomain counts, a look-alike doesn't), with that service's kind of subject. They're
+# stored as meetings too, in full.
+_SUMMARY = re.compile(r"\b(?:summary|notes|recap|transcript)\b", re.I)
+_GEMINI = re.compile(r"^\s*notes\s*:|\bnotes by gemini\b", re.I)
+_MEETING_ADDRESSES = {
+    "gemini-notes@google.com": _GEMINI,
+    "meetings-noreply@google.com": _GEMINI,
+    "meet-recordings-noreply@google.com": _GEMINI,
+}
+_MEETING_DOMAINS = {
+    "zoom.us": re.compile(r"\bmeeting summary\b", re.I),
+    "otter.ai": _SUMMARY,
+    "fireflies.ai": _SUMMARY,
+    "fathom.video": _SUMMARY,
+    "tldv.io": _SUMMARY,
+    "read.ai": _SUMMARY,
+    "grain.com": _SUMMARY,
+    "email.teams.microsoft.com": re.compile(r"\brecap\b", re.I),
+}
 MEETING_QUERIES = ("gemini-notes@google.com", "meetings-noreply@google.com", "zoom.us", "otter.ai",
                    "fireflies.ai", "fathom.video", "tldv.io", "teams.microsoft.com")  # fmt: skip
 MEETING_CHARS = 60_000
 
 
+def sender_address(sender: str) -> str:
+    """The address in a From line: the one in <...>, or the whole line when it's only an
+    address; "" otherwise (a display name alone proves nothing)."""
+    if m := re.search(r"<\s*([^<>\s@]+@[^<>\s@]+)\s*>", sender or ""):
+        return m.group(1).lower()
+    s = (sender or "").strip()
+    return s.lower() if re.fullmatch(r"[^\s@<>\"]+@[^\s@<>\"]+", s) else ""
+
+
 def is_meeting_summary(sender: str, subject: str) -> bool:
-    return bool(_MEETING_SENDERS.search(sender or "")) and bool(_MEETING_SUBJECT.search(subject or ""))
+    addr = sender_address(sender)
+    if not addr:
+        return False
+    pattern = _MEETING_ADDRESSES.get(addr)
+    if pattern is None:
+        domain = addr.rsplit("@", 1)[1]
+        pattern = next(
+            (p for d, p in _MEETING_DOMAINS.items() if domain == d or domain.endswith("." + d)), None
+        )
+    return pattern is not None and bool(pattern.search(subject or ""))
 
 
 def _meeting_title(subject: str) -> str:
@@ -217,13 +247,17 @@ async def backfill_meetings(ix: index.Store, run: mail_mac.Runner = _slow_jxa, d
             ):
                 found[int(m["id"])] = m
     ids = [i for i in found if ix.get(f"mailmeeting:{i}") is None]
+    stored: set[int] = set()
     for i in range(0, len(ids), CHUNK):
         got = await mail_mac.bodies(ids[i : i + CHUNK], run, remember=False)
         for mid, m in got.items():
-            _put(ix, {**found.get(mid, {}), **m}, str(m.get("body") or ""))
-    db.sql("INSERT OR REPLACE INTO mail_sync(name, ts) VALUES ('meetings', ?)", (time.time(),))
-    log.info("mail index: %d meeting notes from email brought in (%d found)", len(ids), len(found))
-    return len(ids)
+            if m.get("body"):
+                _put(ix, {**found.get(mid, {}), **m}, str(m["body"]))
+                stored.add(mid)
+    if stored >= set(ids):  # done only when every one was read; else the next pass tries again
+        db.sql("INSERT OR REPLACE INTO mail_sync(name, ts) VALUES ('meetings', ?)", (time.time(),))
+    log.info("mail index: %d meeting notes from email brought in (%d found)", len(stored), len(found))
+    return len(stored)
 
 
 def search(query: str, count: int, days: int) -> dict[str, Any] | None:

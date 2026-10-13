@@ -11,12 +11,18 @@ are listed.
 Each note is stored as kind "meeting": one item for the summary (id granola:<note>)
 and the transcript in chunks of about CHUNK_CHARS (granola:<note>#<n>), each line
 "Speaker: text". Granola is the record; this is a searchable copy, refreshed when a
-note changes. The memory service runs a pass every `every_min` minutes.
+note changes and dropped when it's deleted. The memory service runs a pass every
+`every_min` minutes.
+
+A listed note Granola won't give yet (404: not processed) is kept in
+state/granola_pending.json with when it was first seen and asked for by id each pass,
+so the next pass's `updated_after` can move on past it; after PENDING_DAYS it's left.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import email.utils
 import json
 import logging
 import time
@@ -24,9 +30,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 from . import index
+from .config import DATA
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +44,9 @@ CHUNK_CHARS = 1000  # what embeds well (index.EMBED_CHARS)
 PAGE = 30  # notes per list page (the API's maximum)
 GAP_S = 0.25  # between requests: Granola allows 5 a second sustained
 TIMEOUT_S = 30.0
+MAX_WAIT_S = 60.0  # the longest a 429's Retry-After is honored
+PENDING = DATA / "state" / "granola_pending.json"
+PENDING_DAYS = 7.0  # a note still unfinished after this long is left alone
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 Fetch = Callable[[str, dict[str, Any]], dict[str, Any]]  # (path, query) -> JSON
@@ -43,6 +54,22 @@ Fetch = Callable[[str, dict[str, Any]], dict[str, Any]]  # (path, query) -> JSON
 
 class GranolaError(Exception):
     pass
+
+
+def retry_after(value: str | None, now: float | None = None) -> float:
+    """Seconds to wait from a Retry-After header (seconds or an HTTP date), 0 to MAX_WAIT_S."""
+    if not value:
+        return 5.0
+    try:
+        wait = float(value)
+    except ValueError:
+        try:
+            wait = email.utils.parsedate_to_datetime(value).timestamp() - (
+                time.time() if now is None else now
+            )
+        except (TypeError, ValueError, IndexError):
+            wait = 5.0
+    return max(0.0, min(wait, MAX_WAIT_S))
 
 
 def fetcher(api_key: str, base: str = API, gap_s: float = GAP_S) -> Fetch:
@@ -70,7 +97,7 @@ def fetcher(api_key: str, base: str = API, gap_s: float = GAP_S) -> Fetch:
                     return out
             except urllib.error.HTTPError as exc:
                 if exc.code == 429 and attempt < 3:
-                    time.sleep(float(exc.headers.get("Retry-After") or 5))
+                    time.sleep(retry_after(exc.headers.get("Retry-After")))
                     continue
                 raise GranolaError(f"{path}: HTTP {exc.code}") from None
             except (urllib.error.URLError, TimeoutError) as exc:
@@ -178,9 +205,11 @@ def _chunk(
 
 
 def store_note(ix: index.Store, note: dict[str, Any]) -> int:
-    """Put a note's items, and drop chunks a shorter new transcript no longer has."""
+    """Put a note's items, and drop chunks a shorter new transcript no longer has. Each
+    item notes when it was stored (stored_at), so a reader can wait for the whole note."""
+    now = time.time()
     docs = documents(note)
-    changed = sum(ix.put(kind=KIND, **d) for d in docs)
+    changed = sum(ix.put(kind=KIND, **{**d, "meta": {**d["meta"], "stored_at": now}}) for d in docs)
     n = len(docs) - 1
     while ix.get(f"granola:{note['id']}#{n + 1}") is not None:
         n += 1
@@ -189,30 +218,81 @@ def store_note(ix: index.Store, note: dict[str, Any]) -> int:
     return changed
 
 
-def sync_pass(ix: index.Store, get: Fetch, since: str | None) -> tuple[int, int, str | None]:
-    """Bring notes changed after `since` (all, when None) into the store. Returns (notes,
-    items changed, the newest updated_at seen: the next pass's `since`)."""
+def forget_note(ix: index.Store, nid: str) -> int:
+    """Drop a deleted note's summary and transcript chunks. Returns how many items."""
+    gone = 0
+    if ix.get(f"granola:{nid}") is not None:
+        ix.delete(f"granola:{nid}")
+        gone += 1
+    n = 1
+    while ix.get(f"granola:{nid}#{n}") is not None:
+        ix.delete(f"granola:{nid}#{n}")
+        gone += 1
+        n += 1
+    return gone
+
+
+def _load_pending(path: Path) -> dict[str, float]:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _save_pending(path: Path, pending: dict[str, float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(pending))
+    tmp.replace(path)
+
+
+def sync_pass(
+    ix: index.Store, get: Fetch, since: str | None, pending_path: Path | None = None, now: float | None = None
+) -> tuple[int, int, str | None]:
+    """Bring notes changed after `since` (all, when None) into the store, and ask again for
+    the ones Granola hadn't finished. Returns (notes, items changed, the newest updated_at
+    listed: the next pass's `since`)."""
+    path = pending_path or PENDING
+    now = time.time() if now is None else now
+    pending = _load_pending(path)
     notes = changed = 0
     newest = since
-    waiting: list[str] = []  # updated_at of notes Granola hasn't finished yet
-    for summary in changed_notes(get, since):
-        u = summary.get("updated_at")
-        if isinstance(u, str) and (newest is None or u > newest):
-            newest = u
-        if summary.get("deleted_at"):
-            continue
+    asked: set[str] = set()
+
+    def fetch(nid: str) -> None:
+        nonlocal notes, changed
+        asked.add(nid)
         try:
-            note = full_note(get, str(summary["id"]))
+            note = full_note(get, nid)
         except GranolaError as exc:
-            if "HTTP 404" in str(exc):  # not processed yet: ask again next pass
-                if isinstance(u, str):
-                    waiting.append(u)
-                continue
-            raise
+            if "HTTP 404" not in str(exc):
+                raise
+            first = pending.setdefault(nid, now)  # not processed yet: ask again next pass
+            if now - first > PENDING_DAYS * 86400:
+                log.warning(
+                    "granola: note %s still unavailable after %.0f days; leaving it", nid, PENDING_DAYS
+                )
+                pending.pop(nid)
+            return
+        pending.pop(nid, None)
         changed += store_note(ix, note)
         notes += 1
-    if waiting:  # resume just before the oldest unfinished note, so it isn't skipped
-        before = (_ts(min(waiting)) - 1) if newest is None or min(waiting) <= newest else None
-        if before is not None:
-            newest = dt.datetime.fromtimestamp(before, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        for summary in changed_notes(get, since):
+            u = summary.get("updated_at")
+            if isinstance(u, str) and (newest is None or u > newest):
+                newest = u
+            nid = str(summary["id"])
+            if summary.get("deleted_at"):
+                asked.add(nid)
+                pending.pop(nid, None)
+                changed += forget_note(ix, nid)
+                continue
+            fetch(nid)
+        for nid in [n for n in pending if n not in asked]:
+            fetch(nid)
+    finally:
+        _save_pending(path, pending)
     return notes, changed, newest
