@@ -430,6 +430,22 @@ checked again against its call. Basic-auth credentials and the SWAIG token secre
 kept in `state/phone.auth` and `state/phone.secret`, the paired phones in
 `state/phone_devices.json` (all mode 600).
 
+### Test call from a browser
+
+`/phone` on the web UI (tailnet only, never through Funnel) places a verified call from
+the browser. Besides `address` it needs `space`, `project_id` and `api_token` in
+`[phone]`: Scout mints a one-hour SignalWire subscriber token for the page
+(`POST /api/fabric/subscribers/tokens` as subscriber `[phone] subscriber`, default
+`scout-owner`; SignalWire creates that subscriber the first time, and bills subscribers
+monthly).
+
+1. Open `https://<mac>.<tailnet>.ts.net/phone?token=<the contents of state/web_token>`
+   (HTTPS, so the page may use the microphone).
+2. **Pair this browser** with a name. The secret stays in this browser's storage;
+   `scoutctl.sh phone forget <device>` revokes it.
+3. **Call Scout**. The page loads `@signalwire/js` 4.0.0-rc.4 from jsDelivr and dials
+   `address` with signed `userVariables`, as the app will.
+
 ## Messages (iMessage and SMS)
 
 Scout can read your texts, never send them. Messages keeps its history in

@@ -114,3 +114,4 @@ enabled = true
 # host = "127.0.0.1"
 # port = 8768
 # call_skew_s = 60                         # a call's signed timestamp may be this far off
+# subscriber = "scout-owner"               # who the /phone test page signs in to SignalWire as

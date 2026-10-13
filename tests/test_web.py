@@ -5,10 +5,14 @@ a free 127.0.0.1 port and shuts it down."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
+import re
 import shutil
 import stat
+import subprocess
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -24,7 +28,8 @@ from aiohttp.test_utils import make_mocked_request
 
 import scout.mcp_server as mcp_mod
 import scout.web as web_mod
-from scout.config import Config, WebConfig
+from scout import phone_devices
+from scout.config import Config, PhoneConfig, WebConfig
 
 TOKEN = "t" * 32
 CLIENT = "page0001abcd"
@@ -172,9 +177,9 @@ def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @asynccontextmanager
-async def serve(app: StubApp | None = None) -> AsyncIterator[Server]:
+async def serve(app: StubApp | None = None, phone: PhoneConfig | None = None) -> AsyncIterator[Server]:
     stub = app or StubApp()
-    runner = await web_mod.start(WebConfig(hosts=["127.0.0.1"], port=0), stub)
+    runner = await web_mod.start(WebConfig(hosts=["127.0.0.1"], port=0), stub, phone)
     try:
         host, port = runner.addresses[0][:2]
         yield Server(f"http://{host}:{port}", runner, stub)
@@ -790,3 +795,282 @@ def test_an_address_that_isnt_up_yet_doesnt_stop_the_server(token_file: Path) ->
             await runner.cleanup()
 
     run(main())
+
+
+# --- /phone: the browser test page, pairing and SignalWire tokens -------------------------
+
+ADDRESS = "/public/scout"
+NODE = Path("/opt/homebrew/opt/node@24/bin/node")
+
+
+def _phone(**kw: Any) -> PhoneConfig:
+    base: dict[str, Any] = {
+        "enabled": True,
+        "space": "example.signalwire.com",
+        "project_id": "proj-1",
+        "api_token": "PTsecret",
+        "address": ADDRESS,
+    }
+    return PhoneConfig(**{**base, **kw})
+
+
+@pytest.fixture
+def devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "state" / "phone_devices.json"
+    monkeypatch.setattr(phone_devices, "PATH", path)
+    return path
+
+
+def test_phone_page_and_scripts_are_served_behind_the_token(token_file: Path) -> None:
+    async def main() -> None:
+        jar = aiohttp.CookieJar(unsafe=True)  # keep cookies for an IP host
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession(cookie_jar=jar) as s:
+            async with s.get(srv.url + "/phone") as r:
+                assert r.status == 401
+            async with s.get(srv.url + "/phone/phone.js") as r:
+                assert r.status == 401
+            async with s.get(srv.url + f"/phone?token={TOKEN}") as r:
+                assert r.status == 200
+                html = await r.text()
+                assert r.headers["Cache-Control"] == "no-store"
+                csp = r.headers["Content-Security-Policy"]
+                assert "frame-ancestors 'none'" in csp and "script-src 'self' https://cdn.jsdelivr.net" in csp
+                assert r.cookies["cv_token"].value == TOKEN
+            assert "https://cdn.jsdelivr.net/npm/@signalwire/js@4.0.0-rc.4/dist/browser.umd.js" in html
+            assert 'integrity="sha384-' in html
+            for name in ("phone.js", "phone_sign.js"):  # the cookie the page set opens its scripts
+                async with s.get(srv.url + f"/phone/{name}") as r:
+                    assert r.status == 200 and r.content_type == "text/javascript"
+                    assert "use strict" in await r.text()
+            async with s.get(srv.url + "/phone/web.py") as r:
+                assert r.status == 404
+
+    run(main())
+
+
+def test_phone_script_dials_with_signed_variables() -> None:
+    js = (Path(web_mod.__file__).parent / "phone.js").read_text()
+    assert "new SW.SignalWire(new SW.StaticCredentialProvider({ token })" in js
+    assert "client.dial(p.address" in js and "userVariables," in js
+    assert "ScoutSign.callVariables(p)" in js
+    assert '"/api/phone/pair"' in js and '"/api/phone/token"' in js
+    assert "remoteStream$" in js and ".hangup()" in js
+
+
+def test_pair_endpoint(token_file: Path, devices: Path) -> None:
+    async def main() -> None:
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/phone/pair"
+            async with s.post(url, json={"name": "Browser"}) as r:
+                assert r.status == 401
+            async with s.post(
+                url, json={"name": "Browser"}, headers={**srv.auth, "Origin": "https://evil.example"}
+            ) as r:
+                assert r.status == 403
+            async with s.post(
+                url, data='{"name": "x"}', headers={**srv.auth, "Content-Type": "text/plain"}
+            ) as r:
+                assert r.status == 415
+            bad_bodies: list[object] = [[], {}, {"name": ""}, {"name": 3}, {"name": "x" * 65}]
+            for bad in bad_bodies:
+                async with s.post(url, json=bad, headers=srv.auth) as r:
+                    assert r.status == 400, bad
+            assert not devices.exists()
+            async with s.post(url, json={"name": "Mike laptop"}, headers=srv.auth) as r:
+                assert r.status == 200
+                assert r.headers["Cache-Control"] == "no-store"
+                got = await r.json()
+        assert set(got) == {"device", "secret", "address"} and got["address"] == ADDRESS
+        stored = phone_devices.load_devices(devices)[got["device"]]
+        assert stored["name"] == "Mike laptop" and stored["secret"] == got["secret"] and not stored["revoked"]
+        # A call signed with what the page got passes the service's check.
+        check = phone_devices.CallCheck(ADDRESS, 60, devices)
+        now = int(time.time())
+        sig = phone_devices.sign(got["secret"], got["device"], now, "nonce-0001", ADDRESS)
+        assert check.check({"device": got["device"], "ts": now, "nonce": "nonce-0001", "sig": sig}).ok
+
+    run(main())
+
+
+def test_pair_needs_an_address(token_file: Path, devices: Path) -> None:
+    async def main() -> None:
+        async with (
+            serve(phone=_phone(address="")) as srv,
+            aiohttp.ClientSession() as s,
+            s.post(srv.url + "/api/phone/pair", json={"name": "B"}, headers=srv.auth) as r,
+        ):
+            assert r.status == 409
+            assert "[phone] address" in (await r.json())["error"]
+        assert not devices.exists()
+
+    run(main())
+
+
+def test_token_request_shape() -> None:
+    url, headers, body = web_mod.phone_token_request(_phone(space="https://example.signalwire.com/"), 1000.0)
+    assert url == "https://example.signalwire.com/api/fabric/subscribers/tokens"
+    assert headers["Authorization"] == "Basic " + base64.b64encode(b"proj-1:PTsecret").decode()
+    assert body == {"reference": "scout-owner", "expire_at": 1000 + web_mod.SW_TOKEN_TTL_S}
+    _, _, body = web_mod.phone_token_request(_phone(subscriber="me@example.com"), 1000.0)
+    assert body["reference"] == "me@example.com"
+
+
+@pytest.mark.parametrize(
+    ("cfg", "want"),
+    [
+        (_phone(enabled=False), "enabled = true"),
+        (_phone(space=""), "space"),
+        (_phone(project_id="", api_token=""), "project_id, api_token"),
+        (_phone(subscriber=" "), "subscriber"),
+        (_phone(space="not a host"), "not a host name"),
+    ],
+)
+def test_token_request_needs_config(cfg: PhoneConfig, want: str) -> None:
+    with pytest.raises(web_mod.PhoneTokenError, match=re.escape(want)) as exc:
+        web_mod.phone_token_request(cfg, 0.0)
+    assert exc.value.status == 409
+
+
+class FakeSignalWire:
+    """Stands in for web._post_json: records the request, answers as configured."""
+
+    def __init__(self, status: int = 200, data: Any = None, exc: BaseException | None = None) -> None:
+        self.status, self.data, self.exc = status, data, exc
+        self.requests: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+
+    async def __call__(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
+        self.requests.append((url, headers, body))
+        if self.exc is not None:
+            raise self.exc
+        return self.status, self.data
+
+
+def test_token_endpoint(token_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeSignalWire(data={"subscriber_id": "s-1", "token": "SAT.jwt", "refresh_token": "R.jwt"})
+    monkeypatch.setattr(web_mod, "_post_json", fake)
+
+    async def main() -> None:
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/phone/token"
+            async with s.post(url) as r:
+                assert r.status == 401
+            assert fake.requests == []
+            before = int(time.time())
+            async with s.post(url, headers=srv.auth) as r:
+                assert r.status == 200 and r.headers["Cache-Control"] == "no-store"
+                got = await r.json()
+        assert got == {"token": "SAT.jwt", "expires_at": got["expires_at"]}  # no refresh token
+        [(req_url, headers, body)] = fake.requests
+        assert req_url == "https://example.signalwire.com/api/fabric/subscribers/tokens"
+        assert headers["Authorization"] == "Basic " + base64.b64encode(b"proj-1:PTsecret").decode()
+        assert body["reference"] == "scout-owner"
+        assert before + 3600 <= body["expire_at"] == got["expires_at"] <= int(time.time()) + 3600
+
+    run(main())
+
+
+@pytest.mark.parametrize(
+    ("fake", "status", "want"),
+    [
+        (FakeSignalWire(401, {"errors": [{"code": "unauthorized"}]}), 502, "project_id / api_token"),
+        (
+            FakeSignalWire(422, {"errors": [{"code": "x", "detail": "Insufficient balance"}]}),
+            502,
+            "Insufficient balance",
+        ),
+        (FakeSignalWire(200, {"no": "token"}), 502, "HTTP 200"),
+        (FakeSignalWire(500, "<html>oops</html>"), 502, "oops"),
+        (FakeSignalWire(exc=TimeoutError()), 504, "didn't answer"),
+        (FakeSignalWire(exc=aiohttp.ClientConnectionError("no route")), 502, "no route"),
+    ],
+)
+def test_token_endpoint_errors(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch, fake: FakeSignalWire, status: int, want: str
+) -> None:
+    monkeypatch.setattr(web_mod, "_post_json", fake)
+
+    async def main() -> None:
+        async with (
+            serve(phone=_phone()) as srv,
+            aiohttp.ClientSession() as s,
+            s.post(srv.url + "/api/phone/token", headers=srv.auth) as r,
+        ):
+            assert r.status == status
+            err = (await r.json())["error"]
+        assert want in err and "PTsecret" not in err
+
+    run(main())
+
+
+def test_token_endpoint_when_phone_is_off(token_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeSignalWire()
+    monkeypatch.setattr(web_mod, "_post_json", fake)
+
+    async def main() -> None:
+        async with (
+            serve() as srv,  # no [phone] passed: off
+            aiohttp.ClientSession() as s,
+            s.post(srv.url + "/api/phone/token", headers=srv.auth) as r,
+        ):
+            assert r.status == 409
+            assert "enabled = true" in (await r.json())["error"]
+        assert fake.requests == []
+
+    run(main())
+
+
+@pytest.mark.skipif(not NODE.exists(), reason="node not installed")
+def test_page_signature_matches_python() -> None:
+    """phone_sign.js (what the browser runs) signs exactly like phone_devices.sign."""
+    sign_js = Path(web_mod.__file__).parent / "phone_sign.js"
+    cases = [
+        ("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", "d0123456789abcdef", 1760000000,
+         "abcDEF_-12345678", "/public/scout"),
+        ("_-_-" * 10 + "_-z", "dfeedfacecafebeef", 1, "n" * 16, "/public/other?channel=audio"),
+    ]  # fmt: skip
+    script = (
+        "const s = require(process.argv[1]); const cases = JSON.parse(process.argv[2]);"
+        "(async () => { const out = [];"
+        " for (const c of cases) out.push(await s.sign(...c));"
+        " const v = await s.callVariables({device: 'dabc', secret: cases[0][0], address: '/public/scout'}, 1760000000999);"
+        " out.push(v);"
+        " console.log(JSON.stringify(out)); })();"
+    )
+    proc = subprocess.run(  # noqa: S603  a fixed node binary, our own script
+        [str(NODE), "-e", script, str(sign_js), json.dumps(cases)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    *sigs, v = json.loads(proc.stdout)
+    assert sigs == [phone_devices.sign(*c) for c in cases]
+    assert v["device"] == "dabc" and v["ts"] == 1760000000
+    assert len(v["nonce"]) == 16 and phone_devices._NONCE.fullmatch(v["nonce"])
+    assert v["sig"] == phone_devices.sign(cases[0][0], "dabc", 1760000000, v["nonce"], "/public/scout")
+
+
+def test_post_json_sends_json_with_the_headers() -> None:
+    """The real client half of the token call, against a local stand-in for SignalWire."""
+    seen: list[tuple[str, str | None, Any]] = []
+
+    async def handler(req: aioweb.Request) -> aioweb.StreamResponse:
+        seen.append((req.path, req.headers.get("Authorization"), await req.json()))
+        return aioweb.json_response({"token": "T"})
+
+    async def main() -> tuple[int, Any]:
+        app = aioweb.Application()
+        app.router.add_post("/api/fabric/subscribers/tokens", handler)
+        runner = aioweb.AppRunner(app)
+        await runner.setup()
+        site = aioweb.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            host, port = runner.addresses[0][:2]
+            url = f"http://{host}:{port}/api/fabric/subscribers/tokens"
+            return await web_mod._post_json(url, {"Authorization": "Basic eA=="}, {"reference": "r"})
+        finally:
+            await runner.cleanup()
+
+    assert run(main()) == (200, {"token": "T"})
+    assert seen == [("/api/fabric/subscribers/tokens", "Basic eA==", {"reference": "r"})]
