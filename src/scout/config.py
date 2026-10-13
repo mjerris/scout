@@ -136,12 +136,23 @@ class ClaudeConfig:
     cwd: str = "~"
     model: str = ""  # empty = Claude Code's default
     permission_mode: str = "default"
-    setting_sources: list[str] = field(default_factory=lambda: ["user"])
+    # Claude Code settings files the room assistant loads. Empty (the default) keeps it
+    # lean: no ~/.claude CLAUDE.md, memory, skills or hooks in every request (about a
+    # third fewer tokens a turn, scripts/bench_brain.py); what it needs from
+    # ~/.claude/settings.json comes in through inherit_settings below. ["user"] loads
+    # all of it, as before (then set plugins = "enabled" too).
+    setting_sources: list[str] = field(default_factory=list)
+    # With "user" not in setting_sources: these keys of ~/.claude/settings.json still
+    # apply to the room (your allow/deny rules, your model and effort). The "settings"
+    # approval policy brings your hooks along too.
+    inherit_settings: list[str] = field(
+        default_factory=lambda: ["permissions", "model", "effortLevel", "alwaysThinkingEnabled"]
+    )
     # Claude Code plugins for the room assistant (the Agent SDK doesn't load them by
-    # itself): "enabled" = Scout's own skills plus every plugin enabled in
-    # ~/.claude/settings.json; "scout" = Scout's skills only; "none". Their tools
-    # still ask by voice unless pre-approved.
-    plugins: str = "enabled"
+    # itself): "scout" = Scout's own skills (the default); "enabled" = those plus every
+    # plugin enabled in ~/.claude/settings.json; "none". Their tools still ask by voice
+    # unless pre-approved.
+    plugins: str = "scout"
     confirm_timeout_s: float = 30.0
     # "strict": only auto_allow_* below run without a spoken yes, even if your
     # ~/.claude settings allow more.

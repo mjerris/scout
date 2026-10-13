@@ -34,6 +34,14 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_user_claude_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The room's options never pick up this machine's ~/.claude/settings.json in tests."""
+    import scout.brain as brain_mod
+
+    monkeypatch.setattr(brain_mod, "CLAUDE_SETTINGS", tmp_path / "no-claude-settings.json")
+
+
+@pytest.fixture(autouse=True)
 def _full_scan_mail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests that fake Mail's full-scan script get it; tests/test_mail.py covers the range path."""
     import scout.mail_mac as mail_mac

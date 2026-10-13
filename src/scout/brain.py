@@ -288,6 +288,34 @@ def room_plugins(mode: str, home: Path | None = None) -> list[SdkPluginConfig]:
     return [{"type": "local", "path": str(p)} for p in paths]
 
 
+CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+
+
+def user_settings(keys: list[str], path: Path | None = None) -> dict[str, Any]:
+    """These keys of ~/.claude/settings.json, for a room that doesn't load the file."""
+    try:
+        data = json.loads((path or CLAUDE_SETTINGS).read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: data[k] for k in keys if k in data} if isinstance(data, dict) else {}
+
+
+def merge_settings(base: dict[str, Any], own: dict[str, Any]) -> dict[str, Any]:
+    """Scout's settings on top of the user's: permission rule lists are joined (so the
+    user's allow and deny rules still apply, and Scout's deny and ask rules too, which win
+    over allow); any other key of Scout's replaces the user's."""
+    out = {**base, **own}
+    theirs, ours = base.get("permissions"), own.get("permissions")
+    if isinstance(theirs, dict) and isinstance(ours, dict):
+        perms = {**theirs, **ours}
+        for key in ("allow", "deny", "ask"):
+            joined = [*(theirs.get(key) or []), *(ours.get(key) or [])]
+            if joined:
+                perms[key] = list(dict.fromkeys(joined))
+        out["permissions"] = perms
+    return out
+
+
 def _permission_mode(mode: str) -> PermissionMode | None:
     if not mode:
         return None
@@ -402,6 +430,7 @@ class Brain:
         self.notify = notify  # (event, text): tells the user about saved rules
         self.client: ClaudeSDKClient | None = None
         self.session_id: str | None = None
+        self._session_cost = 0.0  # the CLI's running total for this session, so far
         self._lock = asyncio.Lock()
         self._options()  # validates permission_mode, setting_sources and approval_policy now
 
@@ -436,6 +465,13 @@ class Brain:
         }
         if self.cfg.approval_policy == "settings_no_hooks":
             overrides["disableAllHooks"] = True
+        sources = _setting_sources(self.cfg.setting_sources)
+        if "user" not in sources:  # the lean room: only the parts of ~/.claude it needs
+            keys = [
+                *self.cfg.inherit_settings,
+                *(["hooks"] if self.cfg.approval_policy == "settings" else []),
+            ]
+            overrides = merge_settings(user_settings(keys), overrides)
         return ClaudeAgentOptions(
             cwd=str(Path(self.cfg.cwd).expanduser()),
             settings=json.dumps(overrides),
@@ -445,7 +481,7 @@ class Brain:
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
             permission_mode=_permission_mode(self.cfg.permission_mode),  # "" = settings' defaultMode
-            setting_sources=_setting_sources(self.cfg.setting_sources),
+            setting_sources=sources,
             system_prompt={"type": "preset", "preset": "claude_code", "append": append},
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,  # stream words, so the first sentence is spoken early
@@ -577,7 +613,8 @@ class Brain:
     async def ask(self, text: str) -> AsyncIterator[tuple[str, Any]]:
         """Yields ("speak", sentence) as each sentence is written, then ("text", str)
         for a finished message ("spoken", str when its sentences were already
-        yielded), ("tool", (name, input)), and finally ("result", ResultMessage)."""
+        yielded), ("tool", (name, input)), and finally ("result", ResultMessage) whose
+        total_cost_usd is this turn's cost (the CLI reports the session's running total)."""
         async with self._lock:
             client = await self._ensure()
             await client.query(text)
@@ -611,7 +648,15 @@ class Brain:
                     pending, streamed = "", False
                 elif isinstance(msg, ResultMessage):
                     self.session_id = msg.session_id
-                    yield "result", msg
+                    yield "result", self._turn_cost(msg)
+
+    def _turn_cost(self, msg: ResultMessage) -> ResultMessage:
+        """The result with total_cost_usd made this turn's own: a long-lived session reports
+        its running total (zeroed again when the conversation is reset)."""
+        total = float(msg.total_cost_usd or 0)
+        turn = total - self._session_cost if total >= self._session_cost else total
+        self._session_cost = total
+        return dataclasses.replace(msg, total_cost_usd=round(turn, 6))
 
     async def interrupt(self) -> None:
         if self.client is not None:
@@ -629,11 +674,13 @@ class Brain:
                     log.exception("disconnect failed")
             self.client = None
             self.session_id = None
+            self._session_cost = 0.0
             log.info("Claude session reset")
 
     async def close(self) -> None:
         """Disconnect immediately, without waiting for an in-flight turn."""
         client, self.client = self.client, None
+        self._session_cost = 0.0
         if client is not None:
             try:
                 await asyncio.wait_for(client.disconnect(), 5)

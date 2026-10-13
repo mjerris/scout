@@ -197,8 +197,8 @@ version, which the next session start switches to.
 
 - Desk sessions get Scout's tools as `mcp__plugin_scout_scout__*` (discuss,
   voice_status, mail, calendar). The room assistant has its own in-process
-  copies and loads Scout's skills plus every plugin enabled in
-  `~/.claude/settings.json` (`claude.plugins`); their tools ask by voice unless
+  copies and loads Scout's skills (`claude.plugins = "scout"`); `"enabled"` adds
+  every plugin enabled in `~/.claude/settings.json`, whose tools ask by voice unless
   pre-approved.
 - `/scout:uninstall` stops the app and removes the login item, keeping the data
   folder unless asked to purge; then `claude plugin uninstall scout`.
@@ -502,8 +502,27 @@ row Scout mentions the option once. Every decision is logged in `state/trust.jso
 ## Usage: what answered
 
 Every request is logged in `state/ledger.jsonl`: which tier answered (0 plain code,
-1 the local model, or Claude), how long it took, and for Claude the cost, turns and
-tokens. "How much have you spent today / this week?" answers from it locally.
+1 the local model, or Claude), how long it took, and for Claude the turn's own cost
+(the session reports a running total; Scout records the difference), turns and tokens
+(uncached input, cache writes, cache reads, output). "How much have you spent today /
+this week?" answers from it locally, tokens included.
+
+### What a Claude turn costs
+
+The room assistant and the phone's "ask Scout" are lean by default: they load no
+`~/.claude` settings files (`claude.setting_sources = []`), so your CLAUDE.md, auto
+memory, personal skills, hooks and other plugins aren't sent with every request. Only
+Scout's own skills load (`claude.plugins = "scout"`), and `claude.inherit_settings`
+copies just the parts of `~/.claude/settings.json` the room uses: your permission rules
+(so the `settings` approval policies behave as before), model and effort. The `settings`
+policy brings your hooks along too. `setting_sources = ["user"]` with `plugins =
+"enabled"` restores the old full load.
+
+`scripts/bench_brain.py` measures it with the real room options (a few synthetic
+questions, one calling the weather tool; about $0.15 a variant on Opus). On Opus, a
+first turn went from about 29k input tokens to 22k and a turn with one tool call from
+97k to 72k. Sonnet costs about 40% less a turn than Opus, with a slower
+first word.
 
 ## Pulse
 
