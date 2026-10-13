@@ -9,6 +9,8 @@ import logging.handlers
 import os
 import signal
 import sys
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 # onnxruntime (Kokoro, Silero, smart-turn) starts a telemetry uploader to Microsoft
@@ -23,15 +25,35 @@ if TYPE_CHECKING:
     from .tts import Speaker
 
 
+LOG_DAYS = 30
+
+
+def _drop_old_logs(logs: Path, days: float = LOG_DAYS) -> None:
+    """Size-rotated scout.log.1-3 from before daily files: removed once older than `days`
+    (the daily files' own pruning doesn't see their names)."""
+    cutoff = time.time() - days * 86400
+    for old in logs.glob("scout.log.[0-9]"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+
+
 def _setup_logging(verbose: bool) -> None:
     logs = config_mod.DATA / "logs"
     logs.mkdir(exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    # A file a day, the last LOG_DAYS kept: it holds what the mic heard, like
+    # transcript.jsonl, so it's kept no longer than that.
     handlers: list[logging.Handler] = [
-        logging.handlers.RotatingFileHandler(logs / "scout.log", maxBytes=5_000_000, backupCount=3)
+        logging.handlers.TimedRotatingFileHandler(
+            logs / "scout.log", when="midnight", backupCount=LOG_DAYS, encoding="utf-8"
+        )
     ]
+    _drop_old_logs(logs)
     # Under launchd stdout is logs/launchd.out.log, which nothing rotates; the
     # rotating file above already has every line. Echo to the terminal only.
     if sys.stdout.isatty():
