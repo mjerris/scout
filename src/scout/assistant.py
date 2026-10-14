@@ -1040,9 +1040,10 @@ class Assistant:
         (self._context), so a request tier 1 passes on doesn't wait for it afterwards."""
         if not self.cfg.claude.local_first:
             return False
+        tier: int | None = 0  # set before the lookups: a ToolError below is still said
+        private = False
         try:
             said = await local_intents.answer(text, self._local)
-            tier: int | None = 0
             # Worked out from private data: a memory, an email's text, the title of a task
             # found in mail, a meeting or Slack (local_intents sets ctx.private).
             private = self._local.private

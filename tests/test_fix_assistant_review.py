@@ -345,3 +345,20 @@ def test_memory_outage_degrades_every_memory_call(monkeypatch: pytest.MonkeyPatc
     ctx, handled = run(go())
     assert ctx.endswith("who is Sam") and "memories" not in ctx
     assert handled is False
+
+
+def test_a_local_lookup_error_is_said_not_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tier-0 lookup that raises ToolError ("what's the weather" with no place set) is
+    said as "Sorry, ..."; it crashed the turn (tier unset) and nothing was said."""
+
+    async def no_place(text: str, ctx: Any) -> str | None:
+        raise ToolError("Which place? Name one, or set weather.home in Scout's config.")
+
+    monkeypatch.setattr(local_intents, "answer", no_place)
+
+    async def go() -> list[str]:
+        r = make()
+        assert await r.a._answer_locally("what's the weather tonight")
+        return r.spk.said
+
+    assert run(go()) == ["Sorry, Which place? Name one, or set weather.home in Scout's config."]
