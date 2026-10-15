@@ -544,10 +544,16 @@ export class CallKeepBridge {
       const gate = new Promise<void>((resolve) => {
         this.releaseAudioGate = resolve;
       });
+      let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         gate,
-        new Promise<void>((resolve) => setTimeout(resolve, AUDIO_SESSION_TIMEOUT_MS))
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, AUDIO_SESSION_TIMEOUT_MS);
+        })
       ]);
+      // Once the session is up the fallback has nothing left to do; left running,
+      // it holds the JS runtime (and a test runner) open for the rest of its 3 s.
+      clearTimeout(timer);
     }
     this.startAudio(media);
   }

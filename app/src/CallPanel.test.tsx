@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import RNCallKeep from 'react-native-callkeep';
 import { BehaviorSubject, Subject } from 'rxjs';
 
+import { getCallKit } from '@signalwire/react-native/callkit';
+
 import { CallPanel } from './CallPanel';
 import { sign } from './sign';
 
@@ -67,6 +69,9 @@ function respond(status: number, body: unknown) {
   return { ok: status < 300, status, json: async () => body };
 }
 
+// What index.ts does at launch.
+beforeAll(() => getCallKit().setup({ appName: 'Scout', supportsVideo: false }));
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockSw.constructed = [];
@@ -109,6 +114,10 @@ test('dials the agent with signed userVariables, as a voice call named Scout in 
 
   // Mute goes through CallKit, so the system call screen and a headset agree.
   await act(async () => mockSw.call!.status$.next('connected'));
+  // CallKit activates the audio session; the library waits for it (up to 3 s) to start audio.
+  await act(async () =>
+    (RNCallKeep as unknown as { __emit(t: string, d: unknown): void }).__emit('didActivateAudioSession', {}),
+  );
   expect(screen.getByTestId('state')).toHaveTextContent('State: connected');
   fireEvent.press(screen.getByTestId('mute'));
   expect(RNCallKeep.setMutedCall).toHaveBeenCalledWith(uuid, true);
@@ -121,10 +130,19 @@ test('dials the agent with signed userVariables, as a voice call named Scout in 
   expect(RNCallKeep.reportEndCallWithUUID).toHaveBeenCalledWith(uuid, expect.any(Number));
 });
 
-test('a call requested from Recents is placed like a press of Call', async () => {
+test('a call asked for from Recents is placed, once', async () => {
   globalThis.fetch = jest.fn(async () => respond(200, { token: 'sat', expires_at: 0 })) as unknown as typeof fetch;
-  const view = render(<CallPanel pairing={PAIRING} request={0} />);
-  expect(mockSw.dial).not.toHaveBeenCalled();
-  view.rerender(<CallPanel pairing={PAIRING} request={1} />);
+  // Before the panel is up (a cold start), and CallKit's echo of our own call is ignored.
+  (RNCallKeep as unknown as { __emit(t: string, d: unknown): void }).__emit('didReceiveStartCallAction', {
+    handle: '/private/scout',
+  });
+  render(<CallPanel pairing={PAIRING} />);
   await waitFor(() => expect(mockSw.dial).toHaveBeenCalledTimes(1));
+  const uuid = await waitFor(() => (RNCallKeep.startCall as jest.Mock).mock.calls[0][0] as string);
+  (RNCallKeep as unknown as { __emit(t: string, d: unknown): void }).__emit('didReceiveStartCallAction', {
+    callUUID: uuid,
+    handle: '/private/scout',
+  });
+  await act(async () => {});
+  expect(mockSw.dial).toHaveBeenCalledTimes(1);
 });

@@ -11,6 +11,7 @@ import RNCallKeep from 'react-native-callkeep';
 import { useAudioDevices } from './audioDevices';
 import type { DeviceName } from './audioDevices';
 import { scoutCredentials } from './credentials';
+import { takeCallRequests, usePendingCallRequests } from './startRequests';
 import type { Pairing } from './pairing';
 import { ScoutServer } from './server';
 import type { MintedToken } from './server';
@@ -36,9 +37,9 @@ interface Session {
  * built for this one call (and torn down after it), which dials the agent's address
  * with the signed userVariables. CallKit shows the call in the system UI.
  *
- * `request` is bumped to place a call from outside (Recents, Siri).
+ * A call asked for from outside (Recents, Siri) is placed as soon as the panel is up.
  */
-export function CallPanel({ pairing, request = 0 }: { pairing: Pairing; request?: number }) {
+export function CallPanel({ pairing }: { pairing: Pairing }) {
   const [session, setSession] = useState<Session | null>(null);
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState('idle');
@@ -74,13 +75,10 @@ export function CallPanel({ pairing, request = 0 }: { pairing: Pairing; request?
     if (why) setError(why);
   }, []);
 
-  const handled = useRef(request);
+  const requests = usePendingCallRequests();
   useEffect(() => {
-    if (request !== handled.current) {
-      handled.current = request;
-      void start();
-    }
-  }, [request, start]);
+    if (requests > 0 && takeCallRequests()) void start();
+  }, [requests, start]);
 
   return (
     <Section title="Call Scout">

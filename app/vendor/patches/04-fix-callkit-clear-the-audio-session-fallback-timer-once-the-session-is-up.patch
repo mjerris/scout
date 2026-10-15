@@ -1,0 +1,24 @@
+Upstream: github.com/lpradovera/signalwire-react-native-unofficial, local branch scout/voice-calls-start-on-receiver (a39237d); its tests are upstream, not vendored.
+
+diff --git a/signalwire-react-native/src/callkit/CallKeepBridge.ts b/signalwire-react-native/src/callkit/CallKeepBridge.ts
+index 95d3faa..5d74f6d 100644
+--- a/signalwire-react-native/src/callkit/CallKeepBridge.ts
++++ b/signalwire-react-native/src/callkit/CallKeepBridge.ts
+@@ -544,10 +544,16 @@ export class CallKeepBridge {
+       const gate = new Promise<void>((resolve) => {
+         this.releaseAudioGate = resolve;
+       });
++      let timer: ReturnType<typeof setTimeout> | undefined;
+       await Promise.race([
+         gate,
+-        new Promise<void>((resolve) => setTimeout(resolve, AUDIO_SESSION_TIMEOUT_MS))
++        new Promise<void>((resolve) => {
++          timer = setTimeout(resolve, AUDIO_SESSION_TIMEOUT_MS);
++        })
+       ]);
++      // Once the session is up the fallback has nothing left to do; left running,
++      // it holds the JS runtime (and a test runner) open for the rest of its 3 s.
++      clearTimeout(timer);
+     }
+     this.startAudio(media);
+   }
