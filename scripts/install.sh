@@ -78,8 +78,10 @@ if command -v swiftc >/dev/null; then
     # A rebuilt Messages helper is a new binary to macOS: Full Disk Access must be
     # granted again (Scout walks the user through it on the next messages question).
     build_if_changed messages "$DATA/current/native/messages" scout-messages
+    # Contacts: its own permission, asked for on the first contacts question (docs/contacts.md).
+    build_if_changed contacts "$DATA/current/native/contacts" scout-contacts
 else
-    echo "swiftc missing: skipping the calendar, messages and Apple voice helpers (xcode-select --install)"
+    echo "swiftc missing: skipping the calendar, messages, contacts and Apple voice helpers (xcode-select --install)"
 fi
 if [ -x "$DATA/bin/scout-messages" ]; then
     status installing "starting the Messages helper"

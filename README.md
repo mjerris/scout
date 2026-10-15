@@ -165,6 +165,7 @@ scripts/build-voiceio.sh    # optional: the Apple voice-processing helper (audio
 scripts/build-vcal.sh       # optional: calendar access (EventKit helper; see Calendar below)
 scripts/build-messages.sh   # optional: read-only Messages history (see Messages below)
 scripts/messages-agent.sh install   # ...and its own login item
+scripts/build-contacts.sh   # optional: read-only Contacts lookups (see Contacts below; docs/contacts.md)
 cp config.example.toml "$HOME/Library/Application Support/Scout/config.toml"   # optional; every key has a default
 scripts/run.sh              # foreground run; allow microphone access when macOS asks
 ```
@@ -511,6 +512,19 @@ do. Drag `scout-messages` into the list (or click +, press Cmd-Shift-G and paste
 `~/Library/Application Support/Scout/bin/scout-messages`), turn it on, and
 Scout says "Got it" a few seconds later. To take it back, turn it off or remove
 it in the same list.
+
+## Contacts
+
+Scout can look people up in the Mac's Contacts (every synced account), never change
+them, through one small helper, `bin/scout-contacts` (`native/contacts`, the Contacts
+framework) with its own permission. The first contacts question shows macOS's prompt
+asking to let "scout contacts" access your contacts; allow it once. It's listed after
+that under System Settings → Privacy & Security → Contacts, where turning it off takes
+it back. "What's Pat's number", "what's Pat's email", "when is Sam's birthday" and
+"what's Pat's address" are answered without Claude; Claude gets `contacts_search` and
+`contact_get` (birthdays and addresses as the privacy mode allows), texts and mail show
+names instead of bare numbers and addresses, and a mail draft can go to "Pat". Details:
+[docs/contacts.md](docs/contacts.md).
 
 ## Trust: what asks first
 

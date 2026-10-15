@@ -69,6 +69,7 @@ uninstall)
     launchctl bootout "$DOMAIN/$MESSAGES_LABEL" 2>/dev/null || true
     rm -f "$MESSAGES_PLIST" "$DATA/state/messages.sock" "$DATA/state/messages_token"
     echo "removed the Messages helper's login item (turn off scout-messages in System Settings, Privacy and Security, Full Disk Access)"
+    echo "the Contacts permission stays until you remove scout-contacts in System Settings, Privacy and Security, Contacts"
     if [ "${2:-}" = "--purge" ]; then
         rm -rf "$DATA"
         echo "deleted $DATA"

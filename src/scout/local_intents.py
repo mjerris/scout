@@ -26,6 +26,7 @@ from typing import Any
 from . import (
     briefing,
     calendar_mac,
+    contacts_mac,
     freebusy,
     mac,
     mail_mac,
@@ -151,6 +152,7 @@ class Context:
     said: Callable[[], _refs.Log] = lambda: _refs.log_of()  # what was said lately, with its refs
     store: Callable[[], Any] = lambda: _refs._store()  # where records resolve (index.default)
     sync: Callable[[], list[syncstate.Status]] = syncstate.statuses
+    contacts: Callable[[str], Awaitable[list[dict[str, Any]]]] = contacts_mac.person_named
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
@@ -833,6 +835,169 @@ async def _sync_status(m: re.Match[str], c: Context) -> str:
 # takes it, with the refs in its context. Nothing is guessed.
 
 _THAT = r"(?:that|this|it)(?: one)?"
+
+
+# --- contacts ---------------------------------------------------------------------------
+
+_POSSESSOR = r"(?P<who>[a-z][a-z .'-]{0,60}?)(?:'s|')"  # _clean made curly apostrophes straight
+_ASK = r"(?:what(?:'s| is| was)|tell me|give me|get me|read me|say|do you (?:know|have))"
+_NOT_A_NAME = {"my", "your", "his", "her", "their", "our", "its", "the", "this", "that", "it", "a"}
+
+
+def _phone_kind(group: str) -> str:
+    return r"(?P<" + group + r">cell|mobile|iphone|home|work|office) "
+
+
+async def _person(c: Context, who: str) -> tuple[dict[str, Any] | None, str | None]:
+    """(the one contact `who` means, "") or (None, what to say instead); (None, None)
+    when nobody in Contacts is called that ("my wife's number"): Claude takes it."""
+    people = await c.contacts(who)
+    if not people:
+        return None, None
+    if len(people) > 1:
+        names = [contacts_mac.describe(p) for p in people[:4]]
+        return None, f"{len(people)} people in your contacts match {who.title()}: {join(names)}. Which one?"
+    return people[0], ""
+
+
+def _clean_who(who: str) -> str | None:
+    w = " ".join(who.split())
+    w = re.sub(r"^(?:the |my )", "", w)
+    return None if not w or w in _NOT_A_NAME else w
+
+
+def _pick(items: list[dict[str, Any]], kind: str | None) -> list[dict[str, Any]]:
+    if not kind:
+        return items
+    want = {"cell": ("mobile", "iphone", "cell"), "mobile": ("mobile", "iphone", "cell"),
+            "iphone": ("iphone", "mobile"), "office": ("work", "office")}.get(kind, (kind,))  # fmt: skip
+    return [x for x in items if any(w in str(x.get("label", "")).lower() for w in want)]
+
+
+def _labeled(label: str, fallback: str) -> str:
+    lab = label.strip().lower()
+    return f"{lab} {fallback}" if lab and lab != fallback else fallback
+
+
+@_rule(
+    r"(?:" + _ASK + r" )?" + _POSSESSOR + r" (?:" + _phone_kind("kind") + r")?(?:phone |telephone )?number|"
+    r"(?:" + _ASK + r" )?the (?:" + _phone_kind("kind2") + r")?(?:phone |telephone )?number (?:for|of) "
+    r"(?P<who2>[a-z][a-z .'-]{0,60})"
+)
+async def _contact_number(m: re.Match[str], c: Context) -> str | None:
+    who = _clean_who(m.group("who") or m.group("who2") or "")
+    if who is None:
+        return None
+    p, instead = await _person(c, who)
+    if p is None:
+        return instead
+    kind = m.group("kind") or m.group("kind2")
+    phones = _pick(list(p.get("phones") or []), kind)
+    name = p.get("name") or who.title()
+    if not phones:
+        return f"{name} has no {kind + ' ' if kind else ''}phone number in your contacts."
+    said = [
+        f"{_labeled(str(x.get('label') or ''), 'number')} is {contacts_mac.spoken_number(str(x.get('value')))}"
+        for x in phones[:2]
+    ]
+    more = f" There {'is' if len(phones) == 3 else 'are'} {len(phones) - 2} more." if len(phones) > 2 else ""
+    return f"{name}'s {', and '.join(said)}.{more}"
+
+
+def _spoken_email(address: str) -> str:
+    user, _, host = address.partition("@")
+    return f"{user.replace('.', ' dot ')} at {host.replace('.', ' dot ')}"
+
+
+@_rule(
+    r"(?:" + _ASK + r" )?" + _POSSESSOR + r" (?:(?P<kind>home|work|personal) )?e-?mail(?: address)?|"
+    r"(?:" + _ASK + r" )?the e-?mail(?: address)? (?:for|of) (?P<who2>[a-z][a-z .'-]{0,60})"
+)
+async def _contact_email(m: re.Match[str], c: Context) -> str | None:
+    who = _clean_who(m.group("who") or m.group("who2") or "")
+    if who is None:
+        return None
+    p, instead = await _person(c, who)
+    if p is None:
+        return instead
+    kind = m.group("kind")
+    emails = _pick(list(p.get("emails") or []), kind)
+    name = p.get("name") or who.title()
+    if not emails:
+        return f"{name} has no {kind + ' ' if kind else ''}email address in your contacts."
+    said = [
+        f"{_labeled(str(x.get('label') or ''), 'email')} is {_spoken_email(str(x.get('value')))}"
+        for x in emails[:2]
+    ]
+    return f"{name}'s {', and '.join(said)}."
+
+
+@_rule(r"(?:when(?:'s| is| was)|what(?:'s| is) the date of|what day is) " + _POSSESSOR + r" birthday")
+async def _contact_birthday(m: re.Match[str], c: Context) -> str | None:
+    who = _clean_who(m.group("who"))
+    if who is None:
+        return None
+    p, instead = await _person(c, who)
+    if p is None:
+        return instead
+    c.private = True  # a birthday: not for Claude in strict privacy mode
+    name = p.get("name") or who.title()
+    b = p.get("birthday") or {}
+    if not b.get("month") or not b.get("day"):
+        return f"There's no birthday for {name} in your contacts."
+    today = c.now().date()
+    nxt = None
+    for year in (today.year, today.year + 1):
+        try:
+            d = dt.date(year, int(b["month"]), int(b["day"]))
+        except ValueError:  # February 29 in a common year: March 1
+            d = dt.date(year, 3, 1)
+        if d >= today:
+            nxt = d
+            break
+    when = contacts_mac.birthday_text({"month": b["month"], "day": b["day"]})  # February 29 stays itself
+    days = (nxt - today).days if nxt else None
+    soon = (
+        " That's today."
+        if days == 0
+        else " That's tomorrow."
+        if days == 1
+        else f" That's in {days} days."
+        if days is not None and days <= 60
+        else ""
+    )
+    age = ""
+    if b.get("year") and nxt:
+        age = (
+            f" They'll be {nxt.year - int(b['year'])}."
+            if days
+            else f" They're {nxt.year - int(b['year'])} today."
+        )
+    return f"{name}'s birthday is {when}.{soon}{age}"
+
+
+@_rule(
+    r"(?:" + _ASK + r" |where(?:'s| is) )?" + _POSSESSOR + r" (?:(?P<kind>home|work|mailing|street) )?address"
+)
+async def _contact_address(m: re.Match[str], c: Context) -> str | None:
+    who = _clean_who(m.group("who"))
+    if who is None or who.endswith(("e-mail", "email")):
+        return None
+    p, instead = await _person(c, who)
+    if p is None:
+        return instead
+    c.private = True  # a home address: not for Claude in strict privacy mode
+    name = p.get("name") or who.title()
+    kind = m.group("kind")
+    addrs = list(p.get("addresses") or [])
+    if kind in ("home", "work"):
+        addrs = _pick(addrs, kind)
+    if not addrs:
+        return (
+            f"There's no {kind + ' ' if kind in ('home', 'work') else ''}address for {name} in your contacts."
+        )
+    a = addrs[0]
+    return f"{name}'s {_labeled(str(a.get('label') or ''), 'address')} is {contacts_mac.address_text(a)}."
 
 
 async def _that(c: Context) -> tuple[str, dict[str, Any]] | None:

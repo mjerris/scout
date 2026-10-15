@@ -98,6 +98,12 @@ at = ""  # e.g. "07:30" to hear the briefing every day; "brief me" works either 
 # the only program given Full Disk Access. false = the messages_* tools refuse.
 enabled = true
 
+[contacts]
+# Look people up in Contacts (read-only) through the scout-contacts helper, which asks
+# for its own Contacts permission once (docs/contacts.md). false = the contacts tools
+# refuse, and texts and mail show numbers and addresses as they are.
+enabled = true
+
 [starlink]
 # The Starlink dish's local API: status, outages, data used. Off unless turned on.
 # enabled = true

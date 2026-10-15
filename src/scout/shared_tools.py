@@ -1,4 +1,4 @@
-"""Mail, calendar, reminders and messages tools, defined once and served two ways:
+"""Mail, calendar, reminders, messages and contacts tools, defined once and served two ways:
 - to the room assistant, inside its in-process voice_app tool server;
 - to any other Claude session, through the MCP server (mcp_server.py), which
   forwards each call to the running app (POST /api/tool).
@@ -181,14 +181,15 @@ SHARED: tuple[SharedTool, ...] = (
     SharedTool(
         "mail_draft",
         "Create an email draft in Mail and open it for the user to review. Sends nothing. "
-        "to and cc are lists of email addresses.",
+        "to and cc are lists of email addresses; a name ('Pat') is looked up in Contacts.",
         _COMPOSE,
         mail_mac.draft,
     ),
     SharedTool(
         "mail_send",
         "Send an email from Mail (the user confirms by voice). to and cc are lists of email "
-        "addresses. Prefer mail_draft unless the user clearly asked to send.",
+        "addresses (a name gets back its address from Contacts, to send again with). Prefer "
+        "mail_draft unless the user clearly asked to send.",
         _COMPOSE,
         mail_mac.send,
         asks=True,
@@ -254,6 +255,26 @@ SHARED = (
         lambda a: messages_mac.chat(
             a.get("chat"), a.get("count"), a.get("days"), view=privacy.current().messages_view
         ),
+    ),
+    SharedTool(
+        "contacts_search",
+        "Find people in the Mac's Contacts (read-only), best first: name, organization and title, "
+        "phone numbers and email addresses with their labels, and an id for contact_get. query is "
+        "a name (a first name, nickname or last name: 'Bob' finds Robert), an organization, an "
+        "email address or a phone number; group lists one contact group's members (query "
+        "optional then). limit 1-25 (default 10). Use it to get someone's address or number "
+        "before mail_draft, messages_from or a reminder. Birthdays, groups and home addresses "
+        "are shown as the privacy mode allows.",
+        _obj({"query": _STR, "group": _STR, "limit": _INT}),
+        lambda a: privacy.current().contacts_search(a.get("query"), a.get("limit"), a.get("group")),
+    ),
+    SharedTool(
+        "contact_get",
+        "One contact by its id from contacts_search: names, organization and title, phones and "
+        "emails with labels, birthday, postal addresses and groups (as the privacy mode allows; "
+        "a contact's notes are never read). Read-only.",
+        _obj({"id": _STR}, ["id"]),
+        lambda a: privacy.current().contact_get(a.get("id")),
     ),
 )
 

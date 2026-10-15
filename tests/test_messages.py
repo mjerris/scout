@@ -596,3 +596,48 @@ def test_conversation_summary_covers_both_sides() -> None:
     assert "me: yes, 7 works" in seen[0] and "Eva: dinner sat at 7?" in seen[0]  # both sides, oldest first
     assert seen[0].index("dinner sat") < seen[0].index("yes, 7 works")
     assert "dinner sat at 7?" not in out  # the texts stay on the Mac
+
+
+def test_names_come_from_contacts_when_the_helper_has_none(
+    binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Messages helper without its own Contacts permission (--contacts none): the
+    scout-contacts helper (on a fixture file) names the handles and finds people by name."""
+    from scout import contacts_mac
+
+    home = _short_tmp() / "contacts-home"
+    r = subprocess.run(  # noqa: S603  our own build script
+        [str(ROOT / "scripts" / "build-contacts.sh")],
+        env={**os.environ, "SCOUT_HOME": str(home)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    people = home / "people.json"
+    people.write_text(
+        json.dumps(
+            {
+                "contacts": [
+                    {"id": "e", "given": "Eva", "family": "Rossi", "phones": [{"label": "mobile", "value": "(555) 010-2000"}]},
+                    {"id": "s", "given": "Sam", "family": "Lee", "emails": [{"label": "home", "value": "sam@example.com"}]},
+                ]
+            }
+        )
+    )  # fmt: skip
+    monkeypatch.setattr(
+        contacts_mac,
+        "HELPER",
+        contacts_mac.Helper(binary=home / "bin" / "scout-contacts", args=["--fixture", str(people)]),
+    )
+    m = _start(binary, "nonames", "--rate", "1000", "--contacts", "none")
+    try:
+        monkeypatch.setattr(messages_mac, "HELPER", m.helper)
+        with pytest.raises(ToolError, match="no conversations with Eva"):
+            run(messages_mac.request("from", {"contact": "Eva"}, m.helper))  # the helper alone can't
+        text = run(messages_mac.from_contact("Eva"))
+        assert "from Eva Rossi (+15550102000)" in text and "Running 10 min late" in text
+        assert "from Sam Lee (sam@example.com) in Family" in run(messages_mac.recent(count=10))
+        assert "ok no rush" in run(messages_mac.chat("Eva", days=365))  # her one-to-one chat, by number
+    finally:
+        _stop(m)

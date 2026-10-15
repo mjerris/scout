@@ -379,6 +379,16 @@ async def messages_chat(chat: str, count: int = 20, days: int = 30) -> str:
     return await _tool("messages_chat", {"chat": chat, "count": count, "days": days})
 
 
+@mcp.tool(description=_doc("contacts_search"))
+async def contacts_search(query: str = "", group: str = "", limit: int = 10) -> str:
+    return await _tool("contacts_search", {"query": query, "group": group, "limit": limit})
+
+
+@mcp.tool(description=_doc("contact_get"))
+async def contact_get(id: str) -> str:
+    return await _tool("contact_get", {"id": id})
+
+
 @mcp.tool(description=_doc("weather"))
 async def weather(place: str = "") -> str:
     return await _tool("weather", {"place": place or None})
