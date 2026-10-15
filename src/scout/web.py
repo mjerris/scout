@@ -64,6 +64,13 @@ _PHONE_CSP = (
     "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https: wss:; "
     "img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
 )
+# Offline reference pages (/ref/...) are an archive's own HTML on this origin: no script of
+# theirs runs (it could call /api with the cookie), nothing is fetched, no form is sent.
+_REFERENCE_CSP = (
+    "default-src 'self'; script-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; "
+    "form-action 'none'; base-uri 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    "frame-ancestors 'none'"
+)
 
 
 # --- what the web page needs from the assistant ---------------------------------------
@@ -865,6 +872,43 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             return resp
         return page_response(req, recordpage.render(rec, hit), recordpage.CSP)
 
+    async def reference_page(req: web.Request) -> web.StreamResponse:
+        """An offline reference article, or an image or stylesheet it uses, as stored in its
+        archive (/ref/<book>/<path>, reference.py): token-gated, with scripts blocked."""
+        from . import reference
+
+        if not authed(req, allow_query=True):
+            return page_response(req, "", _REFERENCE_CSP)  # the 401 page, which says how
+        book, path = req.match_info["book"], req.match_info["path"]
+        try:
+            got = await asyncio.to_thread(reference.library().content, book, path)
+        except KeyError:
+            raise web.HTTPNotFound() from None
+        except Exception as exc:  # a damaged archive
+            log.warning("web: reference %s/%s not read: %s", book, path, exc)
+            raise web.HTTPNotFound() from None
+        if got.redirect:  # relative, so the article's own relative links keep working
+            found = web.HTTPFound(reference.relative(path, got.redirect))
+            keep_cookie(req, found)
+            raise found
+        resp = web.Response(
+            body=got.data, headers={"Content-Type": got.mimetype or "application/octet-stream"}
+        )
+        resp.headers["Content-Security-Policy"] = _REFERENCE_CSP
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Cache-Control"] = "private, max-age=86400"
+        keep_cookie(req, resp)
+        return resp
+
+    def keep_cookie(req: web.Request, resp: web.StreamResponse) -> None:
+        """Opened from a link with the token: set the cookie, so its images and links load."""
+        if req.query.get("token"):
+            resp.set_cookie(
+                _COOKIE, token, max_age=60 * 60 * 24 * 365, httponly=True, samesite="Strict",
+                secure=_is_https(req),
+            )  # fmt: skip
+
     async def phone_script(req: web.Request) -> web.StreamResponse:
         if not authed(req):
             raise web.HTTPUnauthorized()
@@ -980,6 +1024,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.get("/api/status", api_status),
             web.get("/phone", phone_index),
             web.get("/r/{id:.+}", record_page),
+            web.get("/ref/{book}/{path:.+}", reference_page),
             web.get(r"/phone/{name:phone(?:_sign)?\.js}", phone_script),
             web.post("/api/phone/pair", api_phone_pair),
             web.post("/api/phone/token", api_phone_token),

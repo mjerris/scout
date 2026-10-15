@@ -31,6 +31,7 @@ from . import (
     memory,
     privacy,
     pulse,
+    reference,
     refs,
     shared_tools,
     speech,
@@ -1127,6 +1128,15 @@ class Assistant:
                         about = list(decision.get("refs") or [])
                         self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
                         if ctx is not None and maybe:
+                            ctx.task.cancel()
+                            self._context = None
+                if said is None and await reference.wanted(text, self.cfg.reference):
+                    # Offline (by default): the reference archives on this Mac (reference.py).
+                    said = await reference.answer(text, self.tier1)
+                    if said is not None:
+                        tier, private, about = 1, False, list(refs.refs_of(said))
+                        self.emit("tool", name="local:reference", input=_preview({"question": text}))
+                        if ctx is not None:
                             ctx.task.cancel()
                             self._context = None
         except ToolError as exc:  # e.g. calendar access not allowed yet: say why

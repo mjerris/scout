@@ -58,6 +58,7 @@ KIND = {
     "turn": "a past conversation",
     "memory": "something you told me to remember",
     "fact": "something you told me to remember",
+    "reference": "the offline reference",
 }
 _SOURCE_RELS = ("found_in", "merged_from", "same_as", "told_in")
 
@@ -187,6 +188,8 @@ _OUT = {
     "recall": (re.compile(r"\(ref (memory:[0-9a-f]+)\)"), "{}"),
     "open_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
     "send_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
+    "reference_search": (re.compile(r"\(ref (zim:[^\s)]+)\)"), "{}"),
+    "reference_read": (re.compile(r"^ref: (zim:\S+)", re.M), "{}"),
 }
 _ARG = {
     "task_done": "task:{}",
@@ -217,7 +220,12 @@ def _store() -> Any:
 
 
 async def resolve(ref: str, store: Any = None) -> dict[str, Any] | None:
-    """The store's record of `ref` with its links (index.Index.resolve), or None."""
+    """The store's record of `ref` with its links (index.Index.resolve), or None. An
+    offline reference article (zim:...) isn't in the store: reference.py has it."""
+    if norm(ref).startswith("zim:"):
+        from . import reference
+
+        return await asyncio.to_thread(reference.resolve, norm(ref))
     store = _store() if store is None else store
     fn = getattr(store, "resolve", None)
     if fn is None:

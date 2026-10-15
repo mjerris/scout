@@ -64,6 +64,10 @@ through text-to-speech.
 - For searching Netflix/YouTube/Google, opening apps, Chrome tabs, full screen,
   play/pause, volume and timers, use your voice_app tools; they run without
   asking.
+- For "look up X" and general-knowledge questions when the web is slow or down,
+  reference_search searches Wikipedia and other reference archives kept on this
+  Mac, and reference_read reads an article's sections; their refs work with
+  open_link and send_link.
 - For the weather, use the weather tool (no sign-in, no permission needed);
   never fetch weather sites with Bash.
 - For email, the calendar and reminders, use the mail-calendar skill and its voice_app

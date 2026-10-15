@@ -331,6 +331,20 @@ class StarlinkConfig:
 
 
 @dataclass
+class ReferenceConfig:
+    # The offline reference (src/scout/reference.py, docs/reference.md): Kiwix ZIM archives
+    # (Wikipedia, WikiMed, iFixit...) read in place, never copied into Scout's store.
+    dir: str = "reference"  # where the .zim files are; relative to Scout's data folder
+    # Which archives, by name ("wikipedia_en_all_nopic": its newest copy in dir) or file
+    # name. Empty: every .zim in dir.
+    archives: list[str] = field(default_factory=list)
+    # When Scout answers a question from them itself, with the local model: "offline"
+    # (only when the internet is down; otherwise Claude answers, and can search them
+    # too), "always", or "never".
+    local_answers: str = "offline"
+
+
+@dataclass
 class PhoneConfig:
     # Talk to Scout from the phone app through SignalWire (docs/phone-design.md). Off
     # unless turned on. api_token and signing_key are secrets: keep this file mode 600.
@@ -423,6 +437,7 @@ class Config:
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
+    reference: ReferenceConfig = field(default_factory=ReferenceConfig)
     phone: PhoneConfig = field(default_factory=PhoneConfig)
     granola: GranolaConfig = field(default_factory=GranolaConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
@@ -509,6 +524,10 @@ def _check(cfg: Config) -> None:
                 name, section.quiet_hours, default,
             )  # fmt: skip
             section.quiet_hours = default
+    if cfg.reference.local_answers not in ("offline", "always", "never"):
+        log.warning("config reference.local_answers = %r is not offline, always or never; using 'offline'",
+                    cfg.reference.local_answers)  # fmt: skip
+        cfg.reference.local_answers = "offline"
 
 
 def load(path: Path | None = None) -> Config:

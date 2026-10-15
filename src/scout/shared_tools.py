@@ -30,6 +30,7 @@ from . import (
     messages_mac,
     notes,
     privacy,
+    reference,
     refs,
     reminders_mac,
     starlink,
@@ -388,6 +389,25 @@ SHARED = (
         "open_link. Needs no confirmation (Scout's own list).",
         _obj({"ref": _STR, "about": _STR}),
         refs.send_link,
+    ),
+    SharedTool(
+        "reference_search",
+        "Search the offline reference on this Mac (Kiwix archives such as Wikipedia, WikiMed and "
+        "iFixit; works with no internet) by words, best first: each article's title, archive, first "
+        "lines and ref. Use it for 'look up X' and general-knowledge questions, and whenever the web "
+        "is slow or down. book limits it to one archive (its name, e.g. wikipedia_en_all_nopic); "
+        "limit 1-10 (default 5). reference_read reads an article; open_link and send_link take its ref.",
+        _obj({"query": _STR, "book": _STR, "limit": _INT}, ["query"]),
+        reference.search_text,
+    ),
+    SharedTool(
+        "reference_read",
+        "Read an article of the offline reference by its ref (zim:..., from reference_search): its "
+        "title, link, list of sections and introduction. section names one section to read instead "
+        "(with its subsections); query picks the sections that best match a few words. max_chars "
+        "500-12000 (default 4000).",
+        _obj({"ref": _STR, "section": _STR, "query": _STR, "max_chars": _INT}, ["ref"]),
+        reference.read_text,
     ),
 )
 
