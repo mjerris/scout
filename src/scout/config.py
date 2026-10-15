@@ -223,6 +223,11 @@ class ClaudeConfig:
     # to read it; with none that close the model isn't asked and Claude answers.
     # Measured with scripts/eval_retrieval.py --floor.
     recall_min_similarity: float = 0.64
+    # Follow-ups to local recall ("what did he say about it?", "and when is that due?")
+    # rewritten into a standalone question from what was just said, before the search
+    # (followup.py; scripts/bench_followup.py: 20 of 22 synthetic follow-ups answered
+    # right locally, against 1 of 22 as asked, none wrong). Needs local_recall.
+    local_rewrite: bool = True
     # Prefix each request with context (date and time, running timers, recent local
     # answers) and, for calendar or mail questions, the data itself, so Claude can
     # answer in one pass instead of calling a tool first (each round trip is ~1.5-2.5 s).

@@ -545,6 +545,48 @@ as questions, and the 41 routing requests of `scripts/bench_tier1.py`:
 | Routing (weather, tasks, the original 41) | 10 of 10, 41 of 41 |
 | Time (median, on the Mac mini with Scout running) | routing 1.5 s, a recall's search and answer 2.4 s: 3.8 s in all. Claude needs at least two round trips for the same (a search, then the answer; ~1.5-2.5 s each) |
 
+### Follow-ups
+
+"What did he say about it?", "and when is that due?" and "what about the other one?"
+name no subject. A search by their own words finds nothing, or the wrong thing. With
+`claude.local_rewrite` (on by default), such a question is first rewritten as one that
+stands alone, from what was said in the last ten minutes.
+
+- Plain code spots a follow-up: a short question with a pronoun that points back, or
+  one that starts "and ..." or "what about ...". Other questions pay nothing (a few
+  microseconds to check).
+- When the last answer was about one record and one person, code replaces the pronouns:
+  after Pat's budget email, "what did she say about hiring" becomes "what did Pat say
+  about hiring".
+- Otherwise the local model writes it from the last three turns (what you asked, what
+  Scout said, the titles of the records): JSON only, at most 40 tokens, two seconds at
+  most, and only words from the conversation. Anything else and Claude takes it.
+- The records just spoken of are read first. The answer prompt shows your own words.
+  Every topic word of the follow-up must be in the record: "what about my Chicago
+  flight?" isn't answered from the Denver one.
+- A follow-up that acts or asks for judgment ("and send it to Sam", "should we switch")
+  goes to Claude before any rewrite.
+
+All of this stays on the Mac. Claude gets the request as you said it, under the same
+privacy rules.
+
+Measured with `scripts/bench_followup.py`: two-turn conversations over the same
+synthetic store, each follow-up run as asked, rewritten, and rewritten by the model
+alone. The held-out set was written after tuning, and run once.
+
+| Qwen3 4B (Instruct 2507, 4-bit) | As asked | Rewritten |
+|---|---|---|
+| Follow-ups answered right locally | 1 of 22, 2 wrong | 20 of 22, none wrong |
+| Held-out follow-ups answered right locally | 0 of 10 | 4 of 10, none wrong (5 in an earlier run) |
+| Answered locally when it should have gone to Claude | 0 of 12; held out 1 of 5 | 0 of 12; held out 0 of 5 |
+| Rewrite time on follow-ups | | p50 0.40 s, p95 0.57 s (by code alone: under 10 ms) |
+
+A rewritten follow-up about the records just spoken of skips the routing call, so a
+follow-up takes about as long as before. Of `bench_recall.py`'s 115 requests, plain code
+takes 8 for follow-ups; all 8 act or judge, so they go to Claude with no rewrite. Most
+misses are a word the record lacks ("when is Luis coming", "where is it flying from"),
+and those go to Claude.
+
 ## Usage: what answered
 
 Every request is logged in `state/ledger.jsonl`: which tier answered (0 plain code,

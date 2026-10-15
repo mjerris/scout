@@ -1194,6 +1194,7 @@ class Assistant:
             return
         model = tier1.LocalModel(name, extra=self.cfg.claude.local_recall)
         model.recall_floor = self.cfg.claude.recall_min_similarity
+        model.rewrite, model.said = self.cfg.claude.local_rewrite, self.said  # follow-ups (followup.py)
         try:
             await model.load()
         except Exception as exc:
