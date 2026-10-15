@@ -5,16 +5,18 @@
     # Monday, October 13, 2026
 
     ## 11:28:07 · phone
-    **Q:** What's on my calendar tomorrow?
-    **A:** Two things: standup at 9 and the dentist at 3.
-    tools: calendar_events(start=2026-10-14, end=2026-10-15)
+    **Q:** What am I waiting on?
+    **A:** Pat owes you the vendor quote, overdue since October 9.
+    tools: tasks_list(who=waiting)
+    refs: task:15
 
 The files are the record; the local index (kind "turn") is built from them and rebuilt
 when a file changes, so an edit or a deleted entry is reflected in search. Results Scout
 already keeps elsewhere aren't copied in: the tools line names what was used (a mail
 id, a place), and an answer built from mail or messages is kept only in "open" privacy
 mode (otherwise its tools line keeps only ids). Such an entry's heading ends in
-" · private". Only the memory service writes here (one writer, so the room and the phone never
+" · private". The refs line lists the records the answer was about (refs.py), ids only,
+so "where did that come from" can be answered later. Only the memory service writes here (one writer, so the room and the phone never
 interleave a line).
 """
 
@@ -48,6 +50,7 @@ class Entry:
     a: str
     tools: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     private: bool = False  # the answer came from mail or messages
+    refs: list[str] = field(default_factory=list)  # ids of the records the answer was about
 
 
 def path_for(root: Path, ts: float) -> Path:
@@ -83,6 +86,8 @@ def render(e: Entry, keep_private: bool) -> str:
     out = f"## {t:%H:%M:%S} · {who}\n**Q:** {_line(e.q) or '(none)'}\n**A:** {answer}\n"
     if e.tools:
         out += f"tools: {tools_line(e.tools, ids_only=hide)}\n"
+    if ids := [r for r in (_line(r) for r in e.refs) if r and "," not in r]:
+        out += f"refs: {', '.join(ids)}\n"  # ids only: kept whatever the privacy mode
     return out + "\n"
 
 
@@ -136,6 +141,8 @@ def parse(p: Path, text: str | None = None) -> list[dict[str, Any]]:
         q = re.search(r"^\*\*Q:\*\*[ \t]*(.*)$", body, re.M)
         a = re.search(r"^\*\*A:\*\*[ \t]*(.*)$", body, re.M)
         tools = re.search(r"^tools:[ \t]*(.*)$", body, re.M)
+        refs = re.search(r"^refs:[ \t]*(.*)$", body, re.M)
+        ref_ids = [r.strip() for r in refs.group(1).split(",") if r.strip()] if refs else []
         key = f"journal:{day}T{clock}"
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1:
@@ -156,6 +163,7 @@ def parse(p: Path, text: str | None = None) -> list[dict[str, Any]]:
                 "meta": {
                     "file": str(p.relative_to(p.parents[3])) if len(p.parents) > 3 else p.name,
                     **({"private": True} if private else {}),
+                    **({"refs": ref_ids} if ref_ids else {}),
                 },
             }
         )

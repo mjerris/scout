@@ -14,7 +14,8 @@ Checks that can't run (no calendar access) are skipped quietly.
 
 Between checks it sleeps its interval, or less when an event's heads-up falls sooner
 (the event's start minus the lead), so the heads-up comes on time without polling more.
-Task titles are spoken here only, never sent to Claude.
+Task titles are spoken here only, never sent to Claude. Each sentence about tasks
+carries their ids (refs.Spoken), so "give me a link to that" right after it knows which.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import calendar_mac, freebusy, reminders_mac, tasks
+from . import calendar_mac, freebusy, refs, reminders_mac, tasks
 from .freebusy import clock
 from .mac import ToolError
 from .starlink import in_quiet_hours
@@ -138,21 +139,31 @@ class Pulse:
             log.info("pulse: tasks skipped (%s)", exc)
             return []
         self._tasks_day = today
-        out = []
+        out: list[str] = []
         due = [t for t in sorted(ts, key=lambda t: t.n) if t.mine and t.due() == today]
         due = [t for t in due if self._once(f"task-due:{t.n}:{today}")]
         if due:
             titles = [tasks.spoken_title(t) for t in due[:3]]
             if len(due) > 3:
                 titles.append(f"{tasks.count_word(len(due) - 3)} more")
-            out.append(f"Due today: {freebusy.join(titles)}.")
+            out.append(
+                refs.Spoken(
+                    f"Due today: {freebusy.join(titles)}.",
+                    [f"task:{t.n}" for t in due[:3]],
+                    any(tasks.found_from(t.fields) for t in due[:3]),
+                )
+            )
         late = sorted((t for t in ts if not t.mine and (d := t.due()) is not None and d < today),
                       key=lambda t: (t.due(), t.n))  # fmt: skip
         for t in late[:3]:
             d = t.due()
             if d is not None and self._once(f"task-owed:{t.n}:{today}"):
                 out.append(
-                    f"{t.owner} owes you {tasks.spoken_title(t)}, {tasks.due_words(d, today)}; maybe follow up."
+                    refs.Spoken(
+                        f"{t.owner} owes you {tasks.spoken_title(t)}, {tasks.due_words(d, today)}; maybe follow up.",
+                        [f"task:{t.n}"],
+                        tasks.found_from(t.fields) is not None,
+                    )
                 )
         return out
 

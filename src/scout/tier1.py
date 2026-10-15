@@ -476,13 +476,18 @@ def speak_summaries(
 SUMMARY_COUNT = 5  # messages summarized for "summarize my unread mail"
 
 
-async def summarize(args: dict[str, Any], now: dt.datetime, summaries: Summaries) -> str:
-    """Read the message(s) and summarize them here; nothing goes to Claude."""
+async def summarize(
+    args: dict[str, Any], now: dt.datetime, summaries: Summaries, out: dict[str, Any] | None = None
+) -> str:
+    """Read the message(s) and summarize them here; nothing goes to Claude. `out`
+    gets "refs": the messages spoken about."""
     from . import mail_mac
 
     query = args.get("query")
     t0 = time.perf_counter()
     msgs = await mail_mac.message_data(1 if query else SUMMARY_COUNT, bool(args.get("unread_only")), query)
+    if out is not None:
+        out["refs"] = [f"mail:{m['id']}" for m in msgs if m.get("id") is not None]
     t1 = time.perf_counter()
     full = await mail_mac.bodies([m["id"] for m in msgs])
     t2 = time.perf_counter()
@@ -532,7 +537,7 @@ async def run(
     if tool == "mail_summarize":
         if summaries is None or not summaries.available:
             raise ToolError("the local model isn't ready to summarize email yet")
-        return await summarize(args, now, summaries)
+        return await summarize(args, now, summaries, out=decision)
     if tool in ("mail_search", "mail_recent") and summaries is not None and summaries.available:
         # "Anything from Rover?" wants what it says, not its subject line (heard live: the
         # subject alone sounded cut off). A local gist costs ~1 s and stays on the Mac.
@@ -540,19 +545,21 @@ async def run(
         args = {"query": q} if q else {"unread_only": args.get("unread_only", True)}
         # Now a summary of what the email says: the caller marks the answer private.
         decision.update(tool="mail_summarize", args=args)
-        return await summarize(args, now, summaries)
+        return await summarize(args, now, summaries, out=decision)
     msgs = await mail_mac.message_data(
         args.get("count") or 5,
         bool(args.get("unread_only")),
         args.get("query") if tool == "mail_search" else None,
     )
+    spoken = msgs[:1] if tool == "mail_search" else msgs[:3]
+    decision["refs"] = [f"mail:{m['id']}" for m in spoken if m.get("id") is not None]
     return speak_mail(msgs, args, tool)
 
 
 async def _run_extra(
     decision: dict[str, Any], now: dt.datetime, summaries: Summaries | None, store: Any
 ) -> str | None:
-    from . import index, recall, tasks, weather
+    from . import index, recall, refs, tasks, weather
 
     tool, args = decision["tool"], decision["args"]
     if tool == "weather":
@@ -570,6 +577,7 @@ async def _run_extra(
                 return None  # nothing from them on the list (maybe not a person): Claude
             text, private = got
         decision["private"] = private
+        decision["refs"] = refs.task_refs(text, rows)
         return text
     # recall: from Scout's records, checked against them (recall.py)
     model = summaries.model if summaries is not None else None
@@ -586,4 +594,5 @@ async def _run_extra(
     if found is None:
         return None
     decision["private"] = found.private
+    decision["refs"] = [refs.norm(found.source.id)]
     return found.text

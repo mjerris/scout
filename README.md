@@ -569,6 +569,16 @@ Every 15 minutes Scout checks, in plain code, for an event about to start, a tim
 reminder coming due, and (once each morning) today's overlapping events, and says each
 once. Quiet hours (22:00-08:00) only log. `[pulse]` tunes or turns it off.
 
+## Links: "give me a link to that"
+
+Everything Scout says keeps the ids of the records it was about: the tasks the pulse
+named, the note a recall answer quoted, the tasks and emails a Claude turn looked up.
+Right after, "give me a link to that" (or "send me that link") puts the record's link,
+such as the Granola meeting a task was found in, into your Scout reminders list, and
+"where did that come from" says which meeting or email it was. Claude gets the same
+ids in its request context and the `open_link` and `send_link` tools (the room, the
+phone and other sessions). Details and the privacy rules: [docs/links.md](docs/links.md).
+
 ## Car stereo (Kenwood DNR1008RVS)
 
 The Kenwood has no network or remote-control API (CarPlay, Android Auto and

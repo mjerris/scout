@@ -51,7 +51,7 @@ def test_strict_mode_marks_search_summaries_private(
         async def decide(self, request: str, now: Any) -> dict[str, Any] | None:
             return dict(decision)
 
-    async def summarize(args: dict[str, Any], now: Any, summaries: Any) -> str:
+    async def summarize(args: dict[str, Any], now: Any, summaries: Any, **kw: Any) -> str:
         return "Today, Sam asks if you are free for lunch Friday at noon."
 
     monkeypatch.setattr(tier1, "summarize", summarize)
