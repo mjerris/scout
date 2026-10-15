@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mac
+from . import contacts_mac, mac
 from .config import DATA, load
 from .mac import ToolError
 
@@ -247,7 +247,54 @@ View = Callable[[dict[str, Any], str], Awaitable[str]]
 
 
 async def _show(data: dict[str, Any], what: str, view: View | None) -> str:
+    data = await _named(data)
     return await view(data, what) if view is not None else format_messages(data, what)
+
+
+async def _named(data: dict[str, Any]) -> dict[str, Any]:
+    """Names from Contacts (the scout-contacts helper) for handles the Messages helper
+    shows bare, as when its own Contacts permission isn't given. Never asks for it."""
+    msgs = data.get("messages") or []
+    bare = [str(m.get("handle")) for m in msgs if m.get("handle") and not m.get("name")]
+    if not bare:
+        return data
+    names = await contacts_mac.names_for(bare)
+    if not names:
+        return data
+    return {
+        **data,
+        "messages": [{**m, "name": m.get("name") or names.get(str(m.get("handle")), "")} for m in msgs],
+    }
+
+
+async def _by_contact(
+    op: str, who: str, args: dict[str, Any], helper: Helper | None
+) -> tuple[dict[str, Any], str] | None:
+    """When the Messages helper doesn't know a name (no Contacts permission of its own):
+    the person from Contacts, asked about by each of their numbers and addresses."""
+    if contacts_mac.is_handle(who):
+        return None
+    name, handles = await contacts_mac.handles_for(who)
+    found: list[dict[str, Any]] = []
+    first: dict[str, Any] | None = None
+    for handle in handles[:6]:
+        try:
+            got = await request(op, {**args, _op_key(op): handle}, helper)
+        except ToolError:
+            continue
+        first = first or got
+        found += got.get("messages") or []
+        if op == "chat":  # one conversation: the first that exists
+            break
+    if first is None:
+        return None
+    found.sort(key=lambda m: str(m.get("date", "")), reverse=True)
+    limit = int(args.get("limit") or len(found))
+    return {**first, "messages": found[:limit], "matched": [name]}, name
+
+
+def _op_key(op: str) -> str:
+    return "chat" if op == "chat" else "contact"
 
 
 def _enabled() -> None:
@@ -295,7 +342,16 @@ async def from_contact(
     _enabled()
     who = _text(contact, "contact", 100)
     d = _days(days, 30)
-    data = await request("from", {"contact": who, "limit": _count(count, 10), "since_days": d}, helper)
+    args = {"contact": who, "limit": _count(count, 10), "since_days": d}
+    try:
+        data = await request("from", args, helper)
+    except ToolError as exc:
+        if not str(exc).startswith("no conversation"):  # only a name the helper doesn't know
+            raise
+        got = await _by_contact("from", who, args, helper)
+        if got is None:
+            raise
+        data = got[0]
     matched = [str(n) for n in data.get("matched") or []]
     head = f"(matched: {', '.join(matched)})\n" if len(matched) > 1 else ""
     return head + await _show(data, f"messages from {who} in the last {d} days", view)
@@ -312,7 +368,16 @@ async def chat(
     _enabled()
     c = _text(chat_name, "chat", 200)
     d = _days(days, 30)
-    data = await request("chat", {"chat": c, "limit": _count(count, 20), "since_days": d}, helper)
+    args = {"chat": c, "limit": _count(count, 20), "since_days": d}
+    try:
+        data = await request("chat", args, helper)
+    except ToolError as exc:
+        if not str(exc).startswith("no conversation"):  # only a name the helper doesn't know
+            raise
+        got = await _by_contact("chat", c, args, helper)
+        if got is None:
+            raise
+        data = {**got[0], "chat": got[1]}
     label = str(data.get("chat") or c)
     what = f"messages in the conversation with {label} in the last {d} days"
     return await _show({**data, "conversation": label}, what, view)

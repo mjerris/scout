@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.scout.contacts</string>
+	<key>CFBundleName</key>
+	<string>scout contacts</string>
+	<key>NSContactsUsageDescription</key>
+	<string>scout looks people up in your contacts to answer questions like "what's Pat's number" and to show names instead of phone numbers and email addresses. It only reads; it never changes a contact.</string>
+</dict>
+</plist>

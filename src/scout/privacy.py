@@ -13,6 +13,11 @@ privacy.mode in config.toml:
   Memories: only those relevant to the request.
 - "open": everything as the tools return it (Scout's behaviour before privacy modes).
 
+Contacts: names, organizations, phone numbers and email addresses in every mode (what
+Claude needs to reach someone, as it sees mail senders). Birthdays and groups from
+"balanced"; home and work addresses only in "open", or in "balanced" for one contact
+asked for by id (contact_get). Notes are never read at all.
+
 Local tiers (plain code and the local model) see everything: nothing leaves the Mac."""
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from . import calendar_mac, mail_mac
+from . import calendar_mac, contacts_mac, mail_mac
 from .mac import ToolError
 from .memory import Memory, fact_id
 from . import summary
@@ -69,6 +74,16 @@ STRICT_SEARCH = (
     "would show what the texts say. The user can ask Scout directly to find a text.]"
 )
 _NO_MODEL_MESSAGES = "[No summaries: Scout's local model isn't loaded, so the texts are withheld.]"
+
+# What of a contact Claude sees: (in a search, in contact_get) per mode.
+CONTACT_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "strict": (frozenset({"phones", "emails"}), frozenset({"phones", "emails"})),
+    "balanced": (
+        frozenset({"phones", "emails", "birthday", "groups"}),
+        frozenset({"phones", "emails", "birthday", "groups", "addresses"}),
+    ),
+    "open": (contacts_mac.ALL_FIELDS, contacts_mac.ALL_FIELDS),
+}
 
 
 class Policy:
@@ -283,6 +298,41 @@ class Policy:
         return out + (
             f"\n[Event notes and attendees are left out ({self.mode} privacy mode).]" if dropped else ""
         )
+
+    # --- contacts ------------------------------------------------------------------
+
+    def _contact_note(self, people: list[dict[str, Any]], shown: frozenset[str]) -> str:
+        held = [
+            what
+            for key, what in (("addresses", "addresses"), ("birthday", "birthdays"), ("groups", "groups"))
+            if key not in shown and any(p.get(key) for p in people)
+        ]
+        if not held:
+            return ""
+        how = (
+            "contact_get with its id shows the address"
+            if self.mode == "balanced"
+            else "the user can ask Scout directly, e.g. 'when is Sam's birthday'"
+        )
+        said = held[0] if len(held) == 1 else ", ".join(held[:-1]) + " and " + held[-1]
+        return f"\n[{said.capitalize()} left out ({self.mode} privacy mode); {how}.]"
+
+    async def contacts_search(
+        self, query: Any, limit: Any = None, group: Any = None, helper: contacts_mac.Helper | None = None
+    ) -> str:
+        """Claude's view of contacts_search: names, organizations, phones and emails
+        always; birthdays and groups from balanced; addresses only in open."""
+        data = await contacts_mac.search_data(query, limit, group, helper)
+        shown = CONTACT_FIELDS[self.mode][0]
+        what = " ".join(str(x) for x in (query, f"in group {group}" if group else "") if x)
+        out = contacts_mac.format_people(data, repr(what) if what else "that", set(shown))
+        return out + self._contact_note(list(data.get("contacts") or []), shown)
+
+    async def contact_get(self, contact_id: Any, helper: contacts_mac.Helper | None = None) -> str:
+        """Claude's view of one contact (contact_get): balanced adds the addresses."""
+        p = await contacts_mac.contact_data(contact_id, helper)
+        shown = CONTACT_FIELDS[self.mode][1]
+        return contacts_mac.format_person(p, set(shown)) + self._contact_note([p], shown)
 
     # --- memory --------------------------------------------------------------------
 

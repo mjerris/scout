@@ -567,7 +567,40 @@ async def listing(
     """Inbox messages, newest first: {"messages": [{id, date, sender, subject, read}], ...}.
     With a query: subject or sender matches from the last SEARCH_DAYS, read or not, and
     (by_text) matches in message text from Scout's index.
-    Mail's index answers when the helper has it; Mail scripting otherwise."""
+    Mail's index answers when the helper has it; Mail scripting otherwise. A sender shown
+    as a bare address gets its name from Contacts when Contacts knows it."""
+    return await named_senders(await _listing(count, unread_only, query, run, index, by_text))
+
+
+async def named_senders(data: dict[str, Any]) -> dict[str, Any]:
+    """ "pat@acme.example" as "Pat Lee <pat@acme.example>", for senders in Contacts.
+    Quiet: never asks for Contacts access (contacts_mac.names_for)."""
+    from . import contacts_mac
+
+    msgs = data.get("messages") or []
+    bare = [str(m.get("sender") or "").strip() for m in msgs]
+    bare = [b for b in bare if b and "<" not in b and _EMAIL.match(b)]
+    if not bare:
+        return data
+    names = await contacts_mac.names_for(bare)
+    if not names:
+        return data
+
+    def named(m: dict[str, Any]) -> dict[str, Any]:
+        sender = str(m.get("sender") or "").strip()
+        return {**m, "sender": f"{names[sender]} <{sender}>"} if sender in names else m
+
+    return {**data, "messages": [named(m) for m in msgs]}
+
+
+async def _listing(
+    count: Any,
+    unread_only: Any,
+    query: Any,
+    run: Runner,
+    index: Index | None,
+    by_text: bool,
+) -> dict[str, Any]:
     n = mac.check_int(count if count is not None else 10, 1, 50, "count")
     q = _clean(query, "query", 100)
     days = SEARCH_DAYS if q else RECENT_DAYS
@@ -924,13 +957,43 @@ def _message(a: dict[str, Any]) -> tuple[list[str], list[str], str, str]:
     return to, cc, subject, body
 
 
+async def _named_recipients(a: dict[str, Any], resolve: bool) -> dict[str, Any]:
+    """to and cc entries that are names ("Pat"), as their email addresses from Contacts.
+    Drafting resolves them (the user reviews the draft in Mail); sending doesn't, so the
+    spoken yes is to the exact address: it says which address to use instead."""
+    from . import contacts_mac
+
+    out = dict(a)
+    for key in ("to", "cc"):
+        v = a.get(key)
+        items = [x.strip() for x in v.split(",")] if isinstance(v, str) else [str(x).strip() for x in v or []]
+        names = [x for x in items if x and "@" not in x]
+        if not names:
+            continue
+        try:
+            found = await contacts_mac.addresses_for(items)
+        except contacts_mac.Unclear:
+            raise
+        except ToolError as exc:  # Contacts unavailable: the address check below says what's wrong
+            log.info("mail: no Contacts for %s: %s", key, exc)
+            continue
+        if not resolve:
+            pairs = [f"{n} is {e}" for n, e in zip(items, found, strict=True) if n != e]
+            raise ToolError(
+                f"{key} must be email addresses. From Contacts: {'; '.join(pairs)}. "
+                "Check with the user and send again with the address."
+            )
+        out[key] = found
+    return out
+
+
 async def draft(a: dict[str, Any], run: Runner = _jxa) -> str:
-    to, cc, subject, body = _message(a)
+    to, cc, subject, body = _message(await _named_recipients(a, resolve=True))
     await _call(run, _COMPOSE, "draft", ",".join(to), ",".join(cc), subject, body)
     return f"Draft to {', '.join(to)} saved in Mail and opened for review; nothing was sent."
 
 
 async def send(a: dict[str, Any], run: Runner = _jxa) -> str:
-    to, cc, subject, body = _message(a)
+    to, cc, subject, body = _message(await _named_recipients(a, resolve=False))
     await _call(run, _COMPOSE, "send", ",".join(to), ",".join(cc), subject, body)
     return f"Sent to {', '.join(to)}."

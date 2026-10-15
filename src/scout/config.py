@@ -451,6 +451,14 @@ class MessagesConfig:
 
 
 @dataclass
+class ContactsConfig:
+    # Look people up in the Mac's Contacts (read-only) through the scout-contacts helper,
+    # which has its own Contacts permission. false = the contacts tools refuse, and
+    # Messages and Mail show numbers and addresses as they are.
+    enabled: bool = True
+
+
+@dataclass
 class PrivacyConfig:
     # What of your private data Claude sees (src/scout/privacy.py):
     # "strict": no email text (not even summaries of it), calendar notes or memories;
@@ -478,6 +486,7 @@ class Config:
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
+    contacts: ContactsConfig = field(default_factory=ContactsConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
