@@ -6,7 +6,11 @@ an edit is picked up on the next read, and a change keeps the file's other lines
 Plain code answers "remember...", "what do you know about...", "who is my
 dentist" and "forget..." (tier 0, `answer`). Claude sees a memory only when it
 shares words with the request, and only as the privacy mode allows (privacy.py);
-the room agent can add or drop one with its remember / forget tools."""
+the room agent can add or drop one with its remember / forget tools.
+
+A fact's record id is memory:<hash of its words> (`fact_id`). Answers from facts carry
+those ids (refs.Spoken), and the store links a fact to the journal turn it was told in
+(told_in, docs/links.md), so "where did that come from" has an answer."""
 
 from __future__ import annotations
 
@@ -45,6 +49,16 @@ def keywords(text: str) -> set[str]:
             continue
         out.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)
     return out
+
+
+def fact_id(text: str) -> str:
+    """A fact's record id in the store: memory:<hash of its words>."""
+    return "memory:" + hashlib.blake2b(text.encode(), digest_size=6).hexdigest()
+
+
+def normalized(text: str) -> str:
+    """A fact as it's kept: one line, no full stop at the end."""
+    return " ".join(str(text or "").split()).strip().rstrip(".")
 
 
 FACTS_HEADER = (
@@ -203,13 +217,12 @@ class Memory:
     def as_documents(self) -> list[dict[str, Any]]:
         """The facts as index items (index.Index.sync)."""
         return [
-            {"id": "memory:" + hashlib.blake2b(f["text"].encode(), digest_size=6).hexdigest(), "title": f["text"],
-             "body": f["text"], "ts": float(f.get("ts") or 0)}
+            {"id": fact_id(f["text"]), "title": f["text"], "body": f["text"], "ts": float(f.get("ts") or 0)}
             for f in self.facts
         ]  # fmt: skip
 
     def add(self, text: str) -> str:
-        fact = " ".join(str(text or "").split()).strip().rstrip(".")
+        fact = normalized(text)
         if not fact:
             raise ToolError("nothing to remember")
         if len(fact) > MAX_CHARS:
@@ -307,28 +320,44 @@ _NOT_A_FACT = re.compile(r"^(?:to |me to |when |where |what |how |why |if |the t
 _TOO_VAGUE = {"it", "that", "this", "everything", "all", "all of it", "all that"}
 
 
+def told(text: str) -> str | None:
+    """The fact a request tells Scout to keep ("remember that my dentist is Dr. Lee"), as
+    answer() would keep it; None when it isn't one ("remember to call Sam")."""
+    m = _REMEMBER.match(_clean(text))
+    if m is None or _NOT_A_FACT.match(m.group(1)):
+        return None
+    return normalized(m.group(1))
+
+
 def answer(text: str, memory: Memory) -> str | None:
-    """The spoken answer if this is about Scout's memory, else None."""
+    """The spoken answer if this is about Scout's memory, else None. It carries the ids of
+    the facts it says (refs.Spoken), so "where did that come from" can be answered."""
+    from .refs import Spoken
+
+    def said(words: str, facts: list[str]) -> Spoken:
+        return Spoken(words, [fact_id(f) for f in facts])
+
     t = _clean(text)
     if m := _REMEMBER.match(t):
         fact = m.group(1)
         if _NOT_A_FACT.match(fact):
             return None  # a reminder or a question: Claude
         try:
-            return f"Okay, I'll remember that {spoken(memory.add(fact))}."
+            kept = memory.add(fact)
         except ToolError as exc:
             return f"Sorry, {exc}."
+        return said(f"Okay, I'll remember that {spoken(kept)}.", [kept])
     if _RECALL_ALL.match(t):
         facts = memory.newest(5)
         if not facts:
             return "You haven't asked me to remember anything yet."
         more = f" And {len(memory.facts) - 5} more." if len(memory.facts) > 5 else ""
-        return "You told me " + "; ".join(spoken(f) for f in facts) + "." + more
+        return said("You told me " + "; ".join(spoken(f) for f in facts) + "." + more, facts)
     if m := _RECALL.match(t):
         facts = memory.matching(m.group(1))
         if not facts:
             return f"You haven't told me anything about {spoken(m.group(1))}."
-        return "You told me " + "; ".join(spoken(f) for f in facts[:3]) + "."
+        return said("You told me " + "; ".join(spoken(f) for f in facts[:3]) + ".", facts[:3])
     if m := _FORGET.match(t):
         about = m.group(1)
         if about.lower() in _TOO_VAGUE:
@@ -342,5 +371,5 @@ def answer(text: str, memory: Memory) -> str | None:
     if m := _WHO.match(t):
         facts = memory.matching(m.group(1))
         if facts:
-            return "You told me " + spoken(facts[0]) + "."
+            return said("You told me " + spoken(facts[0]) + ".", facts[:1])
     return None

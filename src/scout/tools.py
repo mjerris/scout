@@ -16,7 +16,7 @@ from claude_agent_sdk.types import McpSdkServerConfig
 
 from . import mac, privacy, refs
 from .config import DATA
-from .memory import Memory
+from .memory import Memory, fact_id
 from .shared_tools import SHARED
 
 log = logging.getLogger(__name__)
@@ -213,7 +213,8 @@ def memory_tools(
     what Claude may read back is up to the privacy mode."""
 
     async def remember(a: dict[str, Any]) -> str:
-        return f"Remembered: {memory.add(str(a.get('fact', '')))}"
+        kept = memory.add(str(a.get("fact", "")))
+        return f"Remembered: {kept} (ref {fact_id(kept)})"
 
     async def forget(a: dict[str, Any]) -> str:
         gone = memory.forget(str(a.get("about", "")))

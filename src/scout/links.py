@@ -13,13 +13,15 @@ rel); this module holds the plain-code rules around them:
   message:// URL from the Message-ID, else Scout's own record page (`/r/<id>` on the
   web UI, at `web_base()`);
 - whether an emailed meeting summary and a Granola note are the same meeting
-  (`same_meeting`).
+  (`same_meeting`);
+- which journal turn a fact was told in (`says_remember`, `told_turn`).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -30,7 +32,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-RELS = ("found_in", "merged_from", "same_as", "based_on", "about")
+RELS = ("found_in", "merged_from", "same_as", "based_on", "about", "told_in")
 # Kinds whose text came from someone else (mail, meetings, Slack): private outside open mode.
 PRIVATE_KINDS = frozenset({"mail", "meeting", "slack"})
 # Scout's own records: their link is their page on Scout's web UI.
@@ -194,3 +196,62 @@ def same_meeting(
     if len(scored) > 1 and scored[1][0] == scored[0][0]:
         return None
     return scored[0][2]
+
+
+# --- a fact and the journal turn it was told in -------------------------------------------
+
+# A fact's time is when it was added (to the minute in facts.md); its turn is written
+# after the answer. A turn this long before the fact (a phone exchange is timed from
+# what was said) or TOLD_AFTER_S after it can still be where it was told.
+TOLD_BEFORE_S = 300.0
+TOLD_AFTER_S = 15 * 60.0
+TOLD_WORDS = 0.6  # of the fact's content words, in a request that says remember
+_REMEMBER_TOOL = re.compile(r"(?:^|· )remember\(")
+_SAYS_KEEP = re.compile(r"\b(?:remember|note|keep in mind|keep (?:that|it|this))\b", re.I)
+_ASKS = re.compile(
+    r"^(?:what|who|whose|when|where|why|how|which|do|does|did|is|are|can you tell|tell me)\b", re.I
+)
+_WAKE = re.compile(r"^(?:(?:hey |ok |okay )?scout[, ]+)", re.I)
+
+
+def says_remember(question: str, tools: str) -> bool:
+    """Whether a turn told Scout something to keep: its remember tool ran, or the request
+    says so ("remember that...", "note that...", "..., keep that") and isn't a question
+    ("what do you remember about Pat")."""
+    if _REMEMBER_TOOL.search(tools or ""):
+        return True
+    q = _WAKE.sub("", (question or "").strip())
+    return bool(_SAYS_KEEP.search(q)) and not _ASKS.match(q)
+
+
+def _same_words(a: str, b: str) -> bool:
+    def norm(s: str) -> str:
+        return " ".join(s.lower().split()).rstrip(".")
+
+    a, b = norm(a), norm(b)
+    return a == b or (b.endswith("…") and len(b) > 1 and a.startswith(b[:-1].rstrip()))
+
+
+def remembered_in(tools: str) -> list[str]:
+    """The facts a tools line shows the remember tool keeping (cut ones end in "…")."""
+    parts = (re.fullmatch(r"remember\(fact=(.*)\)", p.strip()) for p in (tools or "").split(" · "))
+    return [m.group(1) for m in parts if m]
+
+
+def told_turn(fact: str, fact_ts: float, turns: Iterable[tuple[str, float, str, str]]) -> str | None:
+    """The turn (id) a fact was told in, from turns (id, ts, question, tools line) of its
+    day: the one whose remember tool kept these words, else the one whose request says
+    remember and has most of the fact's words. None unless exactly one fits (a missing
+    link costs less than a wrong one), or none is from around the fact's time or after."""
+    from .memory import keywords
+
+    near = [t for t in turns if t[1] >= fact_ts - TOLD_BEFORE_S]
+    by_tool = [t[0] for t in near if any(_same_words(fact, w) for w in remembered_in(t[3]))]
+    if by_tool:
+        return by_tool[0] if len(by_tool) == 1 else None
+    want = keywords(fact)
+    if not want:
+        return None
+    need = max(1, math.ceil(TOLD_WORDS * len(want)))
+    said = [t[0] for t in near if says_remember(t[2], "") and len(want & keywords(t[2])) >= need]
+    return said[0] if len(said) == 1 else None

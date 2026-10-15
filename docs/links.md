@@ -15,10 +15,10 @@ a chunk such as `granola:<note>#3` counts as its record):
 
 | what spoke | where its refs come from |
 |---|---|
-| tier 0 answers | the handler sets `Context.refs`: the tasks it named (matched by their spoken titles), the note it read |
+| tier 0 answers | the handler sets `Context.refs`: the tasks it named (matched by their spoken titles), the note it read; a memory answer (`memory.answer`) the facts it said |
 | the pulse and the briefing | their sentences are `refs.Spoken` strings: "Pat owes you the vendor quote" carries `task:15` |
 | tier 1 | `decision["refs"]`: the record a recall answer quoted, the tasks named, the emails spoken about |
-| a Claude turn | its tools' results (`refs.from_tool`): task numbers in `tasks_list`, `task_why` and the task tools, mail ids in `mail_recent`/`mail_search`/`mail_read`, note ids, and the `(ref ...)` that every `local_search` result now ends with |
+| a Claude turn | its tools' results (`refs.from_tool`): task numbers in `tasks_list`, `task_why` and the task tools, mail ids in `mail_recent`/`mail_search`/`mail_read`, note ids, and the `(ref ...)` that every `local_search` result now ends with, as do the facts `remember` kept and `recall` found |
 | phone requests | the same, kept with the phone as their channel |
 
 The app keeps the last 30 things said with their refs (`refs.Log`). "That" means the
@@ -33,6 +33,16 @@ refs, each with its time, who said it (the pulse check-in, the briefing, or the 
 to a request) and its refs with their titles, so "that" resolves to an id. The voice
 prompt tells Claude to pass a ref to `open_link` or `send_link` and never to read a
 link aloud or guess one.
+
+**Facts.** A fact ("Pat is my manager") is the record `memory:<id>`. Answers from facts
+carry it: "who is my dentist" and "what do you know about Pat" in plain code, a local
+recall that quoted a fact, and the remember and recall tools. Each fact in Claude's
+context ends with its `(ref memory:<id>)`. "Where did that come from" after a fact
+answer: "You told me on October 12, in the room." (the turn it was told in, below), or
+"It's a fact you saved on October 12." when no turn is known (a line written into
+facts.md by hand). The link is that turn's page, else the fact's own page; with neither,
+"It has no link." Several facts in one answer ("You told me Pat is your manager; Pat
+likes oat milk") go to Claude, as with tasks.
 
 **Tools** (the room, the phone, and other Claude sessions through the MCP server):
 
@@ -85,6 +95,7 @@ table in `state/memory.db`, `(src, dst, rel)`, read either way:
 | `same_as` | an emailed meeting summary → the Granola note of the same meeting | the store, every minute (below) |
 | `about` | a journal turn → the records the answer was about | the turn's `refs:` line |
 | `based_on` | a turn or answer → a record it used | `POST /v1/links/add` |
+| `told_in` | a fact → the journal turn it was told in | the turn's `refs:` line, or the upkeep's match (below) |
 
 The task files stay the truth for their own sources: the `found_in` and `merged_from`
 rows are re-derived from the file each time it's read, so an edit by hand moves them.
@@ -92,6 +103,16 @@ A task's source key is the farm's: `meeting:<granola note>`, `meeting:mail:<n>` 
 emailed summary), `mail:<n>`, `slack:<channel>@<newest ts>` (found by its conversation
 and newest message). A deleted record takes its own links with it; a link to it from a
 task stays (the task still names it) and is left out of `resolve`.
+
+**Where a fact was told.** The turn that told Scout a fact lists it on its `refs:`
+line. When that turn says remember (its remember tool ran, or the request says
+"remember", "note that", "keep that" and isn't a question) and came within 15 minutes
+after the fact was added, the store links the fact `told_in` to it. Asking about the
+fact later lists it too, but doesn't move the link. Facts told before this, or on a
+phone call (its journal entries have no refs), are matched by the upkeep: a turn on the
+fact's day, not before its time, whose tools line shows remember keeping those words,
+else whose request says remember and has most of the fact's words. Only a single match
+links; two that fit equally get none. A fact edited by hand is a new fact with no turn.
 
 **Where a record opens** (`open_url`): a Granola note (or any part of it) its
 notes.granola.ai page; a Slack message its permalink; a mail `message://%3C<Message-ID>%3E`,
@@ -101,8 +122,9 @@ the web UI, `<web base>/r/<id>`. Mail without a known Message-ID has no link yet
 
 **`resolve(id)`**: `{id, kind, title, url, page, private, related: [{id, rel, dir,
 kind, title, url}]}`. A task's `url` goes through to its source (the meeting it came
-from) when that has a link, else its `- link:` line, else its own page; `page` is a
-Scout record's page (none for records from outside). `private` is true for mail,
+from) when that has a link, else its `- link:` line, else its own page; a fact's
+`url` is the page of the turn it was told in, else its own page. `page` is a Scout
+record's page (none for records from outside). `private` is true for mail,
 meetings and Slack, a private journal turn, and a task found in one of them.
 Over HTTP: `GET /v1/resolve?id=<id>` (404 when there's no such record),
 `POST /v1/links/add {src, dst, rel}`, `/v1/links/list {id}`, `/v1/links/url {id}`;

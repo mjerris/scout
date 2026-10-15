@@ -25,7 +25,7 @@ from typing import Any
 
 from . import calendar_mac, mail_mac
 from .mac import ToolError
-from .memory import Memory
+from .memory import Memory, fact_id
 from . import summary
 from .summary import Model, Summaries
 
@@ -299,7 +299,7 @@ class Policy:
         facts = memory.relevant(about, MEMORIES[self.mode]) if about.strip() else memory.newest(10)
         if not facts:
             return f"Nothing remembered about {about}." if about.strip() else "Nothing remembered yet."
-        return "The user told Scout:\n" + "\n".join(f"- {f}" for f in facts)
+        return "The user told Scout:\n" + "\n".join(f"- {f} (ref {fact_id(f)})" for f in facts)
 
 
 def _quiet(t: asyncio.Task[Any]) -> None:

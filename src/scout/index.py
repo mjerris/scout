@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -401,6 +402,8 @@ class Index:
     _turn: threading.Condition = field(init=False, repr=False, default_factory=threading.Condition)
     _urgent: int = field(init=False, repr=False, default=0)
     _fresh: bool = field(init=False, repr=False, default=False)  # new text since the background looked
+    # Facts link_facts found no turn for, a day or more after they were added.
+    _facts_tried: set[str] = field(init=False, repr=False, default_factory=set)
     # Where the phone reaches Scout's web UI (links.web_base in the service): record pages.
     web_base: Callable[[], str] = lambda: ""
 
@@ -704,6 +707,7 @@ class Index:
                 for it in items:
                     refs = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r) != it["id"]]
                     self._set_links(it["id"], ("about",), [(r, "about") for r in dict.fromkeys(refs)])
+                self._link_told(items)
             keep = {it["id"] for it in items}
             with self._lock:
                 row = self._conn.execute("SELECT ids FROM files WHERE path = ?", (str(p),)).fetchone()
@@ -903,6 +907,70 @@ class Index:
         if rows:
             log.info("index: links made for %d tasks", len(rows))
 
+    def _told_link(self, fact: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT dst FROM links WHERE src = ? AND rel = 'told_in' ORDER BY ts DESC LIMIT 1", (fact,)
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def _link_told(self, turns: Sequence[dict[str, Any]]) -> None:
+        """told_in links from the facts a turn told Scout to the turn: a fact in its refs
+        line, when the turn says remember (links.says_remember) and came just after the
+        fact was added. Of several such turns, the one closest after the fact; asking
+        about a fact later points at it ("about") without moving where it was told."""
+        for it in turns:
+            facts = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r).startswith("memory:")]
+            tools = _tools_line(str(it.get("body") or ""))
+            if not facts or not links.says_remember(str(it.get("title") or ""), tools):
+                continue
+            ts = float(it.get("ts") or 0)
+            for fid in dict.fromkeys(facts):
+                f = self.get(fid)
+                if f is None or f.kind != "memory" or not self._told_near(f.ts, ts):
+                    continue
+                cur = self._told_link(fid)
+                c = self.get(cur) if cur and cur != it["id"] else None
+                if c is not None and self._told_near(f.ts, c.ts) and abs(c.ts - f.ts) <= abs(ts - f.ts):
+                    continue  # told in an earlier turn already
+                self._set_links(fid, ("told_in",), [(it["id"], "told_in")])
+
+    @staticmethod
+    def _told_near(fact_ts: float, turn_ts: float) -> bool:
+        return -links.TOLD_BEFORE_S <= turn_ts - fact_ts <= links.TOLD_AFTER_S
+
+    def link_facts(self, limit: int = 100) -> int:
+        """told_in links for facts that have none (told before facts were linked, or on a
+        phone call, whose journal entries carry no refs): the fact's day's turns are
+        matched by links.told_turn, and only a single match links. Facts tried here
+        without a match aren't tried again by this store (one older than a day can't get
+        a new turn); at most `limit` facts a pass. Returns how many were linked."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT d.id, d.title, d.ts FROM docs d WHERE d.kind = 'memory' AND NOT EXISTS ("
+                "SELECT 1 FROM links l JOIN docs t ON t.id = l.dst WHERE l.src = d.id AND l.rel = 'told_in') "
+                "ORDER BY d.ts DESC"
+            ).fetchall()
+        rows = [r for r in rows if r[0] not in self._facts_tried][:limit]
+        linked, now = 0, time.time()
+        for fid, text, ts in rows:
+            day = f"journal:{dt.datetime.fromtimestamp(float(ts)):%Y-%m-%d}T"
+            with self._lock:
+                turns = self._conn.execute(
+                    "SELECT id, ts, title, body FROM docs WHERE kind = 'turn' AND substr(id, 1, ?) = ? ORDER BY ts",
+                    (len(day), day),
+                ).fetchall()
+            found = links.told_turn(
+                str(text), float(ts),
+                [(str(i), float(t), str(q), _tools_line(str(b))) for i, t, q, b in turns],
+            )  # fmt: skip
+            if found is not None:
+                self._set_links(fid, ("told_in",), [(found, "told_in")])
+                linked += 1
+            elif now - float(ts) > 86400:
+                self._facts_tried.add(str(fid))
+        return linked
+
     def link_meetings(self, since: float | None = None) -> int:
         """same_as links from meeting summaries that came by email to the Granola note of
         the same meeting (links.same_meeting: its start just before the email, a similar
@@ -990,6 +1058,10 @@ class Index:
         if h.kind == "task":
             src = next((r["url"] for r in related if r["rel"] == "found_in" and r["url"]), None)
             url = src or str(h.meta.get("link") or "") or page
+        elif h.kind == "memory":  # a fact: the turn it was told in, else its own page
+            url = next(
+                (r["url"] for r in related if r["rel"] == "told_in" and r["dir"] == "out" and r["url"]), url
+            )
         private = (
             h.kind in links.PRIVATE_KINDS
             or bool(h.meta.get("private"))
@@ -1000,12 +1072,15 @@ class Index:
 
     def upkeep(self) -> None:
         """The links that follow from what's stored: emailed meeting summaries to their
-        Granola notes, and tasks' `- link:` lines. Never fails the caller."""
+        Granola notes, tasks' `- link:` lines, and facts to the turn they were told in.
+        Never fails the caller."""
         try:
             self.link_meetings()
             n = self.link_tasks()
             if n:
                 log.info("index: %d tasks got their link", n)
+            if n := self.link_facts():
+                log.info("index: %d facts linked to the turn they were told in", n)
         except Exception:
             log.exception("index: making links failed; trying again next time")
 
@@ -1459,6 +1534,12 @@ def _recent_sql(kinds: Sequence[str] | None, since: float | None, limit: int) ->
         parts.append(f"SELECT * FROM (SELECT {_COLS} FROM docs WHERE 1{where} ORDER BY ts DESC LIMIT ?)")  # noqa: S608 (only placeholders and fixed column names are joined in)
         args += [*a, limit]
     return " UNION ALL ".join(parts) + " ORDER BY ts DESC LIMIT ?", [*args, limit]
+
+
+def _tools_line(body: str) -> str:
+    """A journal turn's tools line, from its indexed body."""
+    m = re.search(r"^tools: (.*)$", body, re.M)
+    return m.group(1) if m else ""
 
 
 def _file_stat(p: Path) -> str:

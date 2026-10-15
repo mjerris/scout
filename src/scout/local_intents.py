@@ -795,7 +795,10 @@ async def _link_that(m: re.Match[str], c: Context) -> str | None:
         return None
     ref, r = got
     if _refs.best_url(r) is None:
-        return None
+        if r.get("kind") != "memory":
+            return None
+        c.refs = [ref]  # a fact with no page to point at: said so, nothing invented
+        return f"{await _refs.where_from(r, c.store())} It has no link."
     c.refs, c.private = [ref], bool(r.get("private"))
     store = c.store()
     _, sent = await _refs.send(r, store)
