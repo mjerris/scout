@@ -704,3 +704,86 @@ def strip_own_speech(heard: str, spoken: str, spoken_alt: str = "") -> str:
         if alt[1] < best[1]:
             best = alt
     return best[0]
+
+
+# --------------------------------------------------------------- identifiers ---
+# Ticket, issue, PR and order numbers are read digit by digit ("ticket 6 1 7 2 3"), not
+# as an amount ("sixty-one thousand ..."). After one of these words (and an optional
+# "number", "no." or "#"), a number of two or more digits; after the ambiguous ones
+# ("in case 120 people come", "order 12 pizzas") four or more, unless "number" or "#"
+# says it's an identifier.
+_ID_WORDS = (
+    r"tickets?|issues?|prs?|pull\s+requests?|invoices?|confirmations?(?:\s+(?:code|number))?|"
+    r"tracking(?:\s+number)?|bookings?|reservations?|claims?|policy|policies|incidents?|bugs?|"
+    r"refs?|cases?\s+number|order\s+number|account\s+number|ids?"
+)
+_ID_LOOSE = r"cases?|orders?|accounts?|references?|requests?|builds?|jobs?|items?|records?"
+_ID_LEAD = r"(?:[ \t]*(?:number|num\.?|no\.|#|:))?[ \t]*#?"
+_ID_NUM = r"\d{1,3}(?:,\d{3})+(?![\d,]*\.\d)|\d+"
+_ID_END = r"(?![\w.,:/-]?\d)(?!\w)"
+_AFTER_WORD = re.compile(
+    rf"\b(?P<w>{_ID_WORDS})(?P<lead>{_ID_LEAD})(?P<n>{_ID_NUM}){_ID_END}"
+    rf"|\b(?P<lw>{_ID_LOOSE})(?P<llead>{_ID_LEAD})(?P<ln>{_ID_NUM}){_ID_END}",
+    re.I,
+)
+# "#117", "owner/repo#123": "number 1 1 7".
+_HASH_NUM = re.compile(r"(?<![\w&])#(\d{2,})" + _ID_END)
+_REPO_HASH = re.compile(r"(?<=[\w.-])#(\d+)" + _ID_END)
+# A bare integer of five or more digits is an identifier too (a zip code, a ticket said
+# without its word), unless it's money, a measurement or a count of something.
+_BARE = re.compile(r"(?<![\w$€£¥.,:/#+-])(\d{5,})" + _ID_END)
+_MONEY_AFTER = re.compile(r"\s*(?:dollars?|bucks|usd|eur|euros?|pounds?|gbp|cents?|yen)\b", re.I)
+_UNIT_AFTER = re.compile(
+    r"\s*(?:%|percent\b|k\b|x\b|"
+    r"(?:miles?|mi|km|kilomet(?:er|re)s?|met(?:er|re)s?|m|feet|foot|ft|yards?|yds?|inch(?:es)?|"
+    r"mph|kph|km/h|kg|kilos?|kilograms?|grams?|g|lbs?|tons?|tonnes?|gallons?|gal|lit(?:er|re)s?|"
+    r"ml|calories|cals?|kcal|steps|people|persons|users|customers|members|views|downloads|visitors|"
+    r"subscribers|followers|rows|records|lines|bytes|kb|mb|gb|tb|words|times|hours?|hrs?|minutes?|"
+    r"mins?|seconds?|secs?|days?|weeks?|months?|years?|acres?|sq|square|cubic|degrees?|watts?|w|"
+    r"kwh|wh|volts?|v|amps?|rpm|hz|khz|mhz|ghz|pixels?|px|units?|pieces?|copies|items|messages|"
+    r"emails|requests|tokens|votes|points)\b)",
+    re.I,
+)
+_QUANTITY_BEFORE = re.compile(
+    r"(?:\b(?:about|around|over|under|nearly|roughly|almost|approximately|than|some|total(?:ing)?|"
+    r"up\s+to|at\s+least|at\s+most)|[~≈<>])\s*$",
+    re.I,
+)
+
+
+def _digits(n: str) -> str:
+    return " ".join(n.replace(",", ""))
+
+
+def speak_ids(text: str) -> str:
+    """Ticket, issue, PR, order and similar numbers, and long bare integers, said digit
+    by digit: "ticket 61723" -> "ticket 6 1 7 2 3", "#117" -> "number 1 1 7". Money
+    ("$61,723"), quantities ("61,000", "12000 steps"), years, times and short numbers
+    ("PR 6", "Highway 61") are left for the voice to say as numbers."""
+
+    def after_word(m: re.Match[str]) -> str:
+        if m["w"] is not None:
+            word, lead, n = m["w"], m["lead"], m["n"]
+            if len(n.replace(",", "")) < 2:
+                return m.group(0)
+        else:
+            word, lead, n = m["lw"], m["llead"], m["ln"]
+            plain = len(n.replace(",", ""))
+            said = re.search(r"number|num|no\.|#", lead, re.I)
+            if plain < 2 or (plain < 4 and not said) or _UNIT_AFTER.match(text, m.end()):
+                return m.group(0)
+        lead = lead.replace("#", "").strip()
+        sep = lead if lead == ":" else f" {lead}" if lead else ""
+        return f"{word}{sep} {_digits(n)}"
+
+    def bare(m: re.Match[str]) -> str:
+        if _MONEY_AFTER.match(text, m.end()) or _UNIT_AFTER.match(text, m.end()):
+            return m.group(0)
+        if _QUANTITY_BEFORE.search(text, 0, m.start()):
+            return m.group(0)
+        return _digits(m.group(1))
+
+    text = _AFTER_WORD.sub(after_word, text)
+    text = _REPO_HASH.sub(lambda m: " number " + _digits(m.group(1)), text)
+    text = _HASH_NUM.sub(lambda m: "number " + _digits(m.group(1)), text)
+    return _BARE.sub(bare, text)

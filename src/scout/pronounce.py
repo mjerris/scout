@@ -7,7 +7,9 @@ Rule files have one rule per line:
 
 DIRECTION is TTS or STT; pattern is a Python regex; pattern and replacement
 are shell-quoted when they contain spaces. Built-in defaults load first, then
-pronounce.txt in the project root, so your rules can add to or undo them.
+pronounce.txt in the project root, so your rules can add to or undo them. Before
+the TTS rules, identifiers are put digit by digit ("ticket 61723" -> "ticket 6 1 7 2 3",
+speech.speak_ids).
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ import shlex
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+
+from .speech import speak_ids
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +67,9 @@ class Pronouncer:
         return text
 
     def tts(self, text: str) -> str:
-        return self._apply("TTS", text)
+        """Text as it's said: ticket and other identifiers digit by digit
+        (speech.speak_ids), then the TTS rules."""
+        return self._apply("TTS", speak_ids(text))
 
     def stt(self, text: str) -> str:
         return self._apply("STT", text)

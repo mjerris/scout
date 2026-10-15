@@ -261,3 +261,55 @@ def test_web_address_senders_are_said_by_name(sender: str, name: str) -> None:
 def test_a_clip_that_is_only_our_own_speech(heard: str, ours: bool) -> None:
     said = "In Luther it's 58 and mostly clear, wind southeast at 6."
     assert mostly_ours(heard, said) is ours
+
+
+# --------------------------------------------------------------- identifiers ---
+from scout.speech import speak_ids  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "text, said",
+    [
+        # Identifiers after their word, or after "#": digit by digit.
+        ("Follow up with Luca about ticket 61723.", "Follow up with Luca about ticket 6 1 7 2 3."),
+        ("Ticket #61723 is open", "Ticket 6 1 7 2 3 is open"),
+        ("issue 4521 and PR 117", "issue 4 5 2 1 and PR 1 1 7"),
+        ("PR #42 merged", "PR 4 2 merged"),
+        ("pull request 1203", "pull request 1 2 0 3"),
+        ("see #117", "see number 1 1 7"),
+        ("signalwire/scout#123 is waiting", "signalwire/scout number 1 2 3 is waiting"),
+        ("order number 88231", "order number 8 8 2 3 1"),
+        ("invoice no. 5532", "invoice no. 5 5 3 2"),
+        ("Your confirmation code: 7781", "Your confirmation code: 7 7 8 1"),
+        ("account 00412", "account 0 0 4 1 2"),
+        ("case 98765 was closed", "case 9 8 7 6 5 was closed"),
+        ("reference 12", "reference 12"),  # an ambiguous word needs a long number
+        ("tickets 61723 and 61724", "tickets 6 1 7 2 3 and 6 1 7 2 4"),
+        # A bare long integer is an identifier too.
+        ("61723 is still open", "6 1 7 2 3 is still open"),
+        ("zip 94110", "zip 9 4 1 1 0"),
+        # Left alone: short numbers, money, measurements, years, times, quantities.
+        ("PR 6 merged", "PR 6 merged"),
+        ("Highway 61", "Highway 61"),
+        ("61,000 people", "61,000 people"),
+        ("$61,723 owed", "$61,723 owed"),
+        ("$61723 owed", "$61723 owed"),
+        ("61723 dollars", "61723 dollars"),
+        ("in 2026", "in 2026"),
+        ("at 3:45", "at 3:45"),
+        ("5 foot 9", "5 foot 9"),
+        ("12000 steps today", "12000 steps today"),
+        ("about 25000 users", "about 25000 users"),
+        ("30000 ft", "30000 ft"),
+        ("45000%", "45000%"),
+        ("3.14159", "3.14159"),
+        ("12345.67", "12345.67"),
+        ("version 1.20.3", "version 1.20.3"),
+        ("abc12345 and 0x12345", "abc12345 and 0x12345"),
+        ("in case 120 people come", "in case 120 people come"),
+        ("Call 5 5 5, 0 1 0, 2 0 0 0", "Call 5 5 5, 0 1 0, 2 0 0 0"),
+        ("the 12345th visitor", "the 12345th visitor"),
+    ],
+)
+def test_identifiers_are_spoken_digit_by_digit(text: str, said: str) -> None:
+    assert speak_ids(text) == said
