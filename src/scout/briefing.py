@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import freebusy, reminders_mac
+from . import freebusy, refs, reminders_mac
 from .freebusy import clock, join
 from .mac import ToolError
 
@@ -107,7 +107,7 @@ async def build(
     )
     if todo is not None:
         parts.append(await part("your tasks", todo))
-    return " ".join(p for p in [greeting(now), *parts] if p)
+    return refs.joined([greeting(now), *parts])  # with the tasks' refs (refs.Spoken)
 
 
 def tasks_part(rows: Sequence[Any], today: dt.date) -> str:
@@ -132,7 +132,8 @@ def tasks_part(rows: Sequence[Any], today: dt.date) -> str:
         f"{t.owner} owes you {t.title}, due {t.due():%A, %B} {t.due().day}; maybe follow up."
         for t in owed[:2]
     )
-    return " ".join(out)
+    said = [t for t, _ in mine[:3]] + owed[:2]
+    return refs.Spoken(" ".join(out), [f"task:{t.n}" for t in said], any(t.fields.get("from") for t in said))
 
 
 def local_now() -> dt.datetime:

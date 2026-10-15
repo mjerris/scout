@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import logging.handlers
@@ -30,6 +31,7 @@ from . import (
     memory,
     privacy,
     pulse,
+    refs,
     shared_tools,
     speech,
     starlink,
@@ -173,7 +175,11 @@ class Assistant:
         self.floor = Floor(cfg.floor.hold_seconds)
         self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
-        self._local = local_intents.Context(self.timers, last_spoken=lambda: self.last_spoken)
+        # What was said lately with the records it was about (refs.py): "give me a link to that".
+        self.said = refs.use(refs.Log())
+        self._local = local_intents.Context(
+            self.timers, last_spoken=lambda: self.last_spoken, said=lambda: self.said
+        )
         # (time, request, answer, from private data): private ones reach Claude only if
         # the privacy mode allows.
         self.recent_local: deque[tuple[float, str, str, bool]] = deque(maxlen=10)
@@ -190,7 +196,9 @@ class Assistant:
         self.last_spoken: tuple[str, str] | None = None  # (who, text) for "say that again"
         self.last_private = False  # the last local answer came from private data (a repeat is too)
         self._turn_tool = ""  # the tool the current room turn is running, for the progress line
-        server, names = build_server(self.timers, self.relay, self.memory)
+        self._phone_refs: list[str] = []  # ...and the phone's request's (asks run one at a time)
+        self._turn_refs: list[str] = []  # records the room's Claude turn read about (its tools' results)
+        server, names = build_server(self.timers, self.relay, self.memory, self._turn_refs.extend)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
@@ -288,7 +296,7 @@ class Assistant:
         try:
             self.speaker.chime("wake")
             self.speaker.speak(text)
-            self.last_spoken = ("Scout", text)
+            self._spoke("briefing", text, refs.refs_of(text), refs.private_of(text))
             await self.speaker.wait_idle()
         finally:
             if took:
@@ -301,17 +309,54 @@ class Assistant:
         who: str,
         private: bool,
         tools: Sequence[tuple[str, dict[str, Any]]] = (),
+        about: Sequence[str] = (),
     ) -> None:
         """Keep the exchange in the journal (memory/journal/, indexed), so "what did I ask
-        about X" can find it. The tools line says what was used, not what it returned."""
+        about X" can find it. The tools line says what was used, not what it returned; the
+        refs line (`about`) the records the answer was about."""
         private = private or any(_PRIVATE_TOOL.match(trust.base(n)) for n, _ in tools)
         try:
             # The store may be the memory service: off the event loop.
-            await asyncio.to_thread(self.index.journal_add, time.time(), who, request, reply, tools, private)
+            await asyncio.to_thread(
+                self._journal_add, time.time(), who, request, reply, tools, private, about
+            )
         except (ToolError, OSError) as exc:  # the memory service is down: only this record is lost
             log.warning("recording the conversation failed: %s", exc)
         except Exception:
             log.exception("recording the conversation failed")
+
+    def _journal_add(
+        self,
+        ts: float,
+        who: str,
+        q: str,
+        a: str,
+        tools: Sequence[tuple[str, dict[str, Any]]],
+        private: bool,
+        about: Sequence[str],
+    ) -> None:
+        ids = list(refs.clean(about))
+        if ids and "refs" in inspect.signature(self.index.journal_add).parameters:
+            self.index.journal_add(ts, who, q, a, tools, private, refs=ids)  # type: ignore[call-arg]
+        else:  # nothing to link, or a store from before refs
+            self.index.journal_add(ts, who, q, a, tools, private)
+
+    def _spoke(
+        self,
+        who: str,
+        text: str,
+        about: Sequence[str] = (),
+        private: bool = False,
+        request: str = "",
+        channel: str = "room",
+        session: bool = False,
+    ) -> None:
+        """Something was said (`who`: "Scout", "pulse", "briefing", or a Claude session
+        when `session`): for "say that again" when the room heard it, and with the records
+        it was about for "give me a link to that" (refs.Log)."""
+        if channel == "room":
+            self.last_spoken = (who if session else "Scout", text)
+        self.said.add(refs.Said(time.time(), who, text, refs.clean(about), private, channel, request))
 
     async def announce(self, text: str, who: str = "announce") -> None:
         """Say something unprompted (Starlink went down): it waits for the floor, like a timer."""
@@ -319,7 +364,8 @@ class Assistant:
         try:
             self.speaker.chime("wake")
             self.speaker.speak(text)
-            self.last_spoken = ("Scout", text)
+            # The pulse's sentences carry the records they're about (refs.Spoken).
+            self._spoke(who, text, refs.refs_of(text), refs.private_of(text))
             await self.speaker.wait_idle()
         finally:
             if took:
@@ -822,7 +868,7 @@ class Assistant:
             if message:
                 self.emit("agent_said", agent=agent, text=message)
                 self.session_said.append((time.time(), agent, message, listen))
-                self.last_spoken = (agent, message)
+                self._spoke(agent, message, session=True)
                 self.speaker.speak(speech.to_speech(message), voice=voice)
                 await self.speaker.wait_idle()
             if stopped.is_set():
@@ -1042,11 +1088,12 @@ class Assistant:
             return False
         tier: int | None = 0  # set before the lookups: a ToolError below is still said
         private = False
+        about: list[str] = []  # the records the answer is about (refs.py)
         try:
             said = await local_intents.answer(text, self._local)
             # Worked out from private data: a memory, an email's text, the title of a task
             # found in mail, a meeting or Slack (local_intents sets ctx.private).
-            private = self._local.private
+            private, about = self._local.private, list(self._local.refs)
             if said is not None and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
                 private = self.last_private  # ...and is as private as what it repeats
@@ -1076,6 +1123,7 @@ class Assistant:
                     said = await tier1.run(decision, now, self.privacy.summaries)
                     if said is not None:  # None: the lookup couldn't answer it after all (Claude)
                         tier, private = 1, tier1.is_private(decision)
+                        about = list(decision.get("refs") or [])
                         self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
                         if ctx is not None and maybe:
                             ctx.task.cancel()
@@ -1100,13 +1148,15 @@ class Assistant:
                 said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
                 self._set_state("speaking")
                 self.say(said)
-                if tier is not None:
-                    self.last_spoken = ("Scout", said)
+                if tier is not None:  # a repeat keeps what it repeats, refs and all
+                    self._spoke("Scout", said, about, private, text)
                     self.last_private = private
             if hint := mail_mac.take_setup_hint():  # a slow mail search: offer the one-time fix
                 self.say(hint)
             await self.speaker.wait_idle()
-        await self._record_turn(text, said or "(done)", "room", private)
+        await self._record_turn(
+            text, said or "(done)", "room", private, about=about if tier is not None else ()
+        )
         return True
 
     def relay(self, session: str, text: str) -> str:
@@ -1170,6 +1220,10 @@ class Assistant:
         ]
         if recent:
             lines.append("Just answered locally: " + " | ".join(recent[-3:]))
+        try:  # what was said with the records it was about: "give me a link to that"
+            lines += await refs.context_lines(self.said, self.privacy.mode)
+        except Exception as exc:  # the store is down: the request goes without them
+            log.info("refs left out of the context: %s", exc)
         said = [s for s in self.session_said if time.time() - s[0] < 600]
         if said:
             lines.append(
@@ -1284,6 +1338,7 @@ class Assistant:
         )
         replies: list[str] = []
         used: list[tuple[str, dict[str, Any]]] = []
+        self._turn_refs.clear()  # build_server's on_refs fills it from the tools' results
         self._context = None
         try:
             if await self._answer_locally(text, fetch_context=True):
@@ -1351,7 +1406,13 @@ class Assistant:
                 self._context = None
             self._log_turn_timing()
             if replies:
-                self._spawn(self._record_turn(text, " ".join(replies), "room", False, used))
+                about = list(refs.clean(self._turn_refs))
+                private = any(_PRIVATE_TOOL.match(trust.base(n)) for n, _ in used)
+                # last_spoken is already the reply; this is what it was about.
+                self.said.add(
+                    refs.Said(time.time(), "Scout", " ".join(replies), tuple(about), private, "room", text)
+                )
+                self._spawn(self._record_turn(text, " ".join(replies), "room", False, used, about))
             self._set_state("idle")
             # The follow-up window is for a reply the room heard; a phone-only turn opens none.
             heard_in_room = self._out["mini"]
@@ -1592,26 +1653,32 @@ class Assistant:
     async def _answer_text(self, agent: str, text: str) -> dict[str, Any]:
         t0 = time.monotonic()
         self.emit("you", text=text, client=agent)
-        said, tier, private = await self._local_text(text)
+        said, tier, private = await self._local_text(text, agent)
         if said is not None:
             said = speech.speak_dates(said or "Done.")
             log.info("phone: answered locally (tier %s): %s -> %s", tier, text, said)
             ledger.record(tier, time.monotonic() - t0, client=agent)
             self.emit("local", text=said, client=agent)
+            about = self._phone_refs[:]
+            self._spoke("Scout", said, about, private, text, channel=agent)
             if agent != PHONE_AGENT:  # the phone service keeps the whole call
-                await self._record_turn(text, said, agent, private)
+                await self._record_turn(text, said, agent, private, about=about)
             return {"status": "ok", "text": said, "tier": tier}
         if self._phone_brain is None:
-            server, names = build_server(self.timers, memory=self.memory)  # no relaying to sessions
+            # No relaying to sessions; the tools' records are collected for this request.
+            server, names = build_server(self.timers, memory=self.memory, on_refs=self._phone_refs.extend)
             self._phone_brain = PhoneBrain(self.cfg.claude, server, names, PHONE_TOOLS, self.rules)
         brain = self._phone_brain
         replies: list[str] = []
+        used: list[str] = []
+        self._phone_refs.clear()
         try:
             async for kind, data in brain.ask(await self._with_context(text)):
                 if kind in ("text", "spoken"):
                     replies.append(data)
                 elif kind == "tool":
                     name, args = data
+                    used.append(name)
                     self.emit("tool", name=name, input=_preview(args), client=agent)
                 elif kind == "result":
                     ledger.record("claude", time.monotonic() - t0, client=agent, **ledger.from_result(data))
@@ -1626,18 +1693,24 @@ class Assistant:
             }
         reply = speech.to_speech(" ".join(replies)) or "Done."
         self.emit("claude", text=reply, client=agent)
+        about = list(refs.clean(self._phone_refs))
+        private = any(_PRIVATE_TOOL.match(trust.base(n)) for n in used)
+        self._spoke("Scout", reply, about, private, text, channel=agent)
         if agent != PHONE_AGENT:  # the phone service keeps the whole call
-            self._spawn(self._record_turn(text, reply, agent, False))
+            self._spawn(self._record_turn(text, reply, agent, False, about=about))
         return {"status": "ok", "text": reply, "tier": "claude"}
 
-    async def _local_text(self, text: str) -> tuple[str | None, str, bool]:
+    async def _local_text(self, text: str, agent: str = PHONE) -> tuple[str | None, str, bool]:
         """Tiers 0 and 1 for a phone request, without speaking: (answer or None, tier,
-        from private data). Nothing that changes the room (timers, volume, playback)."""
+        from private data). Nothing that changes the room (timers, volume, playback). The
+        records the answer is about are left in self._phone_refs."""
+        self._phone_refs.clear()
         if not self.cfg.claude.local_first:
             return None, "", False
         try:
-            said = await local_intents.answer(text, self._local, skip=local_intents.PHONE_SKIP)
+            said = await local_intents.answer(text, self._local, skip=local_intents.PHONE_SKIP, channel=agent)
             if said is not None:
+                self._phone_refs.extend(self._local.refs)
                 return said, "0", self._local.private
             try:
                 said = await asyncio.to_thread(memory.answer, text, self.memory)
@@ -1653,6 +1726,7 @@ class Assistant:
                     said = await tier1.run(decision, now, self.privacy.summaries)
                     if said is not None:  # None: the lookup couldn't answer it after all (Claude)
                         self.emit("tool", name=f"local:{decision['tool']}", input=_preview(decision["args"]))
+                        self._phone_refs.extend(decision.get("refs") or [])
                         return said, "1", tier1.is_private(decision)
         except ToolError as exc:
             return f"Sorry, {exc}", "0", False

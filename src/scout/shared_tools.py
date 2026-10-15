@@ -30,6 +30,7 @@ from . import (
     messages_mac,
     notes,
     privacy,
+    refs,
     reminders_mac,
     starlink,
     tasks,
@@ -369,6 +370,25 @@ SHARED = (
         _obj({}),
         lambda a: starlink.report_now(),
     ),
+    SharedTool(
+        "open_link",
+        "What a record Scout spoke about is and where it came from, with its link: a task's "
+        "source meeting, email or Slack message, or the record's page on Scout's web UI. ref is "
+        "a record id (task:15, granola:..., mail:..., note:3; shown as refs in the request "
+        "context and in local_search results); or about: 'that' (what was just said) or a few "
+        "words about it. Read-only. The link isn't for reading aloud: send_link puts it on the "
+        "user's phone, open_url opens it on the Mac.",
+        _obj({"ref": _STR, "about": _STR}),
+        refs.open_link,
+    ),
+    SharedTool(
+        "send_link",
+        "Put a record's link on the user's phone: the task's own reminder already has it, else "
+        "a reminder in their Scout list titled 'Link: ...' with the URL. ref or about as for "
+        "open_link. Needs no confirmation (Scout's own list).",
+        _obj({"ref": _STR, "about": _STR}),
+        refs.send_link,
+    ),
 )
 
 
@@ -390,7 +410,10 @@ async def _local_search(a: dict[str, Any]) -> str:
                 h.body = ""
             elif h.kind == "task":  # a task found in mail or a meeting: what came from there
                 h.title, h.body = tasks.shown(h.meta, h.title, h.body, pol.mode)
-    return index.format_hits(hits)
+    # Each with its record id, for open_link / send_link ("send me the link to that meeting").
+    return "\n".join(f"{index.format_hits([h])} (ref {refs.norm(h.id)})" for h in hits) or index.format_hits(
+        []
+    )
 
 
 _PRIVATE_KINDS = ("mail", "meeting", "slack")  # their text stays on the Mac outside "open" privacy mode

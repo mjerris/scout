@@ -14,7 +14,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from . import mac, privacy
+from . import mac, privacy, refs
 from .config import DATA
 from .memory import Memory
 from .shared_tools import SHARED
@@ -96,13 +96,21 @@ def build_server(
     timers: Timers,
     relay: Callable[[str, str], str] = lambda s, t: "relaying isn't available",
     memory: Memory | None = None,
+    on_refs: Callable[[list[str]], None] | None = None,
 ) -> tuple[McpSdkServerConfig, list[str]]:
+    """The tool server. `on_refs` gets the record ids each tool result was about
+    (refs.from_tool), so what the turn said can be linked to later."""
+
     def wrap(
         fn: Callable[[dict[str, Any]], Awaitable[str]],
+        name: str = "",
     ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             try:
-                return _ok(await fn(args))
+                text = await fn(args)
+                if on_refs is not None and name and (got := refs.from_tool(name, args, text)):
+                    on_refs(got)
+                return _ok(text)
             except mac.ToolError as exc:
                 return _err(str(exc))
             except Exception as exc:  # unexpected: surface it, don't crash the session
@@ -194,7 +202,7 @@ def build_server(
     if memory is not None:
         tools += [tool(n, d, schema)(wrap(fn)) for n, d, schema, fn in memory_tools(memory)]
     # Mail and calendar: the same definitions the MCP server offers other sessions.
-    tools += [tool(t.name, t.description, t.schema)(wrap(t.run)) for t in SHARED]
+    tools += [tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in SHARED]
     return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
 
 

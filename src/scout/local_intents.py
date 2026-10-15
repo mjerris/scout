@@ -19,7 +19,7 @@ import asyncio
 import datetime as dt
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import (
@@ -37,6 +37,7 @@ from . import (
     weather,
 )
 from . import ledger
+from . import refs as _refs
 from .config import load
 from .freebusy import clock as _clock
 from .freebusy import join
@@ -135,6 +136,11 @@ class Context:
     # The last answer used text from an email or meeting (a found task's title): spoken
     # here, but withheld from Claude in strict privacy mode like other private answers.
     private: bool = False
+    # The ids of the records the last answer was about (refs.py): "give me a link to that".
+    refs: list[str] = field(default_factory=list)
+    channel: str = "room"  # who asked: the room, or the phone agent (answer() sets it)
+    said: Callable[[], _refs.Log] = lambda: _refs.log_of()  # what was said lately, with its refs
+    store: Callable[[], Any] = lambda: _refs._store()  # where records resolve (index.default)
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
@@ -454,7 +460,9 @@ _THEN = r"(?: next| now| first| today| right now)"
     r"what do i (?:need|have) to do next|what(?:'s| is) the next thing on my list)"
 )
 async def _task_next(m: re.Match[str], c: Context) -> str:
-    text, c.private = tasks.speak_next(await c.task_list(), c.now().date(), await c.people())
+    ts = await c.task_list()
+    text, c.private = tasks.speak_next(ts, c.now().date(), await c.people())
+    c.refs = _refs.task_refs(text, ts)
     return text
 
 
@@ -464,7 +472,9 @@ async def _task_next(m: re.Match[str], c: Context) -> str:
     r"(?:list|read(?: me)?|tell me) my tasks)"
 )
 async def _task_list(m: re.Match[str], c: Context) -> str:
-    text, c.private = tasks.speak_list(await c.task_list(), c.now().date(), await c.people())
+    ts = await c.task_list()
+    text, c.private = tasks.speak_list(ts, c.now().date(), await c.people())
+    c.refs = _refs.task_refs(text, ts)
     return text
 
 
@@ -485,10 +495,12 @@ _WHO = r"(?P<who>[a-z][a-z'.-]*(?: [a-z][a-z'.-]*)?)"
     r"what do (?:people|others) owe me)"
 )
 async def _task_waiting(m: re.Match[str], c: Context) -> str | None:
-    got = tasks.speak_waiting(await c.task_list(), c.now().date())
+    ts = await c.task_list()
+    got = tasks.speak_waiting(ts, c.now().date())
     if got is None:
         return None
     text, c.private = got
+    c.refs = _refs.task_refs(text, ts)
     return text
 
 
@@ -503,10 +515,12 @@ async def _task_waiting(m: re.Match[str], c: Context) -> str | None:
 )
 async def _task_owed_by(m: re.Match[str], c: Context) -> str | None:
     name = m.group("who") or m.group("who2") or m.group("who3")
-    got = tasks.speak_waiting(await c.task_list(), c.now().date(), name)
+    ts = await c.task_list()
+    got = tasks.speak_waiting(ts, c.now().date(), name)
     if got is None:
         return None  # nothing from them on the list ("what is the team doing for me"): Claude
     text, c.private = got
+    c.refs = _refs.task_refs(text, ts)
     return text
 
 
@@ -686,7 +700,9 @@ async def _note(m: re.Match[str], c: Context) -> str:
     r"do i have (?:a |any )?notes?)(?: (?:about|on|for|from|regarding) (?P<about>.+))?"
 )  # one group: _rule anchors the whole pattern
 async def _notes(m: re.Match[str], c: Context) -> str:
-    return notes.speak(await c.notes_find((m.group("about") or "").strip()))
+    found = await c.notes_find((m.group("about") or "").strip())
+    c.refs = [f"note:{found[0]['id']}"] if found and found[0].get("id") is not None else []
+    return notes.speak(found)
 
 
 @_rule(
@@ -749,6 +765,63 @@ async def _ledger(m: re.Match[str], c: Context) -> str:
     return ledger.speak(period, ledger.summary(ledger.start_of(period, c.now())))
 
 
+# "Give me a link to that", "where did that come from": the record the last answer was
+# about (refs.py). Only when that is one record; otherwise (nothing, or several) Claude
+# takes it, with the refs in its context. Nothing is guessed.
+
+_THAT = r"(?:that|this|it)(?: one)?"
+
+
+async def _that(c: Context) -> tuple[str, dict[str, Any]] | None:
+    said = c.said().last(channel=c.channel)
+    if said is None and c.channel != "room":
+        said = c.said().last(channel="room")  # asked on the phone about what the room heard
+    if said is None or len(said.refs) != 1:
+        return None
+    r = await _refs.resolve(said.refs[0], c.store())
+    return None if r is None else (said.refs[0], r)
+
+
+@_rule(
+    r"(?:(?:give|send|text|get) me (?:a |the )?link (?:to|for) " + _THAT + r"|"
+    r"(?:give|send|text|get) me (?:that|the|this) link|"
+    r"(?:can i (?:get|have)|i(?:'d| would) like) (?:a |the )?link(?: (?:to|for) " + _THAT + r")?|"
+    r"(?:what(?:'s| is)|where(?:'s| is)) the link(?: (?:to|for) " + _THAT + r")?|"
+    r"(?:send|put) (?:that|the|this) link (?:to|on) my phone|link (?:me )?(?:to )?that)"
+)
+async def _link_that(m: re.Match[str], c: Context) -> str | None:
+    got = await _that(c)
+    if got is None:
+        return None
+    ref, r = got
+    if _refs.best_url(r) is None:
+        return None
+    c.refs, c.private = [ref], bool(r.get("private"))
+    store = c.store()
+    _, sent = await _refs.send(r, store)
+    return f"{await _refs.where_from(r, store)} {sent}"
+
+
+@_rule(
+    r"(?:where did " + _THAT + r" come from|where(?:'s| is| was) " + _THAT + r" from|"
+    r"where did you (?:get|find) "
+    + _THAT
+    + r"|what(?:'s| is| was) the source(?: (?:of|for) "
+    + _THAT
+    + r")?|"
+    r"what (?:meeting|email|e-mail|message|slack message|conversation|note) (?:was|is|did) "
+    + _THAT
+    + r" (?:from|in|come from))"
+)
+async def _where_that(m: re.Match[str], c: Context) -> str | None:
+    got = await _that(c)
+    if got is None:
+        return None
+    ref, r = got
+    c.refs, c.private = [ref], bool(r.get("private"))
+    return await _refs.where_from(r, c.store())
+
+
 # What a request from the phone may not do here: change the room (timers that ring in it,
 # volume, playback), repeat what the room last heard, or change what asks first.
 PHONE_SKIP = frozenset({
@@ -757,16 +830,24 @@ PHONE_SKIP = frozenset({
 })  # fmt: skip
 
 
-async def answer(text: str, ctx: Context, skip: frozenset[str] = frozenset()) -> str | None:
+async def answer(
+    text: str, ctx: Context, skip: frozenset[str] = frozenset(), channel: str = "room"
+) -> str | None:
     """The spoken answer when tier 0 handles `text`, "" when it acted silently,
     or None to send it on to Claude. Handlers named in `skip` are passed over."""
     t = _clean(text)
     ctx.request = text
     ctx.private = False
+    ctx.refs = []
+    ctx.channel = channel
     for pattern, handler in _RULES:
         if handler.__name__ in skip:
             continue
         m = pattern.match(t)
         if m:
-            return await handler(m, ctx)
+            said = await handler(m, ctx)
+            if not ctx.refs and _refs.refs_of(said):  # the briefing: its sentences carry their refs
+                ctx.refs = list(_refs.refs_of(said))
+                ctx.private = ctx.private or _refs.private_of(said)
+            return said
     return None
