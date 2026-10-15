@@ -276,9 +276,18 @@ def test_handles_and_names(helper: Helper) -> None:
 
 
 def test_spoken_numbers_come_in_groups() -> None:
-    assert contacts_mac.spoken_number("+1 (555) 010-2000") == "5 5 5, 0 1 0, 2 0 0 0"
-    assert contacts_mac.spoken_number("010-2000") == "0 1 0, 2 0 0 0"
-    assert contacts_mac.spoken_number("+44 20 7946 0958") == "4 4 2, 0 7 9, 4 6 0, 9 5 8"
+    assert contacts_mac.spoken_number("+1 (555) 010-2000") == "five five five, oh one oh, two oh oh oh"
+    assert contacts_mac.spoken_number("010-2000") == "oh one oh, two oh oh oh"
+    assert (
+        contacts_mac.spoken_number("1-800-555-0199") == "one eight hundred, five five five, oh one nine nine"
+    )
+    assert (
+        contacts_mac.spoken_number("(888) 555-0123") == "eight eight eight, five five five, oh one two three"
+    )
+    assert (
+        contacts_mac.spoken_number("+44 20 7946 0958")
+        == "plus four four, two oh, seven nine four six, oh nine five eight"
+    )
 
 
 # --- first use, through a fake helper ----------------------------------------------------
@@ -398,14 +407,18 @@ def test_whats_pats_number(said: str) -> None:
     c, asked = _tier0({"pat": [PAT]})
     out = _say(c, said)
     assert (
-        out == "Pat Lee's mobile number is 5 5 5, 0 1 0, 2 0 0 0, and work number is 5 5 5, 0 1 0, 3 0 0 0."
+        out
+        == "Pat Lee's mobile number is five five five, oh one oh, two oh oh oh, and work number is five five five, oh one oh, three oh oh oh."
     )
     assert asked == ["pat"] and c.private is False
 
 
 def test_a_kind_of_number_and_none_on_file() -> None:
     c, _ = _tier0({"pat": [PAT], "sam": [SAM]})
-    assert _say(c, "what's pat's work number") == "Pat Lee's work number is 5 5 5, 0 1 0, 3 0 0 0."
+    assert (
+        _say(c, "what's pat's work number")
+        == "Pat Lee's work number is five five five, oh one oh, three oh oh oh."
+    )
     assert _say(c, "what's pat's home number") == "Pat Lee has no home phone number in your contacts."
     assert _say(c, "what's sam's number") == "Sam Ortiz has no phone number in your contacts."
 

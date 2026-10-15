@@ -350,22 +350,50 @@ def address_text(a: dict[str, Any]) -> str:
     return ", ".join(" ".join(str(p).split()) for p in parts if p and str(p).strip())
 
 
+_DIGIT = dict(
+    zip(
+        "0123456789",
+        ("oh", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"),
+        strict=True,
+    )
+)
+_TOLL_FREE = ("800", "833", "844", "855", "866", "877", "888")
+
+
+def _say_digits(g: str) -> str:
+    return " ".join(_DIGIT[c] for c in g)
+
+
 def spoken_number(number: str) -> str:
-    """A phone number said in groups of digits: "+1 (555) 010-2000" -> "5 5 5, 0 1 0, 2 0 0 0"."""
-    d = re.sub(r"\D", "", number)
-    if len(d) == 11 and d.startswith("1"):
-        d = d[1:]
-    if len(d) == 10:
-        groups = [d[:3], d[3:6], d[6:]]
-    elif len(d) == 7:
-        groups = [d[:3], d[3:]]
-    else:  # elsewhere: groups of three, the last up to four
+    """A phone number said the way people say one, in words so the voice can't read it as
+    an amount: "+1 (555) 010-2000" -> "five five five, oh one oh, two oh oh oh", a
+    toll-free "1-800-555-0199" -> "one eight hundred, five five five, oh one nine nine".
+    A number from elsewhere keeps its own grouping, after "plus" and its country code."""
+    raw = number.strip()
+    d = re.sub(r"\D", "", raw)
+    nanp = len(d) == 10 or (len(d) == 11 and d.startswith("1"))
+    if nanp and not (raw.startswith("+") and not raw.startswith("+1")):
+        d = d[-10:]
+        area, rest = d[:3], [d[3:6], d[6:]]
+        head = (
+            f"one {_DIGIT[area[0]]} hundred"
+            if area in _TOLL_FREE and area.endswith("00")
+            else _say_digits(area)
+        )
+        return ", ".join([head, *(_say_digits(g) for g in rest)])
+    if len(d) == 7:
+        return ", ".join(_say_digits(g) for g in (d[:3], d[3:]))
+    groups = [g for g in re.split(r"[^\d]+", raw) if g]
+    if len(groups) < 2:  # no grouping to keep: threes, the last up to four
         groups = []
         while len(d) > 4:
             groups.append(d[:3])
             d = d[3:]
         groups.append(d)
-    return ", ".join(" ".join(g) for g in groups if g)
+    words = [_say_digits(g) for g in groups]
+    if raw.startswith("+"):
+        words[0] = "plus " + words[0]
+    return ", ".join(words)
 
 
 def format_person(p: dict[str, Any], fields: set[str]) -> str:
