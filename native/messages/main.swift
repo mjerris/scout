@@ -12,7 +12,7 @@
 //
 // Protocol: one JSON object per line, one request per connection:
 //   {"token": "...", "op": "status"|"recent"|"from"|"unread"|"chat"|"search"
-//                          |"mail_status"|"mail_recent"|"mail_search", "args": {...}}
+//                          |"mail_status"|"mail_recent"|"mail_search"|"mail_sent_to", "args": {...}}
 // The answer is one JSON line: {"ok": true, ...} or {"ok": false, "code": "...", "error": "..."}.
 // The token is random per start, in DATA/state/messages_token (0600); the socket is 0600
 // and only answers this user. Limits: at most 50 messages per answer, 365 days back,
@@ -24,6 +24,8 @@
 // while Messages or Mail has one open: new rows go to the -wal file first, which that
 // would skip. Mail answers are envelopes only (sender, subject, date, read, mailbox),
 // never message bodies: the index doesn't hold them, and Scout reads a body through Mail.
+// mail_sent_to answers only whether (how often, and when last) the user sent mail to
+// one address: the phone sends only to people in Contacts or ones written to before.
 
 import Contacts
 import Darwin
@@ -582,6 +584,15 @@ func isInboxURL(_ url: String) -> Bool {
     return path.hasSuffix("/inbox")
 }
 
+/// An account's sent mail: a mailbox URL whose last path part names a sent folder
+/// ("Sent Messages" iCloud, "[Gmail]/Sent Mail", "Sent Items" Exchange, "Sent").
+func isSentURL(_ url: String) -> Bool {
+    var path = (url.removingPercentEncoding ?? url).lowercased()
+    while path.hasSuffix("/") { path.removeLast() }
+    let last = path.split(separator: "/").last.map(String.init) ?? ""
+    return ["sent", "sent messages", "sent mail", "sent items"].contains(last)
+}
+
 final class MailIndex {
     let db: Database
     let schema: MailSchema
@@ -627,6 +638,44 @@ final class MailIndex {
         if s.hasPrefix { s.notes.append("subjects include messages.subject_prefix") }
         if s.hasLabels { s.notes.append("inbox includes labels (Gmail)") }
         return s
+    }
+
+    /// Whether the user has sent mail to `address` (to, cc or bcc; any case): how many
+    /// messages in a sent mailbox (its own, or a Gmail label) list it, and the newest
+    /// one's date. Needs the recipients table, which the inbox lookups don't.
+    func sentTo(_ address: String) throws -> (count: Int, last: Int64) {
+        let rcols = try MailIndex.columns(db, "recipients")
+        guard rcols.contains("message"), rcols.contains("address") else {
+            throw Failure(code: "schema", message: "Mail's index lacks recipients.message, recipients.address")
+        }
+        var sent: [Int64] = []
+        try db.rows("SELECT ROWID, COALESCE(url, '') FROM mailboxes", []) { st in
+            if isSentURL(columnText(st, 1)) { sent.append(sqlite3_column_int64(st, 0)) }
+            return true
+        }
+        if sent.isEmpty { return (0, 0) }
+        let ids = sent.sorted().map { Bind.int($0) }
+        let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        var inSent = "(m.mailbox IN (\(marks))"
+        var binds = [Bind.text(address)] + ids
+        if schema.hasLabels {
+            inSent += " OR m.ROWID IN (SELECT message_id FROM labels WHERE mailbox_id IN (\(marks)))"
+            binds += ids
+        }
+        inSent += ")" + (schema.hasDeleted ? " AND COALESCE(m.deleted, 0) = 0" : "")
+        let sql = """
+            SELECT COUNT(DISTINCT m.ROWID), COALESCE(MAX(m.date_received), 0)
+            FROM addresses a
+            JOIN recipients r ON r.address = a.ROWID
+            JOIN messages m ON m.ROWID = r.message
+            WHERE a.address = ? COLLATE NOCASE AND \(inSent)
+            """
+        var out: (count: Int, last: Int64) = (0, 0)
+        try db.rows(sql, binds) { st in
+            out = (Int(sqlite3_column_int64(st, 0)), sqlite3_column_int64(st, 1))
+            return false
+        }
+        return out
     }
 
     /// Inbox mailboxes: ROWID to URL.
@@ -809,6 +858,7 @@ let allowedArgs: [String: Set<String>] = [
     "mail_status": [],
     "mail_recent": ["limit", "unread_only", "since_days"],
     "mail_search": ["text", "limit", "since_days"],
+    "mail_sent_to": ["address"],
 ]
 
 /// Read access to one file, re-checked in a fresh process while it's missing (a grant
@@ -974,7 +1024,14 @@ final class Server {
             throw Failure(code: "schema", message: "Mail's index lacks " + index.schema.missing.joined(separator: ", "))
         }
         var answer: [String: Any]
-        if op == "mail_recent" {
+        if op == "mail_sent_to" {
+            let address = try textArg(args, "address", max: 320)
+            guard address.contains("@"), !address.contains(where: { $0 == " " || $0 == "," }) else {
+                throw Failure(code: "bad_request", message: "address must be one email address")
+            }
+            let r = try index.sentTo(address)
+            answer = ["sent": r.count, "last": r.last > 0 ? isoLocal(Date(timeIntervalSince1970: Double(r.last))) : ""]
+        } else if op == "mail_recent" {
             let limit = try intArg(args, "limit", default: 10, max: maxLimit)
             let days = try intArg(args, "since_days", default: 30, max: maxDays)
             let unread = try boolArg(args, "unread_only")

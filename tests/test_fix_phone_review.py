@@ -318,15 +318,25 @@ def test_reports_are_kept_only_for_verified_calls(paired: Paired, tmp_path: Path
     assert len(ledger.rows(0)) == 3  # the ledger still counts every call
 
 
-# --- 12: no mail drafts by phone; one-step writes are said so -----------------------------
+# --- 12: mail drafts by phone are saved with no window; one-step writes are said so ------
 
 
-def test_mail_draft_is_not_a_phone_tool() -> None:
-    assert "mail_draft" not in {t.name for t in ps.PHONE_TOOLS}
-    assert "one step" in ps.PROMPT and "draft" not in ps.PROMPT.split("You can never")[0]
+def test_mail_draft_by_phone_opens_no_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scout import mail_mac, mail_phone
+
+    assert "mail_draft" in {t.name for t in ps.PHONE_TOOLS} and "one step" in ps.PROMPT
+    composed: list[tuple[str, ...]] = []
+
+    async def fake(script: str, *args: str, timeout: float = 30.0) -> str:
+        composed.append(args)
+        return '{"drafted": true}'
+
+    monkeypatch.setattr(mail_mac, "_jxa", fake)
+    mail_phone.reset()
 
     async def go() -> dict[str, Any]:
-        return await make().a.run_shared_tool(PHONE, "mail_draft", {"to": ["a@example.com"]})
+        return await make().a.run_shared_tool(PHONE, "mail_draft", {"to": ["a@example.com"], "body": "Hi."})
 
     out = run(go())
-    assert out["status"] == "error" and "phone" in out["error"]
+    assert out["status"] == "ok" and "Drafts" in out["text"]
+    assert composed == [("save", "a@example.com", "", "", "Hi.")]  # "save": no window

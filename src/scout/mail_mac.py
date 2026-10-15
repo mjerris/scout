@@ -350,6 +350,9 @@ function run(argv) {
 }
 """
 
+# mode: "draft" saves it to Drafts and opens it in a window (the room and desk sessions:
+# the user reviews it there); "save" saves it to Drafts with no window (the phone: nobody
+# is at the Mac to see one); "send" sends it.
 _COMPOSE = r"""
 function run(argv) {
   const [mode, to, cc, subject, body] = argv;
@@ -991,6 +994,14 @@ async def draft(a: dict[str, Any], run: Runner = _jxa) -> str:
     to, cc, subject, body = _message(await _named_recipients(a, resolve=True))
     await _call(run, _COMPOSE, "draft", ",".join(to), ",".join(cc), subject, body)
     return f"Draft to {', '.join(to)} saved in Mail and opened for review; nothing was sent."
+
+
+async def save_draft(a: dict[str, Any], run: Runner | None = None) -> list[str]:
+    """Save a message in Mail's Drafts without opening a window (the phone); its to.
+    Recipients must be addresses already. Sends nothing."""
+    to, cc, subject, body = _message(a)
+    await _call(run or _jxa, _COMPOSE, "save", ",".join(to), ",".join(cc), subject, body)
+    return to
 
 
 async def send(a: dict[str, Any], run: Runner = _jxa) -> str:

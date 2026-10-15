@@ -14,7 +14,7 @@ SWML fetch checks them (phone_devices.CallCheck) and binds the call_id to the de
 A call that fails gets no agent: a short goodbye and a hangup. Every tool call checks
 that its call_id is bound to a verified, still-paired device.
 
-Tools: Scout's shared tools that never ask (not mail_send or mail_draft), forwarded to
+Tools: Scout's shared tools that never ask (mail_draft saves to Drafts, no window), forwarded to
 the running app's local API (POST /api/tool, agent "phone"), so trust, privacy and the
 audit log apply as at home; and ask_scout, which sends anything else to Scout's own tiers
 (POST /api/ask) and returns the answer as text, never spoken in the room. Those calls
@@ -84,17 +84,53 @@ ASK_TIMEOUT_S = 40.0  # Scout itself answers within 20 s ("still working" after 
 REFUSED = "This call isn't verified, so I can't do that."
 GOODBYE = "Sorry, this phone isn't paired with Scout. Goodbye."
 
-# Never by phone: sending mail, and drafting it (that opens a window on the Mac).
-NOT_BY_PHONE = ("mail_send", "mail_draft")
 # Tools that never ask, in one step. Most only read; note_add, task_add, task_done,
 # task_update, remember and phone_timer change Scout's own notes, tasks, memory and Scout
-# reminder list (task_done also ticks off its reminder).
+# reminder list (task_done also ticks off its reminder); mail_draft saves a message in
+# Mail's Drafts with no window (mail_phone.py), sending nothing.
 _ALL = (*shared_tools.SHARED, *shared_tools.NOT_DESK)
-PHONE_TOOLS = tuple(t for t in _ALL if not t.asks and t.name not in NOT_BY_PHONE)
+PHONE_TOOLS = tuple(t for t in _ALL if not t.asks)
 # Actions that change something: two steps by phone (prepare, then confirm_action after
 # the caller's yes, which a SignalWire semantic gate checks): reminders, events, deleting a
-# note, forgetting facts, Slack, asking a Claude session. Never email.
-PHONE_ACTIONS = tuple(t for t in _ALL if t.asks and t.name not in NOT_BY_PHONE)
+# note, forgetting facts, Slack, email (mail_phone.py's rules), asking a Claude session.
+PHONE_ACTIONS = tuple(t for t in _ALL if t.asks)
+# Email by phone: To only (at most 3), no Cc; reply_to replies to an inbox message.
+_PHONE_COMPOSE = {
+    "type": "object",
+    "properties": {
+        "to": {"type": "array", "items": {"type": "string"}},
+        "subject": {"type": "string"},
+        "body": {"type": "string"},
+        "reply_to": {"type": "integer"},
+    },
+}
+_PHONE_MAIL = {
+    "mail_draft": (
+        "Save an email in the user's Drafts in Mail (no window opens; nothing is sent), for "
+        "them to look over later. to: 1 to 3 email addresses or names from Contacts, no Cc. "
+        "reply_to: an inbox message id (from mail_recent or mail_search) to reply to: it goes "
+        "to that sender with the thread's subject. Then tell the user: I left it in your Drafts "
+        "to look over."
+    ),
+    "mail_send": (
+        "Send a short email from the user. to: 1 to 3 email addresses or names from Contacts, "
+        "each one the user said (no Cc, no attachments); only people in their Contacts or "
+        "ones they've emailed before. reply_to: an inbox message id to reply to (its sender "
+        "and subject are used). A message longer than a few sentences isn't sent: it's left "
+        "in Drafts."
+    ),
+}
+
+
+def schema_of(t: shared_tools.SharedTool) -> dict[str, Any]:
+    """A tool's parameters by phone (email's are narrower)."""
+    return _PHONE_COMPOSE if t.name in _PHONE_MAIL else t.schema
+
+
+def description_of(t: shared_tools.SharedTool) -> str:
+    return _PHONE_MAIL.get(t.name, t.description)
+
+
 ACTION_TTL_S = 180.0  # a prepared action must be confirmed within this
 # A confirm answers within this; SignalWire re-sends a tool call after about 10 s, and
 # the re-send joins the running action instead of doing it again.
@@ -109,6 +145,7 @@ STILL_GOING = {
         "Sent, and waiting for that session's reply. Tell the user it's asked; the reply will "
         "be sent to you when it comes: don't ask again."
     ),
+    "mail_send": "That's still going, so it may have been sent. Tell the user; don't send it again.",
 }
 ACT_TIMEOUT_S = {"session_ask": 60.0}  # the send plus the wait for the reply (default 30 s)
 REPLY_FOLLOW_S = 600.0  # a call keeps waiting this long for a Claude session's reply
@@ -155,8 +192,13 @@ Adding calendar events or reminders, completing reminders and deleting notes tak
 steps: the tool says what it would do; read that back, and only after the user clearly
 says yes, call confirm_action with its code. Saving a note and adding, finishing or
 changing a task are done in one step (they're Scout's own lists): be sure what the user
-wants before calling them. You can never send or draft email from the phone. A Slack
-message is slack_draft first, then slack_send, in the two steps like the others.
+wants before calling them. A Slack message is slack_draft first, then slack_send, in the
+two steps like the others.
+Email: mail_send takes the two steps: read back each address exactly, the subject and the
+message in one sentence, then confirm_action only after a clear yes. Only addresses the
+user said (at most three, no Cc), people in their Contacts or ones they've emailed before.
+A longer message goes to their Drafts instead: say "I left it in your Drafts to look over."
+mail_draft saves to Drafts in one step. A reply (reply_to) keeps the thread's subject.
 Questions about people or things the user may have told Scout before ("how tall is Brian",
 "what's my dentist's name", "what did I tell you about the trailer") go to ask_scout: Scout
 keeps what the user told it, on calls too; never say you don't know before asking it. When
@@ -486,16 +528,16 @@ class PhoneAgent(AgentBase):
         for t in PHONE_TOOLS:
             agent.define_tool(
                 t.name,
-                t.description,
-                t.schema,
+                description_of(t),
+                schema_of(t),
                 self._tool_handler(t.name),
                 fillers={"default": progress.fillers(t.name)},
             )
         for t in PHONE_ACTIONS:
             agent.define_tool(
                 t.name,
-                t.description + TWO_STEPS,
-                t.schema,
+                description_of(t) + TWO_STEPS,
+                schema_of(t),
                 self._prepare_handler(t.name),
                 fillers={"default": ["One moment."]},
             )
@@ -619,9 +661,11 @@ class PhoneAgent(AgentBase):
             r = await self.scout(
                 "/api/tool", {"agent": AGENT, "name": name, "args": clean, "preview": True}, 10.0
             )
-            if r.get("status") != "ok":
+            if r.get("status") != "ok" or r.get("final"):  # final: done without a yes (a draft)
                 return FunctionResult(tool_text(r))
             said = str(r.get("text") or name)
+            if isinstance(r.get("args"), dict):  # what the read-back names (an address, not "Pat")
+                clean = r["args"]
             now = time.time()
             for c in [c for c, (*_, at) in self._pending.items() if now - at > ACTION_TTL_S]:
                 del self._pending[c]

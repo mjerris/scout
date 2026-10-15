@@ -36,8 +36,33 @@ call), since a confirmed call skips the room's spoken yes.
 | One-step writes to Scout's own lists (`note_add`, `task_add`, `task_done`, `task_update`, `remember`, `phone_timer`) | Done at once, like at home (`task_done` also ticks off the task's reminder; `remember` keeps a fact in Scout's memory; `phone_timer` is a reminder in the Scout list, due in N minutes, so it rings on the phone); the prompt tells the agent to be sure what the user wants first |
 | The user's Claude Code sessions (`sessions_list`, `session_replies`) | Read-only: which sessions are running (name, folder, busy or idle), and their replies to what Scout asked (see "Claude sessions") |
 | `ask_scout(request)` | Anything that needs Scout's own brain (memories, earlier conversations, Claude): Scout's tiers 0/1/Claude answer it as text (tier 1 answers what's in Scout's records itself: recall.py) |
-| Action tools (reminder add/complete, calendar event, note delete, Slack send, `forget`, `session_ask`) | Two steps: the first call returns what would happen (every field it will write; a note by its title) and a one-time code, and puts both in `semantic_state` (`pending_action`, `pending_code`); the agent reads it back; `confirm_action(code)` does it, behind a semantic gate that checks the caller's own yes in the conversation and that the code is `pending_code` (threshold 0.9). A call has one pending action: preparing another replaces it, and hanging up drops it. A confirm answers within 8 s; a re-send joins the running action, and one that's still going says it may have been done, so the agent checks before trying again |
-| Never by phone | sending email, or drafting it (that opens a window on the Mac) |
+| Action tools (reminder add/complete, calendar event, note delete, Slack send, email send, `forget`, `session_ask`) | Two steps: the first call returns what would happen (every field it will write; a note by its title) and a one-time code, and puts both in `semantic_state` (`pending_action`, `pending_code`); the agent reads it back; `confirm_action(code)` does it, behind a semantic gate that checks the caller's own yes in the conversation and that the code is `pending_code` (threshold 0.9). A call has one pending action: preparing another replaces it, and hanging up drops it. A confirm answers within 8 s; a re-send joins the running action, and one that's still going says it may have been done, so the agent checks before trying again |
+| Email (`mail_draft`, `mail_send`) | `mail_draft` saves to Drafts in one step, with no window on the Mac; `mail_send` is an action tool, with the limits in "Email by phone" |
+
+**Email by phone** (`mail_phone.py`; the app runs these for agent `phone` instead of the
+room's versions). The phone's tools take `to` (1 to 3), `subject`, `body` and `reply_to`
+(an inbox message id); there is no `cc`, and Cc, Bcc or attachments are refused.
+
+- `mail_draft` saves the message in Mail's Drafts with no window (JXA `visible: false`,
+  then `save`): nobody is at the Mac to see one. Names resolve through Contacts. One step:
+  it sends nothing.
+- `mail_send`, step one (the preview): names resolve to their address in Contacts; each
+  address must be in Contacts or one the user has sent mail to (`mail_sent_to` on Mail's
+  index through scout-messages: a message in a sent mailbox, or with a Gmail Sent label,
+  that lists it in To, Cc or Bcc). An address neither can vouch for is refused, also when
+  Contacts or the helper can't answer; the agent offers Drafts instead. The read-back has
+  each exact address, the subject and the body; the agent says the body in one sentence.
+  The resolved addresses are what the code confirms, so the yes is to an address, not "Pat".
+- A body over 400 characters or 4 sentences (about half a minute aloud) isn't sent by
+  phone: step one saves it to Drafts instead and hands out no code; the agent says "I
+  left it in your Drafts to look over."
+- `reply_to`: the reply goes to that message's sender with its subject ("Re: ..."); the
+  sender must pass the same check. Only the headers are read; the original's text isn't
+  returned.
+- Step two (`confirm_action`) checks it all again and sends once: the code is single-use,
+  and the same message (recipients, subject, body) isn't sent again within 10 minutes,
+  even if Mail failed (it may have sent it anyway). The same draft is saved once too
+  (SignalWire re-sends a slow tool call).
 
 Long answers: each lookup runs in the background. A tool call that has its answer
 within 2 s returns it (the calendar, weather); otherwise it returns at once, the agent
@@ -116,7 +141,7 @@ session. Not built: messaging sessions on other machines (Remote Control) or in 
 | Add events and reminders, finish reminders, delete notes, send Slack | spoken yes | two steps | spoken yes in the room |
 | Voice: speak to the user and hear the reply | it is the voice | it is the call | `discuss`, `voice_status` |
 | Save notes; add, finish, change tasks | yes | yes (one step) | yes |
-| Send or draft email | spoken yes (send) | never | spoken yes in the room (send) |
+| Send or draft email | spoken yes (send); a draft opens in Mail | two steps (send), to known people, short; a draft is saved to Drafts with no window | spoken yes in the room (send) |
 | Remember a fact | yes (`remember`) | yes (`remember`, one step) | no (`note_add` saves a note) |
 | Forget facts | yes (`forget`) | two steps | no |
 | Recall facts, earlier conversations | yes | `ask_scout` (Scout's memory, tiers, Claude) | `local_search` |
