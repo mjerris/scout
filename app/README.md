@@ -35,6 +35,8 @@ open `ios/Scout.xcworkspace`, pick your signing team, and run on the device.
   Recents say "Scout", not the agent's address.
 - `vendor/patches/03-…`: Bluetooth and earpiece routes on iOS (route failures were
   unhandled rejections; "Phone" couldn't take a call off Bluetooth).
+- `vendor/patches/04-…`: the audio-session fallback timer is cleared once CallKit
+  activates the session.
 - `patches/react-native-incall-manager+4.2.2.patch` (patch-package, applied on install):
   iOS `chooseAudioRoute`, `getAudioDeviceStatus` and the `onAudioDeviceChanged` event,
   which until now were Android-only.

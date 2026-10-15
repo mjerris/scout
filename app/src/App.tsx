@@ -1,8 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { getCallKit } from '@signalwire/react-native/callkit';
-import RNCallKeep from 'react-native-callkeep';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { CallPanel } from './CallPanel';
@@ -84,23 +82,9 @@ function Main() {
 
 function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void }) {
   const t = useTheme();
-  const [request, setRequest] = useState(0);
-
-  // "Scout" in the Phone app's Recents (or Siri) asks CallKit to start a call; callkeep
-  // passes it on as didReceiveStartCallAction. CallKit also reports the calls this app
-  // starts itself that way, with their uuid: those are already ours.
-  useEffect(() => {
-    const sub = RNCallKeep.addEventListener('didReceiveStartCallAction', (e: { callUUID?: string }) => {
-      if (e.callUUID && getCallKit().registry.entryForUuid(e.callUUID)) return;
-      setRequest((n) => n + 1);
-    });
-    if (testFlags.call) setRequest((n) => n + 1);
-    return () => sub.remove();
-  }, []);
-
   return (
     <>
-    <CallPanel pairing={pairing} request={request} />
+    <CallPanel pairing={pairing} />
     <Section title="Paired">
       <Text style={{ color: t.ink }} testID="paired">
         {pairing.name} ({pairing.device}), calling {pairing.address}
