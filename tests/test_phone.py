@@ -103,23 +103,18 @@ def test_pair_list_forget(tmp_path: Path) -> None:
     assert phone_devices.forget(device, path) and not phone_devices.forget("dnope", path)
     stored = phone_devices.load_devices(path)[device]
     assert stored["revoked"] is True and stored["secret"] == ""
-    p = phone_devices.payload(device, secret, "")
-    assert (
-        p["device"] == device and p["secret"] == secret and p["address"] == phone_devices.ADDRESS_PLACEHOLDER
-    )
 
 
-def test_scoutctl_pair_prints_json(
+def test_scoutctl_list_and_forget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(phone_devices, "PATH", tmp_path / "devices.json")
-    assert phone_devices.main(["pair", "Test", "phone"]) == 0
-    out = capsys.readouterr().out
-    data = json.loads(next(line for line in out.splitlines() if line.startswith("{")))
-    assert set(data) >= {"device", "secret", "address"}
+    path = tmp_path / "devices.json"
+    monkeypatch.setattr(phone_devices, "PATH", path)
+    device, _ = phone_devices.pair("Test phone", path)
     assert phone_devices.main(["list"]) == 0 and "Test phone" in capsys.readouterr().out
-    assert phone_devices.main(["forget", data["device"]]) == 0
-    assert phone_devices.main(["bogus"]) == 2
+    assert phone_devices.main(["forget", device]) == 0
+    assert phone_devices.main(["forget", device + "x"]) == 1
+    assert phone_devices.main(["pair", "a", "name"]) == 2  # the phone names itself now
 
 
 # --- the per-call check -------------------------------------------------------------------

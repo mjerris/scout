@@ -176,6 +176,47 @@
     await teardown();
   }
 
+  // "Pair the phone app": a one-time code as a scout://pair link and QR code (made by
+  // Scout, never carrying the web token), with a countdown to its expiry.
+  let codeTimer = null;
+  async function newCode() {
+    const btn = $("app-new-code");
+    btn.disabled = true;
+    $("app-warning").textContent = "";
+    try {
+      const c = await postJSON("/api/phone/pair-code", {});
+      $("app-qr").src = c.qr;
+      $("app-qr").hidden = false;
+      $("app-code").textContent = c.code;
+      $("app-link").textContent = c.link;
+      $("app-link").href = c.link;
+      $("app-warning").textContent = c.warning || "";
+      btn.textContent = "New code";
+      clearInterval(codeTimer);
+      const tick = () => {
+        const left = Math.round(c.expires_at - Date.now() / 1000);
+        if (left <= 0) {
+          clearInterval(codeTimer);
+          $("app-qr").hidden = true;
+          $("app-code").textContent = "";
+          $("app-link").textContent = "";
+          $("app-countdown").textContent = "That code expired. Make a new one.";
+          return;
+        }
+        const m = Math.floor(left / 60);
+        const s = String(left % 60).padStart(2, "0");
+        $("app-countdown").textContent = `Works once, for ${m}:${s} more.`;
+      };
+      tick();
+      codeTimer = setInterval(tick, 1000);
+    } catch (e) {
+      $("app-warning").textContent = String((e && e.message) || e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  $("app-new-code").addEventListener("click", newCode);
+
   $("pair").addEventListener("click", pair);
   $("name").addEventListener("keydown", (e) => {
     if (e.key === "Enter") pair();

@@ -88,6 +88,7 @@ PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch
 # A Claude turn says its progress line ("One moment.") no sooner than this after the turn
 # began, unless a tool call has started: a quick answer would otherwise wait behind it.
 CLAUDE_PROGRESS_S = 3.0
+PAIR_APPROVE_S = 120.0  # a phone asking to pair waits this long for a yes
 SHARED_FLOOR_WAIT_S = 60.0  # a session's tool question waits this long for the floor
 
 
@@ -1481,10 +1482,15 @@ class Assistant:
             self._room_command(text, out["mini"], out["client"])
 
     async def _confirm(
-        self, spoken: str, description: str, out: dict[str, Any] | None = None
+        self,
+        spoken: str,
+        description: str,
+        out: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered.
-        `out`: where to ask (default: where the current turn's replies go)."""
+        `out`: where to ask (default: where the current turn's replies go); `timeout`:
+        how long to wait for the answer (default [claude] confirm_timeout_s)."""
         gen = self._confirm_gen
         if self._confirm_waiting >= 5:  # a runaway fan-out of tool calls: don't queue forever
             return False
@@ -1493,12 +1499,16 @@ class Assistant:
             async with self._confirm_lock:
                 if gen != self._confirm_gen:
                     return False  # the user said stop while this one was waiting its turn
-                return await self._confirm_one(spoken, description, out)
+                return await self._confirm_one(spoken, description, out, timeout)
         finally:
             self._confirm_waiting -= 1
 
     async def _confirm_one(
-        self, spoken: str, description: str, out: dict[str, Any] | None = None
+        self,
+        spoken: str,
+        description: str,
+        out: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> bool | str | None:
         if self._silence_turn and out is None:  # the room turn was stopped; don't ask about its tools
             return False
@@ -1524,7 +1534,7 @@ class Assistant:
                 # An answer begun over the question counts from when it began.
                 self._confirm_started = (barged - 0.2) if barged else time.monotonic()
             try:
-                ok = await asyncio.wait_for(fut, self.cfg.claude.confirm_timeout_s)
+                ok = await asyncio.wait_for(fut, timeout or self.cfg.claude.confirm_timeout_s)
             except TimeoutError:
                 ok = None
                 if out["mini"]:
@@ -1624,6 +1634,24 @@ class Assistant:
         except Exception as exc:  # report it to the caller; don't take the app down
             log.exception("shared tool %s failed", name)
             return {"status": "error", "error": f"failed: {exc}"}
+
+    async def approve_pairing(self, name: str, match: str) -> bool | None:
+        """Ask the room whether the phone `name` may pair (phone_pairing.PairRequests):
+        spoken, and on the web UI with Approve and Deny. The phone shows the same `match`
+        number. True for yes, False for no, None if nobody answered in two minutes."""
+        who = "pairing"
+        if not await self.floor.acquire(who, SHARED_FLOOR_WAIT_S, cancel=self._stop_event):
+            return None
+        try:
+            answer = await self._confirm(
+                f"{name} wants to pair with Scout, code {match}. Should I allow it?",
+                f"Pair the phone {name!r} with Scout? It shows the code {match}.",
+                {"mini": True, "client": None},
+                timeout=PAIR_APPROVE_S,
+            )
+        finally:
+            self.floor.release(who)
+        return None if answer is None else bool(answer)
 
     # --- requests from the phone ---------------------------------------------------------
 

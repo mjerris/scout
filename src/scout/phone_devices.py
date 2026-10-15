@@ -1,7 +1,7 @@
 """Phones paired with Scout, and the check each call from one must pass.
 
-A paired phone holds a device id and a 32-byte secret it got once, at home, from a
-pairing payload (QR code). Each call it makes carries, in its userVariables,
+A paired phone holds a device id and a 32-byte secret it got once, when it paired
+(phone_pairing.py: a one-time code from a QR code, or a yes in the room). Each call it makes carries, in its userVariables,
 
     {device, ts, nonce, sig}   sig = hex(HMAC-SHA256(key, f"{device}|{ts}|{nonce}|{address}"))
 
@@ -11,7 +11,8 @@ fresh per call, and address is the agent address the app dialed ([phone] address
 The registry is state/phone_devices.json (mode 0600, this user only):
     {device_id: {name, secret, paired_at, revoked}}
 Forgetting a device deletes its secret and marks it revoked, so a lost phone stops
-working at once. Manage it with `scoutctl phone pair <name> | list | forget <device>`.
+working at once. Manage it with `scoutctl phone pair | list | forget <device>` (pair
+shows a one-time pairing code).
 """
 
 from __future__ import annotations
@@ -31,10 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import DATA, load
+from .config import DATA
 
 PATH = DATA / "state" / "phone_devices.json"
-ADDRESS_PLACEHOLDER = "<the agent's address; set [phone] address>"
 _DEVICE = re.compile(r"[A-Za-z0-9_-]{4,64}")
 _NONCE = re.compile(r"[A-Za-z0-9_-]{8,128}")
 _lock = threading.Lock()
@@ -71,7 +71,7 @@ def pair(name: str, path: Path | None = None) -> tuple[str, str]:
     """Add a device: (device_id, secret as base64url without padding)."""
     name = " ".join(name.split())
     if not name:
-        raise ValueError("give the phone a name, e.g. scoutctl phone pair 'Mike iPhone'")
+        raise ValueError("give the phone a name, e.g. 'Mike iPhone'")
     device = "d" + secrets.token_hex(8)
     secret = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
     with _lock:
@@ -104,17 +104,6 @@ def listing(path: Path | None = None) -> list[dict[str, Any]]:
         }
         for k, v in load_devices(path).items()
     ]
-
-
-def payload(device: str, secret: str, address: str) -> dict[str, Any]:
-    """What the app stores at pairing (the QR code carries it as JSON)."""
-    return {
-        "v": 1,
-        "device": device,
-        "secret": secret,
-        "address": address or ADDRESS_PLACEHOLDER,
-        "sig": "hex HMAC-SHA256(key=base64url-decoded secret, msg=device|ts|nonce|address), ts in Unix seconds",
-    }
 
 
 def _key(secret: str) -> bytes:
@@ -206,25 +195,32 @@ class CallCheck:
 # --- scoutctl phone ...  ----------------------------------------------------------------
 
 
-def _qr(text: str) -> None:
-    try:
-        import segno
-    except ImportError:
-        return
-    segno.make(text, error="m").terminal(compact=True)
+def _pair_code() -> int:
+    """Mint a one-time pairing code and show it as a scout://pair link and QR code."""
+    from . import links, phone_pairing
+
+    server = links.web_base(refresh=True)
+    code, expires_at = phone_pairing.mint()
+    url = phone_pairing.link(server, code)
+    if not server.startswith("https://"):
+        print(
+            f"Scout's address here is {server or 'unknown'}, but the app needs its https Tailscale name:"
+            " turn on Tailscale Serve (scripts/tailscale.sh enable) or set [web] public_url.",
+            file=sys.stderr,
+        )
+    print("Scan this with the iPhone Camera and tap the Scout banner, or type the code in the app.")
+    phone_pairing.print_qr(url)
+    print(url)
+    until = time.strftime("%H:%M", time.localtime(expires_at))
+    print(f"Code {code} for {server}: works once, until {until}.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     cmd = args[0] if args else ""
-    if cmd == "pair" and len(args) >= 2:
-        device, secret = pair(" ".join(args[1:]))
-        data = json.dumps(payload(device, secret, load().phone.address), separators=(",", ":"))
-        print("Scan this with the Scout app. It holds the phone's secret: don't share or save it.")
-        _qr(data)
-        print(data)
-        print(f"paired {device}; `scoutctl phone forget {device}` revokes it")
-        return 0
+    if cmd == "pair" and len(args) == 1:
+        return _pair_code()
     if cmd == "list" and len(args) == 1:
         for d in listing():
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(d["paired_at"] or 0))
@@ -236,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(f"no paired device {args[1]!r} (see scoutctl phone list)", file=sys.stderr)
         return 1
-    print("usage: scoutctl phone pair <name> | list | forget <device>", file=sys.stderr)
+    print("usage: scoutctl phone pair | list | forget <device>", file=sys.stderr)
     return 2
 
 

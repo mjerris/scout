@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import WSCloseCode, WSMsgType, web
 
-from . import phone_devices
+from . import phone_devices, phone_pairing
 from .audio import SAMPLE_RATE, decode_to_pcm
 from .config import DATA, PhoneConfig, WebConfig
 
@@ -53,6 +53,8 @@ PENDING_SECONDS = 120.0  # reply audio kept for a page that is reconnecting
 PENDING_MAX = 40
 REFRESH_SECONDS = 1.0  # how often the floor/state shown on pages is rechecked
 REBIND_SECONDS = 30.0  # how often the lan/tailscale addresses are rechecked
+ADVERTISE_SECONDS = 60.0  # how often the Bonjour advertisement follows Scout's address
+DNS_SD = "/usr/bin/dns-sd"  # macOS's own; it asks mDNSResponder to advertise
 SW_TOKEN_TTL_S = 3600  # a subscriber token minted for the /phone test page lasts this long
 SW_TIMEOUT_S = 15.0
 _SPACE = re.compile(
@@ -129,6 +131,8 @@ class VoiceApp(Protocol):
 
     def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> object: ...
 
+    async def approve_pairing(self, name: str, match: str) -> bool | None: ...
+
     def remove_rule(self, rule_id: str) -> object: ...
 
     async def stop(self) -> None: ...
@@ -167,6 +171,14 @@ def token_ok(given: str, token: str) -> bool:
     if not given or len(token) < _MIN_TOKEN_LEN:
         return False
     return hmac.compare_digest(given.encode(), token.encode())  # bytes: non-ASCII input can't raise
+
+
+def _web_base() -> str:
+    """Where the phone reaches Scout (links.web_base: [web] public_url, else the Tailscale
+    Serve name)."""
+    from . import links
+
+    return links.web_base()
 
 
 def phone_ok(req: web.Request) -> bool:
@@ -385,6 +397,19 @@ def _is_loopback(req: web.Request) -> bool:
         return ipaddress.ip_address(req.remote or "").is_loopback
     except ValueError:
         return False
+
+
+_TAILNET6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")  # Tailscale's IPv6 range
+
+
+def tailnet_peer(remote: str | None) -> bool:
+    """A request from this Mac (Tailscale Serve proxies from 127.0.0.1) or the tailnet,
+    not from the home network."""
+    try:
+        ip = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return False
+    return ip.is_loopback or ip in _CGNAT or ip in _TAILNET6
 
 
 def _netloc(scheme: str, host: str) -> str:
@@ -669,6 +694,11 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
     phone_page = files.joinpath("phone.html").read_text()
     phone_js = {name: files.joinpath(name).read_text() for name in ("phone.js", "phone_sign.js")}
     hub = _Hub(assistant)
+    pair_requests = phone_pairing.PairRequests(
+        assistant.approve_pairing, lambda name: phone_devices.pair(name)
+    )
+    # A phone's signed token request: its secret over device|ts|nonce|TOKEN_PURPOSE.
+    token_check = phone_devices.CallCheck(phone_pairing.TOKEN_PURPOSE, 60.0)
 
     def authed(req: web.Request, allow_query: bool = False) -> bool:
         bearer = req.headers.get("Authorization", "")
@@ -774,44 +804,172 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         guard(req)
         return web.json_response(assistant.voice_status())
 
-    async def api_phone_pair(req: web.Request) -> web.StreamResponse:
-        """Pair a browser (the /phone test page) like `scoutctl phone pair`: the secret is
-        returned this once."""
-        guard(req)
+    def no_address() -> web.StreamResponse | None:
+        if phone.address.strip():
+            return None
+        return web.json_response(
+            {"status": "error", "error": "Set [phone] address (what the app dials) in Scout's config first."},
+            status=409,
+        )
+
+    async def json_body(req: web.Request) -> dict[str, Any]:
         if req.content_type != "application/json":  # also forces a CORS preflight
             raise web.HTTPUnsupportedMediaType(text="Send application/json.")
         try:
             b = await req.json()
-            if not isinstance(b, dict):
-                raise TypeError("the body must be a JSON object")
-            name = b.get("name")
-            if not isinstance(name, str) or not name.strip():
-                raise TypeError("name must be a non-empty string")
-            if len(name) > 64:
-                raise ValueError("name is too long (64 characters at most)")
+        except ValueError:
+            b = None
+        if not isinstance(b, dict):
+            raise TypeError("the body must be a JSON object")
+        return b
+
+    def phone_name(b: dict[str, Any]) -> str:
+        name = b.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise TypeError("name must be a non-empty string")
+        if len(name) > 64:
+            raise ValueError("name is too long (64 characters at most)")
+        return " ".join(name.split())
+
+    def refused(status: int, error: str) -> web.StreamResponse:
+        return web.json_response({"status": "error", "error": error}, status=status)
+
+    wrong_codes = phone_pairing.Limiter(limit=5, window_s=60.0)
+    new_code = "Make a new one: scoutctl phone pair, or Pair the phone app on Scout's /phone page."
+    code_refusals = {
+        "unknown": (401, f"That pairing code isn't right (or a newer one replaced it). {new_code}"),
+        "expired": (410, f"That pairing code expired (a code lasts 10 minutes). {new_code}"),
+        "used": (410, f"That pairing code was already used. {new_code}"),
+    }
+
+    async def api_phone_pair(req: web.Request) -> web.StreamResponse:
+        """Pair a phone or browser: with Scout's web token (the /phone test page), or
+        with a one-time pairing code instead of it (the app, from a scout://pair link).
+        The secret is returned this once."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        with_token = authed(req)
+        try:
+            b = await json_body(req)
+        except TypeError as exc:
+            if not with_token:
+                raise web.HTTPUnauthorized() from None
+            return refused(400, str(exc))
+        code = b.get("code")
+        if not with_token and not (isinstance(code, str) and code.strip()):
+            raise web.HTTPUnauthorized()
+        try:
+            name = phone_name(b)
         except (ValueError, TypeError) as exc:
-            return web.json_response({"status": "error", "error": str(exc)}, status=400)
-        if not phone.address.strip():
-            return web.json_response(
-                {
-                    "status": "error",
-                    "error": "Set [phone] address (what the app dials) in Scout's config first.",
-                },
-                status=409,
-            )
+            return refused(400, str(exc))
+        if (r := no_address()) is not None:
+            return r
+        if not with_token and isinstance(code, str):
+            if not wrong_codes.allowed():
+                log.warning("web: a pairing code refused: too many wrong ones")
+                return refused(429, "Too many wrong pairing codes; wait a minute and try again.")
+            verdict = await asyncio.to_thread(phone_pairing.consume, code)
+            if verdict != "ok":
+                wrong_codes.failed()
+                log.warning("web: a pairing code was refused (%s)", verdict)
+                return refused(*code_refusals[verdict])
         try:
             device, secret = await asyncio.to_thread(phone_devices.pair, name)
         except (OSError, ValueError) as exc:
             log.warning("web: pairing a browser failed: %s", exc)
             return web.json_response({"status": "error", "error": f"Couldn't pair: {exc}"}, status=500)
-        log.info("web: paired %s (%s) from the /phone page", device, " ".join(name.split()))
+        how = "with the web token" if with_token else "with a pairing code"
+        log.info("web: paired %s (%s) %s", device, name, how)
         resp = web.json_response({"device": device, "secret": secret, "address": phone.address})
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
-    async def api_phone_token(req: web.Request) -> web.StreamResponse:
-        """A short-lived SignalWire subscriber token for the /phone page."""
+    async def api_phone_pair_code(req: web.Request) -> web.StreamResponse:
+        """A one-time pairing code for the app, with its scout://pair link and QR code
+        (the /phone page's "Pair the phone app"). The web token is in none of them."""
         guard(req)
+        server = await asyncio.to_thread(_web_base)
+        code, expires_at = await asyncio.to_thread(phone_pairing.mint)
+        link = phone_pairing.link(server, code)
+        warning = (
+            ""
+            if server.startswith("https://")
+            else f"Scout's address here is {server or 'unknown'}, but the app needs its https Tailscale"
+            " name: turn on Tailscale Serve (scripts/tailscale.sh enable) or set [web] public_url."
+        )
+        log.info("web: a pairing code was made on the web UI")
+        resp = web.json_response(
+            {
+                "code": code,
+                "link": link,
+                "server": server,
+                "expires_at": expires_at,
+                "ttl_s": int(phone_pairing.TTL_S),
+                "qr": phone_pairing.qr_svg_data_uri(link),
+                "warning": warning,
+            }
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def api_phone_pair_request(req: web.Request) -> web.StreamResponse:
+        """A phone asks to pair without a code; the room approves it by voice (or on the
+        web UI). Only from the tailnet."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        if not tailnet_peer(req.remote):
+            raise web.HTTPForbidden(text="Pairing requests come over Tailscale only.")
+        try:
+            name = phone_name(await json_body(req))
+        except (ValueError, TypeError) as exc:
+            return refused(400, str(exc))
+        if (r := no_address()) is not None:
+            return r
+        try:
+            started = pair_requests.start(name)
+        except phone_pairing.PairRefused as exc:
+            log.warning("web: a pairing request from %r refused: %s", name, exc)
+            return refused(exc.status, str(exc))
+        resp = web.json_response(started)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def api_phone_pair_status(req: web.Request) -> web.StreamResponse:
+        """Where a pairing request stands (waits up to `wait` seconds for the answer); the
+        secret comes back once, when the room said yes."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            rid = b.get("request")
+            if not isinstance(rid, str):
+                raise TypeError("request must be a string")
+            wait = _number(b.get("wait"), 0.0, 25.0)
+        except (ValueError, TypeError) as exc:
+            return refused(400, str(exc))
+        got = await pair_requests.status(rid, wait)
+        if got.get("status") == "approved":
+            got["address"] = phone.address
+        resp = web.json_response(got)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def api_phone_token(req: web.Request) -> web.StreamResponse:
+        """A short-lived SignalWire subscriber token: for the /phone page (the web token),
+        or for a paired phone, which signs the request with its device secret."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        if not authed(req):
+            if req.content_type != "application/json":
+                raise web.HTTPUnauthorized()
+            try:
+                b = await json_body(req)
+            except TypeError:
+                raise web.HTTPUnauthorized() from None
+            verdict = token_check.check(b)
+            if not verdict.ok:
+                log.warning("web: a phone's token request refused: %s", verdict.reason)
+                raise web.HTTPUnauthorized()
         try:
             minted = await mint_subscriber_token(phone)
         except PhoneTokenError as exc:
@@ -1027,6 +1185,9 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.get("/ref/{book}/{path:.+}", reference_page),
             web.get(r"/phone/{name:phone(?:_sign)?\.js}", phone_script),
             web.post("/api/phone/pair", api_phone_pair),
+            web.post("/api/phone/pair-code", api_phone_pair_code),
+            web.post("/api/phone/pair/request", api_phone_pair_request),
+            web.post("/api/phone/pair/status", api_phone_pair_status),
             web.post("/api/phone/token", api_phone_token),
         ]
     )
@@ -1071,9 +1232,25 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
 
     rebind_task: list[asyncio.Task[Any]] = []
 
+    advertiser: list[phone_pairing.Advertiser] = []
+
+    async def advertise() -> None:
+        """Bonjour: _scout._tcp with Scout's https address, so the app finds it."""
+        ad = phone_pairing.Advertiser(DNS_SD, cfg.port, socket.gethostname().split(".")[0] or "Mac")
+        advertiser.append(ad)
+        while True:
+            try:
+                await ad.update(await asyncio.to_thread(_web_base))
+            except Exception:
+                log.exception("bonjour: updating the advertisement failed")
+            await asyncio.sleep(ADVERTISE_SECONDS)
+
     async def cleanup(_app: web.Application) -> None:
         for t in rebind_task:
             t.cancel()
+        for ad in advertiser:
+            await ad.close()
+        await pair_requests.close()
         await hub.close()
 
     app.on_shutdown.append(close_pages)
@@ -1090,6 +1267,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         log.info("web: bound %s", runner.addresses)
     else:
         rebind_task.append(asyncio.create_task(rebind()))
+        if Path(DNS_SD).exists():
+            rebind_task.append(asyncio.create_task(advertise()))
     shown = next((h for h in sites if not h.startswith("127.")), next(iter(sites), "127.0.0.1"))
     log.info("web UI: http://%s:%d/?token=<the contents of %s>", shown, cfg.port, TOKEN_PATH)
     return runner

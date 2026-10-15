@@ -31,6 +31,10 @@
   .state { font-weight: 600; }
   .error { color: var(--bad); font-size: 14px; white-space: pre-wrap; word-break: break-word; }
   code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #app-qr { align-self: center; background: #fff; border-radius: 8px; image-rendering: pixelated; }
+  .code { font: 600 24px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 2px; text-align: center; }
+  .link { word-break: break-all; }
+  .steps { margin: 0; padding-left: 20px; }
 </style>
 </head>
 <body>
@@ -39,8 +43,26 @@
   <p class="muted">Places a verified call to Scout's SignalWire agent from this browser: the call carries a
     signature made with this browser's pairing secret.</p>
 
+  <section id="app-pair">
+    <h2>Pair the phone app</h2>
+    <ol class="muted steps">
+      <li>Turn on Tailscale on the iPhone.</li>
+      <li>Point the iPhone Camera at this code and tap the Scout banner.</li>
+      <li>Tap <b>Pair</b> in Scout.</li>
+    </ol>
+    <img id="app-qr" alt="QR code for pairing the Scout app" width="232" height="232" hidden>
+    <div id="app-code" class="code"></div>
+    <a id="app-link" class="muted link"></a>
+    <div id="app-countdown" class="muted"></div>
+    <div id="app-warning" class="error"></div>
+    <div class="row"><button id="app-new-code">Show a pairing code</button></div>
+    <p class="muted">A code works once, for 10 minutes. The same from a terminal:
+      <code>scoutctl.sh phone pair</code>. The app can also find Scout on your home network,
+      or ask to pair and wait for your yes.</p>
+  </section>
+
   <section id="pairing">
-    <h2>Pairing</h2>
+    <h2>Pair this browser</h2>
     <div id="unpaired" class="row">
       <input id="name" placeholder="Name for this browser" maxlength="64" autocomplete="off">
       <button id="pair">Pair this browser</button>
