@@ -587,7 +587,10 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
     assert played == [0.1] and stopped == 1 and idle
 
 
-def test_barge_in_stops_a_room_reply_and_opens_a_follow_up() -> None:
+def test_barge_in_over_speech_that_answered_nothing_opens_no_follow_up() -> None:
+    """Something played with no room turn running (an announcement): talking over it
+    stops it, and is not a follow-up (test_wake_gating has the room-answer case)."""
+
     async def go() -> tuple[int, bool]:
         r = make()
         r.a.echo_cancelled = True
@@ -600,7 +603,7 @@ def test_barge_in_stops_a_room_reply_and_opens_a_follow_up() -> None:
         return r.spk.stopped, r.a.follow_up_until > time.monotonic()
 
     stopped, follow_up = run(go())
-    assert stopped >= 1 and follow_up
+    assert stopped >= 1 and not follow_up
 
 
 def test_our_own_voice_leaking_past_the_canceller_is_not_a_barge_in() -> None:
@@ -870,13 +873,16 @@ def test_relay_to_an_unknown_session_says_who_is_known() -> None:
     assert "proj#1" in run(go())
 
 
-def test_a_session_message_opens_a_short_reply_window() -> None:
+def test_a_session_message_without_listen_opens_no_reply_window() -> None:
+    """It asked for no reply: answering it takes the wake word (the room then hears the
+    reply with the message in its context)."""
+
     async def go() -> bool:
         r = make()
         await r.a.discuss(agent="proj#1", message="Should I push?", listen=False)
         return r.a.follow_up_until > time.monotonic()
 
-    assert run(go())
+    assert not run(go())
 
 
 def test_say_that_again_repeats_whoever_spoke_last(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -960,7 +966,10 @@ def test_the_rest_of_a_split_request_is_rejoined(monkeypatch: pytest.MonkeyPatch
 
         monkeypatch.setattr(r.a.brain, "ask", slow_ask)
         monkeypatch.setattr(r.a.brain, "interrupt", lambda: asyncio.sleep(0))
+        now = time.monotonic()  # heard just now: the clip ended a moment ago
+        r.a._heard = assistant_mod._Heard("turn", 0.9, now, 0.3, now)
         r.a.start_turn("What time do those winds...")
+        r.a._heard = None
         await asyncio.sleep(0.02)
         await hear(r, "forecast to start.", started=time.monotonic())
         queued, silenced = r.a._queued, r.a._silence_turn

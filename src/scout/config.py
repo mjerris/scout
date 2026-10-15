@@ -32,8 +32,16 @@ class WakeConfig:
     # the build failed" is about someone else.
     greeted_names: list[str] = field(default_factory=lambda: ["scott"])
     max_position: int = 3  # name must be within the first N words
-    # After a reply, listen this many seconds for a follow-up without the wake word.
+    # After the room answered your request, listen this many seconds for a follow-up
+    # without the wake word. Announcements (pulse, briefing, Slack, timers), desk
+    # sessions' messages and startup open no such window, and a follow-up answered
+    # without the wake word opens none of its own.
     follow_up_seconds: float = 8.0
+    # What a follow-up without the wake word must be: "strict" = look addressed to Scout
+    # (a question, a command, a short fragment of the last exchange, an answer to its
+    # question; not a statement or talk to someone else: addressed.py); "open" = any
+    # speech that passes the gate; "off" = always say the wake word.
+    follow_up: str = "strict"
     # Ending with "hang on" / "wait" / "give me a sec" keeps listening this long.
     wait_seconds: float = 20.0
 
@@ -595,6 +603,10 @@ def _check(cfg: Config) -> None:
         log.warning("config slack.announce_dms = %r is not listed, all or off; using 'listed'",
                     cfg.slack.announce_dms)  # fmt: skip
         cfg.slack.announce_dms = "listed"
+    if cfg.wake.follow_up not in ("strict", "open", "off"):
+        log.warning("config wake.follow_up = %r is not strict, open or off; using 'strict'",
+                    cfg.wake.follow_up)  # fmt: skip
+        cfg.wake.follow_up = "strict"
     if cfg.reference.local_answers not in ("offline", "always", "never"):
         log.warning("config reference.local_answers = %r is not offline, always or never; using 'offline'",
                     cfg.reference.local_answers)  # fmt: skip

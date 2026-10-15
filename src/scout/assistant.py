@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    addressed,
     behavior,
     briefing,
     corrections,
@@ -61,6 +62,10 @@ log = logging.getLogger(__name__)
 
 BARGE_WAIT_S = 12.0  # a ducked reply waits this long for the words before resuming
 BARGE_MATCH_S = 1.0  # an utterance starting this close to the onset is the one that barged
+# The rest of a request a pause split off starts this soon after the first part ended;
+# later speech is not joined to it (heard live: three utterances of someone else's
+# conversation glued onto one request, each starting up to 6 s after the last).
+SPLIT_GAP_S = 2.5
 
 # Requests whose answer needs the calendar or the inbox: prefetched into the context.
 _CALENDARISH = re.compile(
@@ -180,7 +185,9 @@ class Assistant:
         self._turn_claude = False  # the turn went to Claude (the progress line waits longer)
         self._tool_started = asyncio.Event()  # the current room turn called a tool
         self._context: _Context | None = None  # the context fetched alongside tier 1
-        self._rejoined = False  # onset of a barge into a session's message
+        # The stopped turn's queued request still runs: a rejoined split request, or the
+        # follow-up said over the turn's answer.
+        self._requeued = False
         self.asr = asr
         self.speaker = speaker
         self.pronounce = pronounce or Pronouncer(DATA / "pronounce.txt")
@@ -216,7 +223,18 @@ class Assistant:
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
         self.mic_muted = False
+        # Speech without the wake word counts until then. The window is "follow-up" after
+        # the room answered a request (the speech must look addressed to Scout, by
+        # [wake] follow_up) or "request" after a bare "Hey Scout" or a "hang on".
         self.follow_up_until = 0.0
+        self._window = ""
+        self._window_answer = ""  # what the room answered, for the follow-up check
+        self._barged_turn: float | None = None  # onset of talk over the room's answer
+        # The current turn was a follow-up without the wake word (it opens no window of
+        # its own: no chains), or a split request asked whole (it joins nothing more).
+        self._turn_followup = self._turn_joined = False
+        self._next_followup = self._next_joined = False  # ...for the turn start_turn starts next
+        self._queued_followup = self._queued_joined = False  # ...for the queued request
         self._turn: asyncio.Task[Any] | None = None
         self._silence_turn = False  # set by stop(): drain the turn without speaking
         self._queued: str | None = None  # a request to run when the current turn ends
@@ -727,8 +745,11 @@ class Assistant:
         if cmd is not None or direct:
             if self._reject("request", text, check("wake")):
                 return "gate"
-        elif in_follow_up and self._reject("follow-up", text, check("followup")):
-            return "gate"
+        elif in_follow_up:
+            if self._reject("follow-up", text, check("followup")):
+                return "gate"
+            if self._window == "follow-up" and (why := self._unaddressed(text, self._window_answer)):
+                return ignore(why)
 
         if self.busy:
             if cmd is not None or direct:
@@ -738,21 +759,45 @@ class Assistant:
                 self._queued_out = {"mini": speak, "client": client}
                 reply("Okay, I'll do that next.")
                 return None
+            in_room = speak == self._out.get("mini", True)
+            barged = self._barged_turn
+            if barged is not None and started >= barged - BARGE_MATCH_S and in_room:
+                # Said over the answer to your request: the next request (the turn is
+                # being stopped). No wake word, so it passes the follow-up checks.
+                self._barged_turn = None
+                if self._reject("follow-up", text, check("followup")):
+                    return "gate"
+                if why := self._unaddressed(text, self._window_answer):
+                    return ignore(why)
+                log.info("follow-up said over the answer: %s", text)
+                self.emit("heard", text=text, **via)
+                self._queued, self._queued_out = text, {"mini": speak, "client": client}
+                self._requeued, self._queued_followup, self._queued_joined = True, True, False
+                return None
+            heard = self._turn_heard
             if (
                 not self._turn_spoke
                 and self._turn_text
-                and time.monotonic() - self._turn_started < 6.0
-                and speak == self._out.get("mini", True)
+                and heard is not None
+                and not self._turn_joined
+                and started - heard.speech_end <= SPLIT_GAP_S
+                and in_room
             ):
                 # The end of a request that a pause split off ("what time do those winds ..."
                 # / "... forecast to start"): drop the half-answered turn, ask the whole thing.
-                # No wake word, so it passes the same checks as a follow-up (not the TV).
+                # No wake word, so it passes the same checks as a follow-up (not the TV, not
+                # someone else's conversation), and a turn joins one split only.
                 if self._reject("follow-up", text, check("followup")):
                     return "gate"
                 whole = f"{self._turn_text.rstrip(' .…')} {text}".strip()
+                if why := self._unaddressed(text, self._turn_text):
+                    return ignore(f"not the rest of the request: {why}")
+                if self._turn_followup and (why := self._unaddressed(whole, self._window_answer)):
+                    return ignore(why)
                 log.info("rejoined a split request: %s", whole)
                 self.emit("heard", text=text, **via)
-                self._silence_turn, self._rejoined = True, True
+                self._silence_turn, self._requeued = True, True
+                self._queued_followup, self._queued_joined = self._turn_followup, True
                 self._spawn(self.brain.interrupt())
                 self._queued, self._queued_out = whole, {"mini": speak, "client": client}
                 return None
@@ -761,10 +806,35 @@ class Assistant:
         if cmd is None:
             if not direct and started > self.follow_up_until:
                 return "no wake word"
-            cmd = text  # follow-up window or web: no wake word needed
+            # A follow-up window or the web: no wake word needed. A follow-up's turn opens
+            # no window of its own.
+            self._next_followup = not direct and self._window == "follow-up"
+            cmd = text
         self.emit("heard", text=text, **via)
-        self._room_command(cmd, speak, client)
+        try:
+            self._room_command(cmd, speak, client)
+        finally:
+            self._next_followup = False
         return None
+
+    def _unaddressed(self, text: str, answer: str) -> str | None:
+        """Why speech without the wake word isn't taken as a follow-up ([wake] follow_up
+        "strict": it must look addressed to Scout), or None."""
+        if self.cfg.wake.follow_up != "strict":
+            return None
+        w = self.cfg.wake
+        return addressed.reason(text, answer, w.names, w.greeted_names)
+
+    def _open_follow_up(self, start: float, answer: str) -> float:
+        """After the room answered a request: listen for a follow-up without the wake
+        word. Never after a follow-up's own answer (no chains), nor with follow_up "off".
+        Returns how long the window is open."""
+        seconds = self.cfg.wake.follow_up_seconds
+        if self.cfg.wake.follow_up == "off" or self._turn_followup or seconds <= 0:
+            return 0.0
+        self.follow_up_until = start + seconds
+        self._window, self._window_answer = "follow-up", answer
+        return max(0.0, self.follow_up_until - time.monotonic())
 
     def _is_stop(self, text: str) -> bool:
         return speech.is_stop_utterance(
@@ -814,6 +884,7 @@ class Assistant:
             self.speaker.chime("wake")
         self._set_state("listening")
         self.follow_up_until = time.monotonic() + seconds
+        self._window = "request"  # the request itself: no follow-up check
         if self.floor.try_acquire(ROOM):  # so no session cuts in meanwhile
             self.floor.release(ROOM, hold=True, ttl=seconds)
         self._spawn(self._idle_after(self.follow_up_until))
@@ -923,10 +994,8 @@ class Assistant:
             if stopped.is_set():
                 return result(status="stopped", text="")
             if not listen:
-                if message:
-                    # Not waiting for an answer, but the user may give one: listen briefly
-                    # without the wake word; the room hears it with this message in context.
-                    self.follow_up_until = time.monotonic() + self.cfg.wake.follow_up_seconds
+                # No reply wanted, so no window without the wake word either: a reply
+                # starts "Hey Scout, ..." and the room hears it with this message in context.
                 return result(status="ok", spoke=bool(message))
             fut = asyncio.get_running_loop().create_future()
             barged, self._message_barged = self._message_barged, None
@@ -1050,11 +1119,19 @@ class Assistant:
             self._confirm_barged = onset
             self.speaker.stop()
             return
-        heard_in_room = self._out["mini"]
+        # Over the answer to a request heard in the room, what the user is saying now is a
+        # follow-up: it needs no wake word. Over anything else (the pulse, a timer, the
+        # briefing, a Slack alert) it is someone talking in the room: no window (heard
+        # live: talk over the pulse right after a restart opened one, and the room's
+        # conversation was answered).
+        room_answer = self.busy and self._out["mini"] and not self._turn_followup
+        # The answer may have finished while the words were heard: its window stays open.
+        kept = (self.follow_up_until, self._window) if self.follow_up_until >= onset else None
         await self.stop()
-        if heard_in_room:
-            # What the user is saying now is a follow-up; it needs no wake word.
-            self.follow_up_until = onset + self.cfg.wake.follow_up_seconds
+        if room_answer and self._open_follow_up(onset, self._turn_said()) > 0:
+            self._barged_turn = onset
+        elif kept is not None:
+            self.follow_up_until, self._window = kept
 
     def voice_status(self) -> dict[str, Any]:
         return {
@@ -1072,8 +1149,12 @@ class Assistant:
         if self.busy:
             return False
         self._turn_text, self._turn_started, self._turn_spoke = text, time.monotonic(), False
+        self._turn_followup, self._turn_joined = self._next_followup, self._next_joined
+        self._next_followup = self._next_joined = False
+        self._barged_turn = None
         # Heard just now (not a queued request, typed text, or a "hang on" join).
-        self._turn_heard, self._turn_answer_at, self._turn_tier = self._heard, 0.0, ""
+        self._turn_heard = None if self._turn_joined else self._heard
+        self._turn_answer_at, self._turn_tier = 0.0, ""
         self._turn_claude = False
         self._tool_started = asyncio.Event()
         self._turn = asyncio.create_task(self._run_turn(text, speak, client))
@@ -1597,18 +1678,23 @@ class Assistant:
                 )
                 self._spawn(self._record_turn(text, " ".join(replies), "room", False, used, about))
             self._set_state("idle")
-            # The follow-up window is for a reply the room heard; a phone-only turn opens none.
-            heard_in_room = self._out["mini"]
-            follow = self.cfg.wake.follow_up_seconds if heard_in_room and not self._silence_turn else 0.0
-            self.follow_up_until = time.monotonic() + follow
+            # The follow-up window is for a reply the room heard; a phone-only turn opens
+            # none, and nor does a follow-up's (_open_follow_up). A stopped turn leaves
+            # alone the window a barge-in opened.
+            follow = 0.0
+            if self._out["mini"] and not self._silence_turn:
+                follow = self._open_follow_up(time.monotonic(), " ".join(replies) or self._turn_said())
             # Keep the floor through the follow-up window so other sessions don't cut in.
             self.floor.release(ROOM, hold=follow > 0, ttl=follow)
             self._out = {"mini": True, "client": None}
+            self._barged_turn = None
             queued, self._queued = self._queued, None
             out, self._queued_out = self._queued_out, {"mini": True, "client": None}
-            rejoined, self._rejoined = self._rejoined, False
-            if queued and (not self._silence_turn or rejoined) and queued.strip():
-                asyncio.get_running_loop().call_soon(self._start_queued, queued, out)
+            requeued, self._requeued = self._requeued, False
+            origin = (self._queued_followup, self._queued_joined)
+            self._queued_followup = self._queued_joined = False
+            if queued and (not self._silence_turn or requeued) and queued.strip():
+                asyncio.get_running_loop().call_soon(self._start_queued, queued, out, *origin)
             self._silence_turn = False  # it's over: later confirmations aren't this turn's
 
     def _log_turn_timing(self) -> None:
@@ -1633,11 +1719,21 @@ class Assistant:
             ms(audio_at - answer_at) if audio_at is not None else "-",
         )
 
-    def _start_queued(self, text: str, out: dict[str, Any]) -> None:
+    def _turn_said(self) -> str:
+        """What the room said last (a local answer), for the follow-up check."""
+        return self.last_spoken[1] if self.last_spoken and self.last_spoken[0] == "Scout" else ""
+
+    def _start_queued(
+        self, text: str, out: dict[str, Any], followup: bool = False, joined: bool = False
+    ) -> None:
         if speech.is_reset(text):
             self._spawn(self.reset(out["mini"], out["client"]))
         elif not speech.is_stop(text):
-            self._room_command(text, out["mini"], out["client"])
+            self._next_followup, self._next_joined = followup, joined
+            try:
+                self._room_command(text, out["mini"], out["client"])
+            finally:
+                self._next_followup = self._next_joined = False
 
     async def _confirm(
         self,
