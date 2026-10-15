@@ -12,6 +12,9 @@ only picks the record, says where it came from, and puts its link on the phone (
 reminder in the "Scout" list with the URL, or the task's own reminder, which already
 has it).
 
+A fact (memory:<id>) comes from the turn it was told in (its told_in link): "You told
+me on October 12, in the room."; one with no such turn is "a fact you saved".
+
 Privacy (privacy.py): the room and the phone are the user's own, so spoken answers here
 use real titles, as tier 0 does. What Claude sees (the open_link and send_link tool
 results, the request context) follows the privacy mode: in strict mode a record from
@@ -56,7 +59,7 @@ KIND = {
     "memory": "something you told me to remember",
     "fact": "something you told me to remember",
 }
-_SOURCE_RELS = ("found_in", "merged_from", "same_as")
+_SOURCE_RELS = ("found_in", "merged_from", "same_as", "told_in")
 
 
 def norm(ref: str) -> str:
@@ -180,6 +183,8 @@ _OUT = {
     "mail_recent": (re.compile(r"^id (\d+): ", re.M), "mail:{}"),
     "mail_search": (re.compile(r"^id (\d+): ", re.M), "mail:{}"),
     "local_search": (re.compile(r"\(ref ([^\s)]+)\)"), "{}"),
+    "remember": (re.compile(r"\(ref (memory:[0-9a-f]+)\)"), "{}"),
+    "recall": (re.compile(r"\(ref (memory:[0-9a-f]+)\)"), "{}"),
     "open_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
     "send_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
 }
@@ -235,7 +240,8 @@ async def _hit(ref: str, store: Any) -> index.Hit | None:
 
 
 def source_of(r: dict[str, Any]) -> dict[str, Any] | None:
-    """Where a record came from: its first found_in (or merged_from, same_as) record."""
+    """Where a record came from: its first found_in (or merged_from, same_as) record; a
+    fact's, the turn it was told in (told_in)."""
     related = [x for x in r.get("related") or [] if isinstance(x, dict)]
     for rel in _SOURCE_RELS:
         for x in related:
@@ -275,7 +281,9 @@ def describe(r: dict[str, Any], mode: str | None = None) -> str:
         lines.append(f"link: {url}")
     if (page := r.get("page")) and page != url:
         lines.append(f"Scout's page for it: {page}")
-    if (src := source_of(r)) is not None:
+    if (src := source_of(r)) is not None and src.get("rel") == "told_in":  # the turn's words: the fact's own
+        lines.append(f"from: {src.get('id')} ({kind_word('turn')})")
+    elif src is not None:
         lines.append(f"from: {src.get('id')} ({shown_title({**src, 'private': r.get('private')}, mode)})")
     if r.get("private") and (mode or privacy.current().mode) == "strict":
         lines.append("(Its text stays on this Mac in strict privacy mode; the link is the user's own.)")
@@ -287,11 +295,28 @@ def _day(ts: float) -> str:
     return f"{d:%B} {d.day}"
 
 
+_CHANNEL = {"room": "in the room", "phone": "on the phone"}
+
+
+async def _fact_from(r: dict[str, Any], src: dict[str, Any] | None, store: Any) -> str:
+    """ "You told me on October 12, in the room." (the turn it was told in), or "It's a
+    fact you saved on October 12." when no turn is known (one written into facts.md)."""
+    if src is not None and src.get("rel") == "told_in":
+        h = await _hit(str(src.get("id") or ""), store)
+        when = f" on {_day(h.ts)}" if h and h.ts else ""
+        where = _CHANNEL.get(h.who.strip()) if h else None
+        return f"You told me{when}" + (f", {where}" if where else "") + "."
+    h = await _hit(str(r.get("id") or ""), store)
+    return "It's a fact you saved" + (f" on {_day(h.ts)}" if h and h.ts else "") + "."
+
+
 async def where_from(r: dict[str, Any], store: Any = None) -> str:
     """ "It's from your meeting Vendor sync, on October 13." Spoken on the Mac or the
     phone (the user's own), so with the real title."""
     store = _store() if store is None else store
     src = source_of(r)
+    if r.get("kind") == "memory":
+        return await _fact_from(r, src, store)
     thing = src or r
     h = await _hit(str(thing.get("id") or ""), store)
     kind = str(thing.get("kind") or (h.kind if h else ""))
@@ -402,7 +427,9 @@ async def send(r: dict[str, Any], store: Any = None) -> tuple[str, str]:
         del _sent[u]
     if url in _sent:
         return "again", "The link is already in your Scout reminders."
-    title = str((source_of(r) or r).get("title") or r.get("title") or "a record").strip()
+    src = source_of(r)
+    named = src if src is not None and src.get("rel") != "told_in" else r  # a fact by its own words
+    title = str(named.get("title") or r.get("title") or "a record").strip()
     await reminders_mac.add_data(
         {"title": f"Link: {title}"[:200], "list": LINK_LIST, "url": url}, mirror=True
     )

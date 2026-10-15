@@ -25,6 +25,7 @@ REL_NAMES = {
     ("same_as", "out"): "Same meeting", ("same_as", "in"): "Same meeting",
     ("based_on", "out"): "Used", ("based_on", "in"): "Used by",
     ("about", "out"): "About", ("about", "in"): "Mentioned in",
+    ("told_in", "out"): "Told in", ("told_in", "in"): "A fact told here",
 }  # fmt: skip
 # Fields shown for a task, in this order (the reminder's ids and titles aren't).
 TASK_FIELDS = ("status", "owner", "due", "importance", "urgency", "effort", "pin", "source", "found", "done")

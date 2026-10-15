@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import time
+import urllib.parse
 from typing import Any
 
 import pytest
 from test_links import granola_note
 from test_routing import make
 
-from scout import index, journal, privacy, pulse, refs, reminders_mac, tasks
+from scout import index, journal, memory, privacy, pulse, refs, reminders_mac, tasks
 
 BASE = "https://scout.example.ts.net"
 NOW = dt.datetime.now().astimezone().replace(hour=8, minute=0, second=0, microsecond=0)
@@ -87,7 +88,7 @@ def test_pulse_then_link_to_that_per_source(
         await r.a.announce(said[0], "pulse")
         assert await r.a._answer_locally("give me a link to that")
         assert await r.a._answer_locally("where did that come from")
-        return r.spk.said
+        return list(r.spk.said)
 
     spoken = asyncio.run(go())
     assert spoken[0].startswith("Pat Doe owes you Send the revised quote, overdue since")
@@ -127,7 +128,7 @@ def test_claude_context_names_the_refs_from_the_real_store(store: index.Index) -
             await r.a.announce(
                 refs.Spoken("Pat Doe owes you Send the revised quote.", [f"task:{n}"], True), "pulse"
             )
-            return await r.a._with_context("send that to my phone")
+            return str(await r.a._with_context("send that to my phone"))
         finally:
             privacy.configure("balanced")
 
@@ -151,3 +152,46 @@ async def _no_events(start: str, end: str) -> dict[str, Any]:
 
 async def _no_reminders() -> dict[str, Any]:
     return {"reminders": []}
+
+
+def test_remember_then_where_did_that_come_from(store: index.Index, added: list[dict[str, Any]]) -> None:
+    """A fact told in the room is linked to its turn; asked later, "where did that come
+    from" says when and where, and its link is that turn's page."""
+    from scout import memory_client
+
+    mem = memory_client.memory()
+    assert isinstance(mem, memory.Memory)
+
+    def index_facts() -> None:
+        store.sync("memory", mem.as_documents())
+
+    mem.on_change = index_facts
+
+    async def go() -> list[str]:
+        r: Any = make()
+        r.a.index = store
+        assert await r.a._answer_locally("remember that my dentist is Dr. Lee")
+        assert await r.a._answer_locally("who is my dentist")
+        assert await r.a._answer_locally("where did that come from")
+        assert await r.a._answer_locally("give me a link to that")
+        return list(r.spk.said)
+
+    spoken = asyncio.run(go())
+    fid = memory.fact_id("my dentist is Dr. Lee")
+    (told,) = [ln["id"] for ln in store.links(fid) if ln["rel"] == "told_in"]
+    turn = store.get(told)
+    assert turn is not None and turn.title == "remember that my dentist is Dr. Lee"
+    assert spoken[:3] == [
+        "Okay, I'll remember that your dentist is Dr. Lee.",
+        "You told me your dentist is Dr. Lee.",
+        f"You told me on {_day(turn.ts)}, in the room.",
+    ]
+    assert (
+        spoken[3] == f"You told me on {_day(turn.ts)}, in the room. I put the link in your Scout reminders."
+    )
+    assert [(a["list"], a["url"]) for a in added] == [
+        ("Scout", f"{BASE}/r/{urllib.parse.quote(told, safe='')}")
+    ]
+    turns = store.recent(["turn"], 10)
+    assert len(turns) == 4 and all(t.meta.get("refs") == [fid] for t in turns)
+    assert [ln["id"] for ln in store.links(fid) if ln["rel"] == "told_in"] == [told]  # asking didn't move it

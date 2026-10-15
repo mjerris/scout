@@ -1106,6 +1106,7 @@ class Assistant:
                     log.warning("memory unavailable for a local answer: %s", exc)
                     said = None
                 private = said is not None
+                about = list(refs.refs_of(said))  # the facts it said (memory:<id>)
             if said is None and self.tier1 is not None:
                 now = datetime.now().astimezone()
                 # Claude's context is fetched meanwhile, in case tier 1 passes (~1 s).
@@ -1283,7 +1284,7 @@ class Assistant:
         )
         if facts:
             lines.append("The user told Scout (memories that may bear on this request):")
-            lines += [f"  - {f}" for f in facts]
+            lines += [f"  - {f} (ref {memory.fact_id(f)})" for f in facts]  # open_link takes the ref
         lines += [part for part in (cal, inbox) if part is not None]
         return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
 
@@ -1718,6 +1719,7 @@ class Assistant:
                 log.warning("memory unavailable for a phone answer: %s", exc)
                 said = None
             if said is not None:
+                self._phone_refs.extend(refs.refs_of(said))  # the facts it said
                 return said, "0", True
             if self.tier1 is not None:
                 now = datetime.now().astimezone()

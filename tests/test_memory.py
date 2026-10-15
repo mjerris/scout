@@ -111,7 +111,9 @@ def test_other_requests_are_not_memory(mem: Memory, said: str) -> None:
 
 def test_the_room_agents_memory_tools(mem: Memory) -> None:
     tools = {name: fn for name, _, _, fn in memory_tools(mem)}
-    assert call(tools["remember"], {"fact": "Pat is my manager"}) == "Remembered: Pat is my manager"
+    assert call(tools["remember"], {"fact": "Pat is my manager"}) == (
+        f"Remembered: Pat is my manager (ref {memory.fact_id('Pat is my manager')})"
+    )
     assert "Pat is my manager" in call(tools["recall"], {"about": "Pat"})
     try:
         privacy.configure("strict")
