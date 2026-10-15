@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 )
 
 from .config import DATA, ROOT, ClaudeConfig
-from . import trust
+from . import behavior, trust
 from .rules import Rules
 import contextlib
 
@@ -205,6 +205,14 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
             " ".join(str(args.get("message") or "").split()),
         )
         return f"Ask {who}: {text[:300]}?", f"message to the Claude session {who}:\n{text}"
+    if name in RULE_WRITE_TOOLS or name in ("rule_add", "rule_drop"):
+        if name.endswith("rule_add"):
+            rule = behavior.normalized(str(args.get("rule") or ""))
+            return behavior.read_back(
+                rule
+            ), f"keep this rule for how Scout behaves (memory/behavior.md):\n{rule}"
+        about = " ".join(str(args.get("about") or "").split())[:120]
+        return f"Drop the rules about {about}?", f"drop the behavior rules matching: {about}"
     if name.startswith("mcp__"):
         parts = name.split("__")
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
@@ -397,6 +405,8 @@ REMINDER_WRITE_TOOLS = ("mcp__voice_app__reminder_add", "mcp__voice_app__reminde
 NOTE_WRITE_TOOLS = ("mcp__voice_app__note_delete",)
 # Asking one of the user's other Claude sessions asks every time (it goes to another agent).
 SESSION_SEND_TOOLS = ("mcp__voice_app__session_ask",)
+# Keeping or dropping a behavior rule asks every time: the rule is read back (behavior.py).
+RULE_WRITE_TOOLS = ("mcp__voice_app__rule_add", "mcp__voice_app__rule_drop")
 # Every shared tool the room offers marked asks=True (shared_tools.SHARED, NOT_DESK) is in
 # one of the lists above.
 ALWAYS_ASK_TOOLS = (
@@ -408,6 +418,7 @@ ALWAYS_ASK_TOOLS = (
     *REMINDER_WRITE_TOOLS,
     *NOTE_WRITE_TOOLS,
     *SESSION_SEND_TOOLS,
+    *RULE_WRITE_TOOLS,
 )
 # Claude Code's own cross-session tools: the room asks sessions through session_ask (the
 # relay, sessions.py), so a reply never starts a turn outside the room's turn loop.
@@ -491,6 +502,11 @@ class Brain:
         append = VOICE_PROMPT.format(root=ROOT, data=DATA) + (
             "\n" + self.cfg.extra_system_prompt if self.cfg.extra_system_prompt else ""
         )
+        # The user's behavior rules (behavior.py), as they are when the session starts;
+        # a change later comes with the next request (ask).
+        self._rules_sig = behavior.signature()
+        if rules := behavior.prompt_block():
+            append += "\n" + rules + "\n"
         strict = self.cfg.approval_policy == "strict"
         if self.cfg.approval_policy not in ("strict", "settings", "settings_no_hooks"):
             raise ValueError(f"unknown approval_policy {self.cfg.approval_policy!r}")
@@ -694,7 +710,7 @@ class Brain:
         total_cost_usd is this turn's cost (the CLI reports the session's running total)."""
         async with self._lock:
             client = await self._ensure()
-            await client.query(text)
+            await client.query(self._with_new_rules(text))
             pending, streamed = "", False
             async for msg in client.receive_response():
                 if isinstance(msg, StreamEvent):
@@ -729,6 +745,16 @@ class Brain:
                     keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
                     self._used(time.time(), sum(int(u.get(k) or 0) for k in keys))
                     yield "result", self._turn_cost(msg)
+
+    def _with_new_rules(self, text: str) -> str:
+        """The request, led by the behavior rules if they changed since the session
+        started (or last heard of them): a running session keeps its conversation."""
+        sig = behavior.signature()
+        if sig == self._rules_sig:
+            return text
+        self._rules_sig = sig
+        block = behavior.prompt_block() or "(There are none now.)"
+        return f"(Your rules for how to behave changed; these replace the earlier list.)\n{block}\n\n{text}"
 
     def _turn_cost(self, msg: ResultMessage) -> ResultMessage:
         """The result with total_cost_usd made this turn's own: a long-lived session reports

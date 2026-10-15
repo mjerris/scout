@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    behavior,
     briefing,
+    corrections,
     gate,
     index,
     ledger,
@@ -237,6 +239,9 @@ class Assistant:
         # the web page (by client id) that asked.
         self._out: dict[str, Any] = {"mini": True, "client": None}
         self.history: deque[dict[str, Any]] = deque(maxlen=300)
+        # When the user talked over an answer (wall clock): the nightly pass reads the turn
+        # after each as a correction (corrections.py). Kept only while the app runs.
+        self.barge_ins: deque[float] = deque(maxlen=100)
         self._listeners: set[asyncio.Queue[dict[str, Any]]] = set()
         self._saved: deque[Path] = deque()
         self._bg: set[asyncio.Task[Any]] = set()  # keeps fire-and-forget tasks alive until done
@@ -318,6 +323,13 @@ class Assistant:
             self.speaker.speak(text)
             self._spoke("briefing", text, refs.refs_of(text), refs.private_of(text))
             await self.speaker.wait_idle()
+            room = {"mini": True, "client": None}
+            await self._offer_rules(room)  # rules suggested overnight, one at a time
+            if await asyncio.to_thread(self._review_due):
+                said = await self._review_rules(room, monthly=True)
+                if said:
+                    self.speaker.speak(said)
+                    await self.speaker.wait_idle()
         finally:
             if took:
                 self.floor.release("briefing")
@@ -443,6 +455,8 @@ class Assistant:
     async def run(self) -> None:
         if self.cfg.briefing.at:
             self._spawn(briefing.daily(self.cfg.briefing.at, self._announce_briefing))
+        if self.cfg.behavior.nightly_at:  # rules from the day's corrections (corrections.py)
+            self._spawn(briefing.daily(self.cfg.behavior.nightly_at, self._nightly_rules))
 
         def idle() -> bool:
             return self.state == "idle" and not self.busy
@@ -997,6 +1011,7 @@ class Assistant:
             return None
         words = speech.strip_own_speech(text, spoken, alt) or text
         self._barge_pending = None
+        self.barge_ins.append(time.time())  # a correction, maybe (corrections.py)
         if self.state == "agent" and self._listen is not None:
             # The session's message finished and we're listening for the reply: just hear it.
             log.info("barge-in: the message had finished; taking this as the reply")
@@ -1132,6 +1147,8 @@ class Assistant:
             if said is not None and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
                 private = self.last_private  # ...and is as private as what it repeats
+            if said is None and (said := await self._rule_request(text)) is not None:
+                private, about = False, list(refs.refs_of(said))  # a rule's record (behavior:<id>)
             if said is None:
                 # The memory may be the memory service: off the event loop, and while it's
                 # down Claude takes the request.
@@ -1203,6 +1220,125 @@ class Assistant:
             text, said or "(done)", "room", private, about=about if tier is not None else ()
         )
         return True
+
+    # --- behavior rules (behavior.py, corrections.py) ------------------------------------
+
+    async def _rule_request(self, text: str, out: dict[str, Any] | None = None) -> str | None:
+        """Tier 0 for behavior rules: "from now on ..." is read back and kept on a spoken
+        yes; "what are my rules" lists them; "review my rules" reviews them. None for
+        anything else."""
+        if (rule := behavior.told(text)) is not None:
+            answer = await self._confirm(
+                behavior.read_back(rule),
+                f"Keep this rule for how Scout behaves (memory/behavior.md):\n{rule}",
+                out,
+            )
+            if answer is None:
+                return ""  # "No answer, so I skipped that." was said
+            if not answer:
+                return "Okay, not a rule."
+            b = behavior.default()
+            try:
+                r, new = await asyncio.to_thread(b.add, rule, "told")
+            except ToolError as exc:
+                return f"Sorry, {exc}."
+            said = "Okay, I'll keep that rule." if new else "That was a rule already; I'll keep it."
+            return refs.Spoken(said + b.over_cap_note(), [r.id])
+        if behavior.is_listing(text):
+            return await asyncio.to_thread(behavior.spoken_listing)
+        if behavior.is_review(text):
+            return await self._review_rules(out)
+        return None
+
+    def _review_due(self) -> bool:
+        live = any(not r.enforced for r in behavior.default().rules())
+        return live and corrections.Candidates().review_due(briefing.local_now().date())
+
+    async def _offer_rules(self, out: dict[str, Any] | None = None) -> int:
+        """Offer the rules the nightly pass suggested, one question each; kept only on a
+        yes, never offered again after a no (a question nobody answered waits for the
+        next briefing). Returns how many were kept."""
+        cands = corrections.Candidates()
+        b = behavior.default()
+        kept = 0
+        for c in (await asyncio.to_thread(cands.pending))[: corrections.MAX_CANDIDATES]:
+            answer = await self._confirm(
+                corrections.offer_text(c),
+                f"Keep this rule for how Scout behaves?\n{c.rule}\n(from {', '.join(c.turns)})",
+                out,
+            )
+            if answer is None:
+                break
+            if answer:
+                await asyncio.to_thread(b.add, c.rule, "from corrections", "", c.turns)
+                kept += 1
+            await asyncio.to_thread(cands.resolve, c.id, bool(answer))
+        if kept and (out or self._out).get("mini"):
+            self.speaker.speak("Okay, I'll keep that." if kept == 1 else f"Okay, I'll keep those {kept}.")
+        return kept
+
+    async def _review_rules(self, out: dict[str, Any] | None = None, monthly: bool = False) -> str:
+        """The upkeep review: rules that say the same thing merged, rules that never come
+        up dropped, each only on a yes (three questions at most), suggestions offered;
+        then what there is now, with the ones the code keeps."""
+        b = behavior.default()
+        root = b.path.parent
+        today = briefing.local_now().date()
+        talk = await asyncio.to_thread(corrections.recent_talk, root, today)
+        rv = behavior.review(await asyncio.to_thread(b.rules), talk, today)
+        merged = dropped = asked = 0
+
+        def said(r: behavior.Rule) -> str:
+            return behavior.spoken(r.text)
+
+        for keep, dup in rv.duplicates:
+            if asked >= 3:
+                break
+            asked += 1
+            answer = await self._confirm(
+                f"These two rules say the same thing: {said(keep)}; and {said(dup)}. Merge them?",
+                f"Merge the behavior rules:\n{keep.text}\n{dup.text}\n(keeps the first)",
+                out,
+            )
+            if answer is None:
+                break
+            if answer:
+                await asyncio.to_thread(b.merge, keep.id, dup.id)
+                merged += 1
+        for r in rv.unused:
+            if asked >= 3:
+                break
+            asked += 1
+            answer = await self._confirm(
+                f"{said(r)} hasn't come up in a month. Drop it?", f"Drop the behavior rule:\n{r.text}", out
+            )
+            if answer is None:
+                break
+            if answer:
+                await asyncio.to_thread(b.drop, r.id)
+                dropped += 1
+            else:
+                await asyncio.to_thread(b.confirm, [r.id])
+        await self._offer_rules(out)
+        await asyncio.to_thread(corrections.Candidates().reviewed, today)
+        n = len(await asyncio.to_thread(b.rules))
+        if monthly and not asked:
+            return ""  # nothing to change: the monthly review says nothing
+        done = [f"merged {merged}"] * bool(merged) + [f"dropped {dropped}"] * bool(dropped)
+        head = f"Okay, {' and '.join(done)}. " if done else ("" if asked else "Your rules look fine. ")
+        tail = f"You have {n} rule{'s' * (n != 1)}"
+        if rv.enforced:
+            e = len(rv.enforced)
+            tail += f"; {e} {'is' if e == 1 else 'are'} kept by my code"
+        return head + tail + "."
+
+    async def _nightly_rules(self) -> None:
+        """The nightly pass over yesterday's corrections, on the local model only."""
+        if self.tier1 is None:
+            log.info("rules: no local model loaded; the nightly pass waits for it")
+            return
+        day = briefing.local_now().date() - timedelta(days=1)
+        await corrections.nightly(self.tier1, day, behavior.default().path.parent, list(self.barge_ins))
 
     def relay(self, session: str, text: str) -> str:
         """The room passes the user's words to a Claude session that spoke to them."""
@@ -1599,6 +1735,16 @@ class Assistant:
             try:
                 if name == "session_ask":  # the session it will reach, by its name and folder
                     spoken = await sessions.preview(args)
+                elif name == "rule_drop":  # the rules it would drop
+                    which = [
+                        r for r in behavior.default().matching(str(args.get("about") or "")) if not r.enforced
+                    ]
+                    if not which:
+                        return {"status": "error", "error": "no rule matches that"}
+                    names = "; ".join(
+                        behavior.spoken(r.text)[:1].lower() + behavior.spoken(r.text)[1:] for r in which[:3]
+                    )
+                    spoken = f"Drop the rule{'s' * (len(which) != 1)} {names}?"
                 elif name == "forget":  # the facts it would drop, unless strict privacy hides them
                     gone = await asyncio.to_thread(self.memory.matching, str(args.get("about") or ""))
                     if not gone:
@@ -1801,6 +1947,14 @@ class Assistant:
         if not self.cfg.claude.local_first:
             return None, "", False
         try:
+            if agent == PHONE and (rule := behavior.told(text)) is not None:
+                # Nobody in the room is asked; the call keeps it in its two steps.
+                return (
+                    f"That's a rule for how Scout behaves: {rule}. To keep it, call rule_add with "
+                    "that rule: read it back and keep it only after the user's yes.",
+                    "0",
+                    False,
+                )
             said = await local_intents.answer(text, self._local, skip=local_intents.PHONE_SKIP, channel=agent)
             if said is not None:
                 self._phone_refs.extend(self._local.refs)

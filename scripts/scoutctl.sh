@@ -2,6 +2,8 @@
 # Manage Scout's background app.
 #   scoutctl.sh status | restart | logs [N] | uninstall [--purge]
 #   scoutctl.sh phone pair | list | forget <device> | calls   (pair: a one-time code + QR for the app; calls: active ones)
+#   scoutctl.sh rules list | add "<rule>" [--enforced <code>] [--origin <text>] | drop <words> [--yes] | prompt
+#     (Scout's behavior rules, memory/behavior.md: docs/behavior-rules.md)
 # uninstall stops and removes the login item; --purge also deletes Scout's data
 # folder (config, saved rules, models, logs). Removing the plugin itself is
 # `claude plugin uninstall scout`.
@@ -57,6 +59,11 @@ phone)
     UV_PROJECT_ENVIRONMENT="$DATA/venv" exec uv run --frozen --quiet --project "$DATA/current" \
         python -m scout.phone_devices "$@"
     ;;
+rules)
+    shift
+    UV_PROJECT_ENVIRONMENT="$DATA/venv" exec uv run --frozen --quiet --project "$DATA/current" \
+        python -m scout.behavior "$@"
+    ;;
 logs)
     tail -n "${2:-40}" "$DATA/logs/scout.log" "$DATA/logs/install.log" 2>/dev/null
     ;;
@@ -78,7 +85,7 @@ uninstall)
     fi
     ;;
 *)
-    echo "usage: $0 status | restart | logs [N] | uninstall [--purge] | phone pair|list|forget <device>|calls" >&2
+    echo "usage: $0 status | restart | logs [N] | uninstall [--purge] | phone pair|list|forget <device>|calls | rules list|add|drop|prompt" >&2
     exit 2
     ;;
 esac

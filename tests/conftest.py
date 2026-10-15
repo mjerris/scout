@@ -109,3 +109,16 @@ def _own_sync_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import scout.syncstate as syncstate_mod
 
     monkeypatch.setattr(syncstate_mod, "PATH", tmp_path / "sync_status.json")
+
+
+@pytest.fixture(autouse=True)
+def _own_behavior_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each test has its own behavior.md (behavior.py), beside its own store's journal,
+    unseeded, and its own suggested-rule state (corrections.py)."""
+    import scout.behavior as behavior_mod
+    import scout.corrections as corrections_mod
+
+    path = tmp_path / "memory" / "behavior.md"
+    monkeypatch.setattr(behavior_mod, "PATH", path)
+    monkeypatch.setattr(behavior_mod, "_default", behavior_mod.Behavior(path, seed=False))
+    monkeypatch.setattr(corrections_mod, "PATH", tmp_path / "behavior_candidates.json")

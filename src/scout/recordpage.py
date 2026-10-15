@@ -18,6 +18,7 @@ CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; ba
 KIND_NAMES = {
     "task": "Task", "note": "Note", "turn": "Conversation", "memory": "Fact", "meeting": "Meeting",
     "mail": "Email", "slack": "Slack", "list": "List", "github": "GitHub", "person": "Person",
+    "behavior": "Behavior rule",
 }  # fmt: skip
 REL_NAMES = {
     ("found_in", "out"): "Found in", ("found_in", "in"): "A task found here",

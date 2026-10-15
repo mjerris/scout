@@ -49,7 +49,7 @@ from signalwire.core.capabilities import user_variables
 from signalwire.core.function_result import FunctionResult
 from signalwire.core.semantic_gate import SemanticGate
 
-from . import index, ledger, progress, sessions, shared_tools, speech
+from . import behavior, index, ledger, progress, sessions, shared_tools, speech
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
 from .phone_devices import PATH as DEVICES
@@ -564,6 +564,8 @@ class PhoneAgent(AgentBase):
             fillers={"default": ["Let me check.", "One moment."]},
         )
         agent.prompt_add_section("Now", body=now_line(local_now()))
+        if rules := behavior.prompt_block(heading=False):  # read fresh for each call (behavior.py)
+            agent.prompt_add_section("Rules", body=rules)
         agent.set_global_data({"device": device, "verified": True})
         agent.clear_post_answer_verbs()  # last: anything above failing leaves the goodbye
 

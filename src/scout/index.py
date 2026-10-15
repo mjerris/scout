@@ -59,7 +59,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, links, notefiles, people, syncstate, taskfiles, xref
+from . import behavior, journal, links, notefiles, people, syncstate, taskfiles, xref
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -717,6 +717,8 @@ class Index:
 
     def _file_kind(self, p: Path) -> tuple[str, str, bool] | None:
         """(kind, id prefix, whether ids match it exactly) for a file Scout keeps."""
+        if self.journal_root is not None and p == self.journal_root / behavior.FILE:
+            return ("behavior", "behavior:", False)
         if self.journal_root is not None and p.parent == notefiles.notes_dir(self.journal_root):
             key = notefiles.id_prefix(p)
             return ("note", key, True) if key else None
@@ -747,6 +749,10 @@ class Index:
             if kind == "task":
                 for it in items:
                     self._link_task(it["id"], it.get("meta") or {}, str(it.get("body") or ""))
+            elif kind == "behavior":  # a suggested rule: the turns it came from
+                for it in items:
+                    turns = [str(t) for t in (it.get("meta") or {}).get("turns") or []]
+                    self._set_links(it["id"], ("based_on",), [(t, "based_on") for t in dict.fromkeys(turns)])
             elif kind == "turn":  # a journal entry's refs line: what the answer was about
                 for it in items:
                     refs = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r) != it["id"]]
@@ -803,6 +809,12 @@ class Index:
         text = data.decode("utf-8", "replace")
         if kind == "turn":
             return journal.parse(p, text)
+        if kind == "behavior":
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = time.time()
+            return behavior.documents(text, mtime)
         parse = notefiles.parse if kind == "note" else taskfiles.parse
         try:
             if text.encode() == data:
@@ -836,6 +848,8 @@ class Index:
         changed = 0
         root = self.journal_root
         files = journal.day_files(root) + notefiles.files(root) + taskfiles.files(root)
+        if (root / behavior.FILE).exists():
+            files.append(root / behavior.FILE)
         # What went away first, so an item that moved to another file is put back by it.
         for path in sorted(set(known) - {str(p) for p in files}):
             changed += self._try_sync(Path(path))
@@ -967,6 +981,7 @@ class Index:
         fact was added. Of several such turns, the one closest after the fact; asking
         about a fact later points at it ("about") without moving where it was told."""
         for it in turns:
+            self._link_told_rules(it)
             facts = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r).startswith("memory:")]
             tools = _tools_line(str(it.get("body") or ""))
             if not facts or not links.says_remember(str(it.get("title") or ""), tools):
@@ -981,6 +996,20 @@ class Index:
                 if c is not None and self._told_near(f.ts, c.ts) and abs(c.ts - f.ts) <= abs(ts - f.ts):
                     continue  # told in an earlier turn already
                 self._set_links(fid, ("told_in",), [(it["id"], "told_in")])
+
+    def _link_told_rules(self, it: dict[str, Any]) -> None:
+        """told_in from a behavior rule to the turn that set it: the rule is in the turn's
+        refs and its request set a rule (links.says_rule). The first such turn keeps it."""
+        rules = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r).startswith("behavior:")]
+        if not rules or not links.says_rule(str(it.get("title") or "")):
+            return
+        for rid in dict.fromkeys(rules):
+            if self.get(rid) is None and self.journal_root is not None:
+                self._try_sync(self.journal_root / behavior.FILE)  # kept by the app a moment ago
+            h = self.get(rid)
+            if h is None or h.kind != "behavior" or self._told_link(rid) not in (None, it["id"]):
+                continue
+            self._set_links(rid, ("told_in",), [(it["id"], "told_in")])
 
     @staticmethod
     def _told_near(fact_ts: float, turn_ts: float) -> bool:
@@ -1516,7 +1545,7 @@ class Index:
             src = next((r["url"] for r in related if r["rel"] == "found_in" and r["url"]), None)
             # A task about a GitHub item ("review #117") opens the item: that's what to act on.
             url = self.task_github_url(h) or src or str(h.meta.get("link") or "") or page
-        elif h.kind == "memory":  # a fact: the turn it was told in, else its own page
+        elif h.kind in ("memory", "behavior"):  # the turn it was told in, else its own page
             url = next(
                 (r["url"] for r in related if r["rel"] == "told_in" and r["dir"] == "out" and r["url"]), url
             )

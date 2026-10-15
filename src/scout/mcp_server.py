@@ -47,7 +47,22 @@ in); slack_send sends it only after the user's spoken yes to the read-back.
 message_draft and message_send text someone the same way (Messages), and
 call_prepare then call_start calls them through the user's iPhone after a yes."""
 
-mcp = MCPServer("scout", instructions=INSTRUCTIONS)
+
+def instructions() -> str:
+    """The briefing every desk session gets when its MCP server starts (one per session):
+    the instructions above, then the user's behavior rules as they are now (behavior.py)."""
+    from . import behavior
+
+    rules = behavior.prompt_block()
+    return INSTRUCTIONS + (
+        "\n\nThe user's behavior rules apply to you too (rules_list shows them all; rule_add "
+        "keeps a new one after a spoken yes):\n" + rules
+        if rules
+        else ""
+    )
+
+
+mcp = MCPServer("scout", instructions=instructions())
 
 
 TOKEN_PATH = DATA / "state" / "web_token"
@@ -520,6 +535,21 @@ async def reference_read(ref: str, section: str = "", query: str = "", max_chars
         "reference_read",
         {"ref": ref, "section": section or None, "query": query or None, "max_chars": max_chars or None},
     )
+
+
+@mcp.tool(description=_doc("rules_list"))
+async def rules_list() -> str:
+    return await _tool("rules_list", {})
+
+
+@mcp.tool(description=_doc("rule_add"))
+async def rule_add(rule: str) -> str:
+    return await _tool("rule_add", {"rule": rule})
+
+
+@mcp.tool(description=_doc("rule_drop"))
+async def rule_drop(about: str) -> str:
+    return await _tool("rule_drop", {"about": about})
 
 
 @mcp.tool(name="starlink", description=_doc("starlink"))

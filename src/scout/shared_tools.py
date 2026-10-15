@@ -521,6 +521,62 @@ SHARED = (
     ),
 )
 
+SHARED = (
+    *SHARED,
+    SharedTool(
+        "rules_list",
+        "The user's rules for how Scout behaves (memory/behavior.md; docs/behavior-rules.md): each "
+        "rule, where it came from (told, set by Mike, from a fix, from corrections), when it was "
+        "added, its ref, and which the code enforces (those aren't in prompts). For 'what are my "
+        "rules' and a review: point out rules that repeat or never come up; merge or drop one "
+        "only after the user's yes. Read-only.",
+        _obj({}),
+        lambda a: _rules_list(),
+    ),
+    SharedTool(
+        "rule_add",
+        "Keep a rule for how Scout should behave from now on, when the user says how they want it "
+        "every time ('from now on ...', 'always ...', 'never ...', 'stop ...'): rule is in their "
+        "words ('Always read ticket numbers digit by digit', 'Call me Mike'). Not for facts "
+        "(remember) or a one-time request. The user confirms: the rule is read back.",
+        _obj({"rule": _STR}, ["rule"]),
+        lambda a: _rule_add(a),
+        asks=True,
+    ),
+    SharedTool(
+        "rule_drop",
+        "Drop the user's behavior rules that contain every word of about (or the one a ref "
+        "behavior:... names); rules the code enforces stay. The user confirms: what would be "
+        "dropped is read back.",
+        _obj({"about": _STR}, ["about"]),
+        lambda a: _rule_drop(a),
+        asks=True,
+    ),
+)
+
+
+async def _rules_list() -> str:
+    from . import behavior
+
+    return await asyncio.to_thread(behavior.listing_text)
+
+
+async def _rule_add(a: dict[str, Any]) -> str:
+    from . import behavior
+
+    b = behavior.default()
+    r, new = await asyncio.to_thread(b.add, str(a.get("rule") or ""), "told")
+    return f"{'Kept the rule' if new else 'Already a rule (confirmed)'}: {r.text} (ref {r.id}){b.over_cap_note()}"
+
+
+async def _rule_drop(a: dict[str, Any]) -> str:
+    from . import behavior
+
+    gone = await asyncio.to_thread(behavior.default().drop, str(a.get("about") or ""))
+    if not gone:
+        raise ToolError("no rule matches that (rules the code enforces aren't dropped)")
+    return "Dropped: " + "; ".join(r.text for r in gone)
+
 
 async def _local_search(a: dict[str, Any]) -> str:
     query = str(a.get("query") or "").strip()

@@ -14,7 +14,8 @@ rel); this module holds the plain-code rules around them:
   web UI, at `web_base()`);
 - whether an emailed meeting summary and a Granola note are the same meeting
   (`same_meeting`);
-- which journal turn a fact was told in (`says_remember`, `told_turn`).
+- which journal turn a fact was told in (`says_remember`, `told_turn`), and a behavior
+  rule (`says_rule`: behavior.py's).
 
 Which records are one person's (`same_person`, from a contact's person record) is
 people.py's.
@@ -48,7 +49,7 @@ XREF_RELS = ("mentions", "discusses")
 # A person (people.py) is a contact's details: private too.
 PRIVATE_KINDS = frozenset({"mail", "meeting", "slack", "person"})
 # Scout's own records: their link is their page on Scout's web UI.
-OWN_KINDS = frozenset({"task", "note", "turn", "memory"})
+OWN_KINDS = frozenset({"task", "note", "turn", "memory", "behavior"})
 # GitHub issues, pull requests and commits (github.py): private when their repo is.
 GITHUB_KIND = "github"
 
@@ -236,6 +237,14 @@ def says_remember(question: str, tools: str) -> bool:
         return True
     q = _WAKE.sub("", (question or "").strip())
     return bool(_SAYS_KEEP.search(q)) and not _ASKS.match(q)
+
+
+def says_rule(question: str) -> bool:
+    """Whether a turn set a behavior rule ("from now on, call me Mike"): a rule it
+    refers to (behavior:<id>) was told in it (index.py's told_in link)."""
+    from .behavior import says_rule as said
+
+    return said(question)
 
 
 def _same_words(a: str, b: str) -> bool:

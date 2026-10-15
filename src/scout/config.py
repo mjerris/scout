@@ -273,6 +273,14 @@ class BriefingConfig:
 
 
 @dataclass
+class BehaviorConfig:
+    # The nightly pass over the day's corrections (corrections.py, docs/behavior-rules.md):
+    # the local model drafts up to 3 rules for the morning briefing to offer. Local time,
+    # e.g. "03:30"; empty = off. Needs [claude] local_model; never uses Claude.
+    nightly_at: str = "03:30"
+
+
+@dataclass
 class WeatherConfig:
     # Where "what's the weather" means when no place is named, e.g. "Luther, Michigan".
     home: str = ""
@@ -490,6 +498,7 @@ class Config:
     floor: FloorConfig = field(default_factory=FloorConfig)
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
+    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     contacts: ContactsConfig = field(default_factory=ContactsConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
