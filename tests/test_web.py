@@ -28,7 +28,7 @@ from aiohttp.test_utils import make_mocked_request
 
 import scout.mcp_server as mcp_mod
 import scout.web as web_mod
-from scout import phone_devices
+from scout import phone_devices, phone_pairing
 from scout.config import Config, PhoneConfig, WebConfig
 
 TOKEN = "t" * 32
@@ -67,6 +67,8 @@ class StubApp:
     def __init__(self) -> None:
         self.speaker = StubSpeaker()
         self.rules = StubRules()
+        self.pair_asked: list[tuple[str, str]] = []
+        self.pair_answer: bool | None = True
         self.history: deque[dict[str, Any]] = deque(maxlen=300)
         self.listeners: set[asyncio.Queue[dict[str, Any]]] = set()
         self.calls: list[tuple[Any, ...]] = []
@@ -141,6 +143,10 @@ class StubApp:
 
     def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> None:
         self.calls.append(("confirm", approved, confirm_id))
+
+    async def approve_pairing(self, name: str, match: str) -> bool | None:
+        self.pair_asked.append((name, match))
+        return self.pair_answer
 
     def remove_rule(self, rule_id: str) -> None:
         self.calls.append(("remove_rule", rule_id))
@@ -1135,3 +1141,189 @@ def test_post_json_sends_json_with_the_headers() -> None:
 
     assert run(main()) == (200, {"token": "T"})
     assert seen == [("/api/fabric/subscribers/tokens", "Basic eA==", {"reference": "r"})]
+
+
+# --- easy pairing: one-time codes, approve by voice, a device-signed token -----------------
+
+PUBLIC_WEB = "https://mac.tail1.ts.net"
+
+
+@pytest.fixture
+def codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "state" / "phone_pair_codes.json"
+    monkeypatch.setattr(phone_pairing, "PATH", path)
+    monkeypatch.setattr("scout.links.web_base", lambda refresh=False: PUBLIC_WEB)
+    return path
+
+
+def test_the_web_ui_mints_a_pairing_code_with_a_qr(token_file: Path, codes: Path) -> None:
+    async def main() -> None:
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/phone/pair-code"
+            async with s.post(url) as r:
+                assert r.status == 401
+            async with s.post(url, headers={**srv.auth, "Origin": "https://evil.example"}) as r:
+                assert r.status == 403
+            async with s.post(url, headers=srv.auth) as r:
+                assert r.status == 200 and r.headers["Cache-Control"] == "no-store"
+                text = await r.text()
+        got = json.loads(text)
+        assert TOKEN not in text
+        assert got["server"] == PUBLIC_WEB and got["ttl_s"] == 600 and not got["warning"]
+        assert got["link"] == phone_pairing.link(PUBLIC_WEB, got["code"])
+        assert got["qr"].startswith("data:image/svg+xml")
+        assert got["expires_at"] > time.time() + 590
+        assert phone_pairing.consume(got["code"]) == "ok"
+
+    run(main())
+
+
+def test_the_phone_page_has_a_pairing_section() -> None:
+    files = Path(web_mod.__file__).parent
+    html, js = (files / "phone.html").read_text(), (files / "phone.js").read_text()
+    assert 'id="app-pair"' in html and 'id="app-qr"' in html and 'id="app-new-code"' in html
+    assert '"/api/phone/pair-code"' in js
+
+
+def _code_pair(s: aiohttp.ClientSession, srv: Server, code: str, name: str = "Mike iPhone") -> Any:
+    return s.post(srv.url + "/api/phone/pair", json={"code": code, "name": name})
+
+
+def test_a_code_pairs_without_the_token_once(token_file: Path, devices: Path, codes: Path) -> None:
+    async def main() -> None:
+        code, _ = phone_pairing.mint()
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            async with _code_pair(s, srv, code.lower().replace("-", "")) as r:
+                assert r.status == 200 and r.headers["Cache-Control"] == "no-store"
+                got = await r.json()
+            async with _code_pair(s, srv, code) as r:
+                assert r.status == 410
+                assert "already used" in (await r.json())["error"]
+            async with _code_pair(s, srv, "ZZZZ-ZZZZ") as r:
+                assert r.status == 401
+                assert "isn't right" in (await r.json())["error"]
+            old, _ = phone_pairing.mint(now=time.time() - 700)
+            async with _code_pair(s, srv, old) as r:
+                assert r.status == 410
+                assert "expired" in (await r.json())["error"]
+            async with s.post(srv.url + "/api/phone/pair", json={"name": "no code"}) as r:
+                assert r.status == 401
+        assert set(got) == {"device", "secret", "address"} and got["address"] == ADDRESS
+        assert phone_devices.load_devices(devices)[got["device"]]["name"] == "Mike iPhone"
+
+    run(main())
+
+
+def test_wrong_codes_are_rate_limited(token_file: Path, devices: Path, codes: Path) -> None:
+    async def main() -> None:
+        code, _ = phone_pairing.mint()
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            for _ in range(5):
+                async with _code_pair(s, srv, "ZZZZ-ZZZZ") as r:
+                    assert r.status == 401
+            async with _code_pair(s, srv, code) as r:  # even the right one, for now
+                assert r.status == 429
+                assert "Too many" in (await r.json())["error"]
+        assert not devices.exists()
+        assert phone_pairing.consume(code) == "ok"  # it wasn't spent
+
+    run(main())
+
+
+def test_a_code_is_kept_when_scout_cannot_pair_yet(token_file: Path, devices: Path, codes: Path) -> None:
+    async def main() -> None:
+        code, _ = phone_pairing.mint()
+        async with (
+            serve(phone=_phone(address="")) as srv,
+            aiohttp.ClientSession() as s,
+            _code_pair(s, srv, code) as r,
+        ):
+            assert r.status == 409
+        assert phone_pairing.consume(code) == "ok"
+
+    run(main())
+
+
+def test_a_phone_asks_and_the_room_approves(token_file: Path, devices: Path) -> None:
+    stub = StubApp()
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": "Mike's  iPhone"}) as r:
+                assert r.status == 200
+                started = await r.json()
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": ""}) as r:
+                assert r.status == 400
+            async with s.post(
+                srv.url + "/api/phone/pair/status", json={"request": started["request"], "wait": 5}
+            ) as r:
+                assert r.status == 200 and r.headers["Cache-Control"] == "no-store"
+                got = await r.json()
+            async with s.post(srv.url + "/api/phone/pair/status", json={"request": started["request"]}) as r:
+                assert (await r.json())["status"] == "unknown"
+        assert stub.pair_asked == [("Mike's iPhone", started["match"])]
+        assert got["status"] == "approved" and got["address"] == ADDRESS
+        assert phone_devices.load_devices(devices)[got["device"]]["secret"] == got["secret"]
+
+    run(main())
+
+
+def test_a_phone_the_room_refuses(token_file: Path, devices: Path) -> None:
+    stub = StubApp()
+    stub.pair_answer = False
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": "iPhone"}) as r:
+                started = await r.json()
+            async with s.post(
+                srv.url + "/api/phone/pair/status", json={"request": started["request"], "wait": 5}
+            ) as r:
+                assert (await r.json())["status"] == "denied"
+        assert not devices.exists()
+
+    run(main())
+
+
+def test_pair_requests_come_only_from_the_tailnet() -> None:
+    assert web_mod.tailnet_peer("127.0.0.1") and web_mod.tailnet_peer("::1")
+    assert web_mod.tailnet_peer("100.101.102.103")
+    assert web_mod.tailnet_peer("fd7a:115c:a1e0::1")
+    assert not web_mod.tailnet_peer("192.168.1.5")
+    assert not web_mod.tailnet_peer("") and not web_mod.tailnet_peer(None)
+
+
+def test_a_paired_phone_signs_its_token_request(
+    token_file: Path, devices: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSignalWire(data={"subscriber_id": "s-1", "token": "SAT.jwt"})
+    monkeypatch.setattr(web_mod, "_post_json", fake)
+    device, secret = phone_devices.pair("Mike iPhone", devices)
+
+    def body(nonce: str, purpose: str = phone_pairing.TOKEN_PURPOSE, ts: int | None = None) -> dict[str, Any]:
+        t = int(time.time()) if ts is None else ts
+        return {
+            "device": device,
+            "ts": t,
+            "nonce": nonce,
+            "sig": phone_devices.sign(secret, device, t, nonce, purpose),
+        }
+
+    async def main() -> None:
+        async with serve(phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/phone/token"
+            async with s.post(url, json=body("nonce-0001")) as r:
+                assert r.status == 200
+                assert (await r.json())["token"] == "SAT.jwt"  # noqa: S105
+            async with s.post(url, json=body("nonce-0001")) as r:  # replayed
+                assert r.status == 401
+            async with s.post(url, json=body("nonce-0002", purpose=ADDRESS)) as r:  # a call's signature
+                assert r.status == 401
+            async with s.post(url, json=body("nonce-0003", ts=int(time.time()) - 600)) as r:
+                assert r.status == 401
+            phone_devices.forget(device, devices)
+            async with s.post(url, json=body("nonce-0004")) as r:
+                assert r.status == 401
+        assert len(fake.requests) == 1
+
+    run(main())

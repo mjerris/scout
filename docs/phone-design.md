@@ -61,13 +61,40 @@ later exchange.
 A voiceprint is not used for access. The app proves it with a secret it got at pairing,
 sent with each call in `userVariables` (the data `@signalwire/js` passes with `dial()`).
 
-1. **Pairing, once, at home.** Scout's local web UI (tailnet only) shows a QR code. The app
-   scans it and stores what it carries in the Keychain, behind Face ID:
-   - `device`: an id for this phone;
-   - `secret`: 32 random bytes, shared only by this app install and Scout;
-   - the agent's address, and SignalWire subscriber credentials (a token plus a refresh
-     token, `scope="sat:refresh"`), so the app can sign in to SignalWire without reaching
-     the Mac.
+1. **Pairing, once.** Nothing is typed and Scout's web token never leaves the Mac. Every
+   way ends the same: Scout makes a device (`phone_devices.pair`) and hands its
+   `device`, `secret` and the agent's address to the app once, which keeps them in the
+   Keychain. In three steps:
+   1. Turn on Tailscale on the iPhone.
+   2. Pair it one of three ways:
+      - **QR code.** `scoutctl phone pair` (a terminal QR code and the link) or **Pair the
+        phone app** on the /phone page shows `scout://pair?server=<https address>&code=<code>`.
+        The address is `[web] public_url`, else the Tailscale Serve name (`links.web_base`,
+        as record links use). The code is 8 characters (ABCD-EFGH), lasts 10 minutes,
+        works once, and a newer one replaces it; only its SHA-256 is kept
+        (`state/phone_pair_codes.json`, 0600). The iPhone Camera opens the link in the app.
+      - **Found on the network.** Scout advertises `_scout._tcp` over Bonjour (a managed
+        `dns-sd -R` child: macOS's own mDNSResponder, no Python dependency) with TXT
+        `url=<https address>` and `host=<Mac name>`; the app shows "Found <Mac>" with a
+        Pair button, then asks as below. The app still talks to the https address over
+        Tailscale, never the LAN one.
+      - **Approve by voice.** The app asks (`POST /api/phone/pair/request {name}`, from the
+        tailnet or this Mac only). Scout picks a two-digit number, shows it on the phone,
+        and asks the room "Mike's iPhone wants to pair with Scout, code 47. Should I allow
+        it?" (the web UI shows the same question with Approve and Deny). A yes within two
+        minutes pairs it; the app long-polls `POST /api/phone/pair/status {request}` and
+        gets the secret once. One request at a time, three per 10 minutes.
+   3. Tap **Pair** in the app ("Pair with <host>?").
+
+   `POST /api/phone/pair` takes `{code, name}` without the web token (or the web token,
+   for the /phone page's own browser pairing). A wrong, used or expired code is refused
+   (401, 410, 410), and five wrong codes in a minute refuse every code for that minute
+   (429). A code is spent only once Scout can pair (`[phone] address` is set).
+
+   A phone paired this way holds no web token: it asks for its SignalWire subscriber
+   token (`POST /api/phone/token`) with `{device, ts, nonce, sig}`, signed like a call
+   but over `device|ts|nonce|scout:phone-token`, so the signature can't pass as a call's.
+   The nonce is remembered and `ts` must be within 60 s.
 2. **Each call.** The app dials the agent's address with
    `userVariables = {device, ts, nonce, sig}`, where `sig = HMAC-SHA256(secret,
    "device|ts|nonce|address")`.
@@ -134,7 +161,8 @@ summaries only. The phone path is opt-in, and README states this plainly.
 
 1. scout-phone with read tools, `ask_scout` and events. Test by dialing from the
    SignalWire dashboard, with Funnel on.
-2. Pairing (QR code, device secret), signed userVariables and the per-call check.
+2. Pairing (one-time code by QR, Bonjour, or a yes in the room; device secret), signed
+   userVariables and the per-call check.
 3. The browser app.
 4. Two-step action tools (done: prepare, read back, `confirm_action` behind a semantic gate).
 5. The React Native app with CallKit and Bluetooth.

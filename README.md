@@ -422,13 +422,25 @@ back, and `confirm_action` does it only if a SignalWire semantic gate (a separat
 decision model reading the conversation) finds that you clearly said yes; a yes read out
 of an email or message doesn't count. Email is never sent from the phone.
 
-Pairing, at home:
+Pairing the phone app, in three steps (nothing to type, and the web token stays on the Mac):
+
+1. Turn on Tailscale on the iPhone.
+2. Run `scripts/scoutctl.sh phone pair` (or **Pair the phone app** on the `/phone` page)
+   and point the iPhone Camera at the QR code; tap the Scout banner. Or, at home, open the
+   app: it finds Scout on the network ("Found <your Mac>"), and Scout asks out loud "<phone>
+   wants to pair with Scout, code 47. Should I allow it?"; say yes if the phone shows 47.
+3. Tap **Pair** in the app.
 
 ```sh
-scripts/scoutctl.sh phone pair "My iPhone"   # QR code + JSON with the phone's secret
+scripts/scoutctl.sh phone pair               # a one-time code (10 minutes) as a QR code and scout:// link
 scripts/scoutctl.sh phone list
 scripts/scoutctl.sh phone forget <device>    # a lost phone stops working at once
 ```
+
+The link is `scout://pair?server=<[web] public_url, else the Tailscale Serve name>&code=<code>`.
+A code works once; only its hash is stored, and wrong codes are rate-limited. Scout
+advertises itself as `_scout._tcp` over Bonjour (with its https address, never a token)
+for the app to find. The app's manual form takes the address and code, or a pasted link.
 
 Each call carries `userVariables = {device, ts, nonce, sig}` with
 `sig = hex(HMAC-SHA256(secret, "device|ts|nonce|address"))` (the secret base64url-decoded
