@@ -58,6 +58,7 @@ KIND = {
     "turn": "a past conversation",
     "memory": "something you told me to remember",
     "fact": "something you told me to remember",
+    "behavior": "a rule you set for how I behave",
     "reference": "the offline reference",
     "github": "a GitHub item",
 }
@@ -188,6 +189,8 @@ _OUT = {
     "local_search": (re.compile(r"\(ref ([^\s)]+)\)"), "{}"),
     "remember": (re.compile(r"\(ref (memory:[0-9a-f]+)\)"), "{}"),
     "recall": (re.compile(r"\(ref (memory:[0-9a-f]+)\)"), "{}"),
+    "rule_add": (re.compile(r"\(ref (behavior:[0-9a-f]+)\)"), "{}"),
+    "rules_list": (re.compile(r"\(ref (behavior:[0-9a-f]+)\)"), "{}"),
     "open_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
     "send_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
     "reference_search": (re.compile(r"\(ref (zim:[^\s)]+)\)"), "{}"),

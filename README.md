@@ -764,6 +764,14 @@ each: edit the file and Scout picks the change up. Claude sees a memory
 only when it shares words with the request (and not in strict mode); the room
 agent can also `remember`, `forget` and `recall`.
 
+**Behavior rules** are how you want Scout to behave, not facts: "from now on, call me
+Mike", "always read ticket numbers digit by digit". Scout reads the rule back ("Rule:
+call you Mike. Keep it?") and keeps it on a yes, in `memory/behavior.md`; every session
+(the room, the phone, desk sessions) gets them. Each night the local model drafts rules
+from the day's corrections for the morning briefing to offer; "what are my rules" and
+"review my rules" list and tidy them; `scoutctl.sh rules` adds one by hand. See
+`docs/behavior-rules.md`.
+
 
 ## Tasks
 

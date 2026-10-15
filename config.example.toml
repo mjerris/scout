@@ -93,6 +93,12 @@ work_end = "17:00"
 [briefing]
 at = ""  # e.g. "07:30" to hear the briefing every day; "brief me" works either way
 
+[behavior]
+# Rules for how Scout behaves live in memory/behavior.md (docs/behavior-rules.md). Each
+# night the local model reads the day's corrections and drafts up to 3 rules, which the
+# morning briefing offers one at a time; nothing is kept without a yes. "" = off.
+nightly_at = "03:30"
+
 [messages]
 # Read iMessage and SMS history (read-only) through the scout-messages helper,
 # the only program given Full Disk Access. false = the messages_* tools refuse.
