@@ -910,3 +910,9 @@ def test_phone_actions_preview_and_run_only_when_confirmed(monkeypatch: pytest.M
     # mail_phone's send, not the room's: the yes was to a read-back with addresses
     assert mail["status"] == "error" and "email address" in mail["error"]
     assert {"how": "phone", "tool": "reminder_add"}.items() <= trust.default().log[-2].items()
+
+
+def test_identifiers_are_read_digit_by_digit_on_the_phone() -> None:
+    assert "digit by digit" in ps.PROMPT
+    pushed = ps.late_answer("ask_scout", "Luca closed ticket 61723; it cost $61,723.")
+    assert "ticket 6 1 7 2 3" in pushed and "$61,723" in pushed

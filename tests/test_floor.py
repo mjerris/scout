@@ -99,6 +99,13 @@ def test_pronounce_defaults() -> None:
     assert p.stt("hey clawed, open signal wire") == "hey Claude, open SignalWire"
 
 
+def test_identifiers_are_read_digit_by_digit_before_the_rules() -> None:
+    p = Pronouncer()
+    assert p.tts("Follow up with Luca about ticket 61723.") == "Follow up with Luca about ticket 6 1 7 2 3."
+    assert p.tts("PR 117 merged") == "P R 1 1 7 merged"  # then the rules: "PR" is said "P R"
+    assert p.tts("61,000 people paid $61,723") == "61,000 people paid $61,723"
+
+
 def test_pronounce_user_rules(tmp_path: Path) -> None:
     f = tmp_path / "pronounce.txt"
     f.write_text("TTS  '\\bTali\\b'  'Tar-lee'  # dog\nbogus line\nSTT '\\b3M\\b' 'three M'\n")
