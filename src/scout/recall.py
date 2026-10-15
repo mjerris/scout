@@ -91,6 +91,9 @@ agree agreed scout user thing things something anything get got let know knew th
 much many cost costs price paid pay spend spent put use used"""
 _FILLER_WORDS = _FILLER.split()
 
+# Words that point at one of several things said ("the other one"), not a topic.
+POINTING = frozenset({"other", "first", "second", "next", "same", "one", "ones"})
+
 _QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'})
 _WORD = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 _NUMBER = re.compile(r"\d+")
@@ -116,6 +119,7 @@ def _stem(word: str) -> str:
 
 
 _FILLER_STEMS = frozenset(_stem(w) for w in _FILLER_WORDS)
+_POINTING_STEMS = frozenset(_stem(w) for w in POINTING)
 
 
 def _norm(text: str) -> str:
@@ -188,8 +192,13 @@ def record_text(h: index.Hit) -> str:
     return "\n".join(p for p in (title, body) if p)
 
 
-def prompt(question: str, hits: Sequence[index.Hit], now: dt.datetime) -> str:
-    parts = [f"Today is {now.strftime('%A, %B %-d, %Y')}.", f"Question: {question}", "", "Records:"]
+def prompt(question: str, hits: Sequence[index.Hit], now: dt.datetime, meaning: str = "") -> str:
+    """The answer prompt: the question as the user said it, and for a follow-up what it
+    means in the conversation (followup.py)."""
+    parts = [f"Today is {now.strftime('%A, %B %-d, %Y')}.", f"Question: {question}"]
+    if meaning:
+        parts.append(f"(A follow-up; in this conversation it means: {meaning})")
+    parts += ["", "Records:"]
     for n, h in enumerate(hits, 1):
         parts.append(f"[{n}] ({header(h)})\n{record_text(h)}")
     return "\n".join(parts)
@@ -233,9 +242,13 @@ def on_record(question: str, store: Searcher) -> bool:
     )
 
 
-def check(question: str, reply: dict[str, Any], hits: Sequence[index.Hit]) -> tuple[str, index.Hit] | str:
+def check(
+    question: str, reply: dict[str, Any], hits: Sequence[index.Hit], asked: str = ""
+) -> tuple[str, index.Hit] | str:
     """(answer, its record) when the reply is grounded in a record that answers the
-    question; otherwise why not (a short reason, for the log)."""
+    question; otherwise why not (a short reason, for the log). For a follow-up, `asked`
+    is what the user said: its own topic words are the new subject, and all of them must
+    be in the record ("what about my Chicago flight?" isn't answered by the Denver one's)."""
     try:
         n = int(reply.get("source"))  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -256,6 +269,9 @@ def check(question: str, reply: dict[str, Any], hits: Sequence[index.Hit]) -> tu
     have = set(content_stems(source))
     if (missing := uncovered(question, have)) is not None:
         return f"record doesn't cover {missing or 'the question'}"
+    own = [w for w in dict.fromkeys(content_stems(asked)) if w not in have and w not in _POINTING_STEMS]
+    if own:
+        return f"record doesn't cover the follow-up's {own}"
     if not set(_NUMBER.findall(answer)) <= set(_NUMBER.findall(source)):
         return "a number not in the record"
     words = content_stems(answer)
@@ -299,20 +315,29 @@ async def answer(
     kinds: Sequence[str] | None = None,
     semantic: bool | None = True,
     floor: float = MIN_SIMILARITY,
+    asked: str = "",
+    also: Sequence[str] = (),
 ) -> Answer | None:
     """A spoken answer from Scout's records, or None for Claude (also when nothing is
-    as close as `floor`: then the model isn't asked at all)."""
+    as close as `floor`: then the model isn't asked at all). For a follow-up, `question`
+    is its standalone form (followup.py): searched for and checked against, while the
+    model is shown `asked`, the user's own words, with it; `also` are the ids of the
+    records just spoken of that it is about, read first (no search can miss them)."""
     t0 = time.perf_counter()
     hits = await asyncio.to_thread(search, store, question, query, kinds, semantic, floor)
+    if also and (get := getattr(store, "get", None)) is not None:
+        known = [h for h in await asyncio.to_thread(lambda: [get(i) for i in also]) if h is not None]
+        hits = known + [h for h in hits if h.id not in {k.id for k in known}]
     # Mail or messages that address an AI or are lures never reach the model (as summary.py).
     hits = [h for h in hits if not suspicious({"subject": h.title, "body": h.body})][:MAX_HITS]
     t1 = time.perf_counter()
     if not hits:
         log.info("recall: nothing close enough for %r (%.2f s); asking Claude", question, t1 - t0)
         return None
-    out = await asyncio.wait_for(model.complete(SYSTEM, prompt(question, hits, now), 160), TIMEOUT_S)
+    shown = prompt(asked, hits, now, question) if asked and asked != question else prompt(question, hits, now)
+    out = await asyncio.wait_for(model.complete(SYSTEM, shown, 160), TIMEOUT_S)
     reply = parse(out)
-    got = check(question, reply, hits) if reply is not None else "not found"
+    got = check(question, reply, hits, asked) if reply is not None else "not found"
     log.info(
         "recall: search %.2f s, model %.2f s, %d records: %s",
         t1 - t0, time.perf_counter() - t1, len(hits), got if isinstance(got, str) else "answered",

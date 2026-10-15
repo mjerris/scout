@@ -477,7 +477,7 @@ def test_a_question_without_a_lookup_word_asks_the_model_only_when_a_record_matc
     asked: list[str] = []
 
     class Model(tier1.LocalModel):
-        def _generate(self, chat: list[dict[str, str]], max_tokens: int) -> str:
+        def _generate(self, chat: list[dict[str, str]], max_tokens: int, prefix: str = "") -> str:
             asked.append(chat[-1]["content"])
             return '{"route": "claude"}'
 

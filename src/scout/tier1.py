@@ -156,16 +156,50 @@ def guard(request: str, extra: bool = False, on_record: bool = False) -> str | N
     low = " ".join(request.lower().replace("\u2019", "'").split())
     if not (_LOOKUP.search(low) or (extra and (on_record or _EXTRA_LOOKUP.search(low)))):
         return NOT_A_LOOKUP
+    if why := unsafe(low, extra):
+        return why
+    if len(low.split()) < 2:
+        return "too short to tell"
+    return None
+
+
+# "and when is that due": a follow-up's "and" is one question going on, not a second one.
+_GOING_ON = re.compile(r"^(?:(?:ok|okay|so|hey|scout)[ ,]+)*(?:and|so)[ ,]+")
+
+
+# "what about letting him know", "and telling Sam": a follow-up suggesting something to do.
+_DOING = re.compile(
+    r"\b(?:telling|letting|emailing|texting|messaging|calling|adding|putting|scheduling|booking|creating|"
+    r"making|moving|rescheduling|changing|updating|editing|cancell?ing|deleting|removing|archiving|marking|"
+    r"accepting|declining|inviting|ordering|buying|paying|reminding|running|opening|closing|fixing|starting|"
+    r"stopping|turning|setting|playing|sharing|saving|printing|asking|forwarding|replying|responding|"
+    r"writing|drafting|sending|posting)\b"
+)
+
+
+_SUGGEST = re.compile(r"^(?:(?:and|so)[ ,]+)?(?:what|how) about\b")
+
+
+def unsafe(request: str, extra: bool = False, follow_up: bool = False) -> str | None:
+    """Why the words themselves must go to Claude (an action, a message, judgment, more
+    than one thing), or None: guard() without the lookup test. With `follow_up`, the
+    user's words before they are rewritten (followup.py): a leading "and" goes on with
+    the conversation, and "and telling Sam" suggests doing something."""
+    low = " ".join(request.lower().replace("\u2019", "'").split())
+    if follow_up:
+        low = _GOING_ON.sub("", low)
+        if m := _DOING.search(low):
+            return f"suggests doing something ({m.group(0)!r})"
     if m := _acting(low, extra):
         return f"action word {m.group(1)!r}"
+    if _SUGGEST.match(low) and (m := _DOING.search(low)):
+        return f"suggests doing something ({m.group(0)!r})"
     if _ADDRESS.search(low):
         return "a message to someone"
     if m := _JUDGMENT.search(low):
         return f"needs judgment ({m.group(0).strip()!r})"
     if extra and (m := _SEVERAL.search(low.rstrip("?.! "))):
         return f"more than one thing ({m.group(0).strip()!r})"
-    if len(low.split()) < 2:
-        return "too short to tell"
     return None
 
 
@@ -287,6 +321,10 @@ class LocalModel:
         self.extra = extra  # also the weather, tasks and recall routes (claude.local_recall)
         self.store: Any = None  # recall's store: index.default() unless set (the bench's own)
         self.recall_floor: float | None = None  # recall's relevance floor (claude.recall_min_similarity)
+        # Follow-ups ("what did he say about it?") rewritten from what was said lately
+        # (followup.py; claude.local_rewrite): the app's refs.Log, set by the Assistant.
+        self.rewrite = False
+        self.said: Any = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tier1")
         self._model: Any = None
         self._tok: Any = None
@@ -308,7 +346,9 @@ class LocalModel:
     async def load(self) -> None:
         await asyncio.get_running_loop().run_in_executor(self._pool, self._load)
 
-    def _generate(self, chat: list[dict[str, str]], max_tokens: int) -> str:
+    def _generate(self, chat: list[dict[str, str]], max_tokens: int, prefix: str = "") -> str:
+        """The model's reply; with `prefix`, the reply is begun with it (the prefix itself
+        isn't returned): '{"question": "' keeps a short JSON answer on track."""
         from mlx_lm import generate
 
         kwargs: dict[str, Any] = {"add_generation_prompt": True, "tokenize": False}
@@ -316,24 +356,45 @@ class LocalModel:
             prompt = self._tok.apply_chat_template(chat, enable_thinking=False, **kwargs)
         except TypeError:
             prompt = self._tok.apply_chat_template(chat, **kwargs)
+        prompt += prefix
         out: str = generate(self._model, self._tok, prompt=prompt, max_tokens=max_tokens, verbose=False)
         return out
 
-    async def complete(self, system: str, user: str, max_tokens: int = 120, timeout_s: float = 20.0) -> str:
+    async def complete(
+        self, system: str, user: str, max_tokens: int = 120, timeout_s: float = 20.0, prefix: str = ""
+    ) -> str:
         """The model's answer to one system + user prompt: text only, no tools. Used for
-        work on private data that stays on this Mac (summarizing an email)."""
+        work on private data that stays on this Mac (summarizing an email). `prefix`
+        begins the answer (_generate)."""
         if not self.ready:
             raise RuntimeError("the local model isn't loaded")
         chat = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         loop = asyncio.get_running_loop()
-        return await asyncio.wait_for(
-            loop.run_in_executor(self._pool, self._generate, chat, max_tokens), timeout_s
-        )
+        args: tuple[Any, ...] = (chat, max_tokens, prefix) if prefix else (chat, max_tokens)
+        return await asyncio.wait_for(loop.run_in_executor(self._pool, self._generate, *args), timeout_s)
 
     async def decide(self, request: str, now: dt.datetime) -> dict[str, Any] | None:
         """A read-only lookup that answers `request`, or None for Claude."""
         if not self.ready:
             return None
+        asked = request
+        if self.rewrite and self.extra and self.said is not None:
+            from . import followup, index
+
+            if followup.is_followup(request):
+                if unsafe(request, self.extra, follow_up=True):
+                    return None  # the user's own words act or judge: Claude, no rewrite
+                store = self.store or index.default()
+                if (rw := await followup.standalone(request, self.said, store, self)) is not None:
+                    if not rw.question:
+                        return None  # a follow-up whose subject is unknown here: Claude has it
+                    if rw.ids:
+                        # About the records just spoken of: a recall from them, no routing call.
+                        # (The user's words were guarded above; the rest is the conversation's,
+                        # and a recall only reads: "the generator oil change" is no action.)
+                        args = {"query": rw.query, "question": rw.question, "asked": asked, "refs": rw.ids}
+                        return {"tool": "recall", "args": args}
+                    request = rw.question
         why = guard(request, self.extra)
         if why == NOT_A_LOOKUP and self.extra and is_question(request):
             # No lookup word, but a question: it may be about something in the records
@@ -357,6 +418,8 @@ class LocalModel:
         decision = parse(out, now.date().isoformat(), self.extra)
         if decision is not None and decision["tool"] == "recall":
             decision["args"]["question"] = request  # answered from the records, then checked against it
+            if request != asked:
+                decision["args"]["asked"] = asked  # what the user said, shown with the records
         return decision
 
 
@@ -590,6 +653,7 @@ async def _run_extra(
         found = await recall.answer(
             question, str(args.get("query") or ""), model, store or index.default(), now,
             floor=recall.MIN_SIMILARITY if floor is None else float(floor),
+            asked=str(args.get("asked") or ""), also=list(args.get("refs") or []),
         )  # fmt: skip
     except (ToolError, OSError, TimeoutError) as exc:  # the memory service is down, or the model slow
         log.info("recall unavailable (%s); asking Claude", exc)
