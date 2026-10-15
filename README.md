@@ -21,8 +21,10 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   of its words, vs 97% with no canceller); Apple 15 dB / 6%, with ~100 ms
   more latency, so WebRTC is the default.
 - **Barge-in:** with a canceller, talking over the assistant stops it. Over
-  a reply, what you say becomes the follow-up; over a desk session's
-  `discuss` message, it becomes the session's answer. `audio.barge_in`.
+  the answer to your request, what you say becomes the follow-up (held to the
+  follow-up rules below); over a desk session's `discuss` message, it becomes
+  the session's answer; over an announcement (the pulse, a timer, a Slack
+  alert) it only stops it. `audio.barge_in`.
 - **End of turn:** Silero VAD finds speech; after a short pause the
   smart-turn model judges from how you sounded whether you're finished. A
   finished sentence ends the turn ~0.2 s after you stop; "…, um" waits up to
@@ -30,9 +32,37 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   to a fixed silence (`audio.silence_ms`).
 
 - **Wake word:** say "Hey Scout, …" (or just "Scout, …") with the request in
-  the same breath, or say "Hey Scout", wait for the chime, then speak. For 8
-  seconds after a reply the room heard you can follow up without the wake word
-  (replies that only went to your phone open no such window).
+  the same breath, or say "Hey Scout", wait for the chime, then speak.
+- **Follow-ups without the wake word:** for 8 seconds (`wake.follow_up_seconds`)
+  after Scout answered a request you made in the room, a follow-up needs no
+  wake word. Only after such an answer: announcements (the pulse, the briefing,
+  Slack alerts, timers), a desk session's message that wants no reply, a reply
+  that only went to your phone, and startup open no window. And no chains: the
+  answer to a follow-up asked without the wake word opens none, so the next
+  request takes "Hey Scout" again. With `wake.follow_up = "strict"` (the
+  default) the follow-up must also look addressed to Scout (`addressed.py`,
+  plain code): a question, a command, a short fragment of the exchange ("and
+  Saturday?", "the second one"), a request ("I meant oat milk"), an answer to
+  a question Scout just asked, or anything naming Scout. Statements ("We
+  shipped that last week"), unfinished speech ("It's asking me my..."), talk
+  to someone else ("…, by the way, Brian", "You might have to ask Brian",
+  "Can you hear me?", "everyone") and acknowledgements ("Oh, I know") are
+  ignored, logged as `ignored request (<why>)`. `"open"` takes any speech that
+  passes the gate; `"off"` always needs the wake word. A request a pause split
+  in two ("what time do those winds…" / "…forecast to start") is asked whole
+  when the second part starts within 2.5 s of the first and itself passes the
+  follow-up checks; a request joins one such part only.
+
+  Measured on synthetic room conversation and real follow-ups
+  (`tests/test_addressed.py`): on the set the rules were written from, 40 of
+  40 follow-ups taken and 0 of 35 conversation lines; on a second set, tuned
+  on after one measurement (precision 0.69, recall 0.96 before), 25 of 25 and
+  7 of 25 (precision 0.78); on a fresh set written after that, 25 of 25 and 9
+  of 25 (precision 0.74; 0.71 at its first measurement). What still gets
+  through is conversation that reads like a request: questions and commands
+  to the people on a call ("Next slide please", "Does that make sense?").
+  That is why the window opens only after an answer to you and never chains;
+  for a call in the room, `"off"`.
 - **Stop:** "Scout, stop" (also "Stop, Claude", "stop, stop", "that's enough")
   interrupts speech and the running request, cancels a pending question, ends a
   session's listen or floor hold, and drops anything queued. "Claude, new
@@ -261,7 +291,7 @@ input_device` and `output_device`. Other useful knobs in `config.toml`:
 | `asr.model = "mlx-community/whisper-small-mlx"` | less RAM and faster, slightly less accurate |
 | `tts.voice` | e.g. `af_bella`, `am_michael`, `bf_emma`, `bm_george` |
 | `audio.silence_ms` | how long a pause ends your sentence |
-| `wake.follow_up_seconds = 0` | always require the wake word |
+| `wake.follow_up = "off"` | always require the wake word (`"open"`: any follow-up that passes the gate) |
 
 Without headphones the mic hears the assistant too. Speech that starts while it
 is talking is ignored, except "Scout, stop".

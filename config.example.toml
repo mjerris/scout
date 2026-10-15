@@ -5,8 +5,13 @@
 names = ["scout"]   # add "claude" to keep answering to the old name too
 greeted_names = ["scott"]   # wake only after a greeting: "Hey Scott" yes, "Scott said" no
 max_position = 3
-# After a reply, keep listening this long for a follow-up without the wake word (0 = off).
+# After Scout answered your request, keep listening this long for a follow-up without
+# the wake word (0 = off). Announcements and startup open no window; no chains.
 follow_up_seconds = 8.0
+# "strict": the follow-up must look addressed to Scout (a question, a command, a short
+# fragment; not a statement or talk to someone else). "open": any speech that passes the
+# gate. "off": always say the wake word.
+follow_up = "strict"
 wait_seconds = 20.0   # after "hang on" / "wait" / "give me a sec"
 
 [audio]
