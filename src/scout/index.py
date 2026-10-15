@@ -47,12 +47,13 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, links, notefiles, taskfiles
+from . import journal, links, notefiles, syncstate, taskfiles
 from .config import DATA
 
 log = logging.getLogger(__name__)
 
 MODELS = DATA / "models" / "fastembed"
+UPKEEP_EVERY_S = 60.0  # upkeep() runs about this often (the background pass, or serve's loop)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
@@ -1075,8 +1076,9 @@ class Index:
         Granola notes, tasks' `- link:` lines, and facts to the turn they were told in.
         Never fails the caller."""
         try:
-            self.link_meetings()
-            n = self.link_tasks()
+            with syncstate.track("links", UPKEEP_EVERY_S) as p:
+                self.link_meetings()
+                n = p.updated = self.link_tasks()
             if n:
                 log.info("index: %d tasks got their link", n)
             if n := self.link_facts():
@@ -1417,6 +1419,11 @@ class Index:
             self._drop_old_vectors()
         return len(hits)
 
+    def pending_count(self) -> int:
+        """Items still waiting for their vectors."""
+        with self._lock:
+            return int(self._conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0])
+
     def _pending_of(self, kinds: Sequence[str] | None, since: float | None, limit: int) -> list[Hit]:
         """The newest items (of these kinds) still waiting for vectors (indexed: cheap)."""
         where, args = _filters(kinds, since, "p.")
@@ -1481,7 +1488,9 @@ class Index:
                         log.info("index: %d journal entries re-read from edited files", n)
                     await loop.run_in_executor(self._pool, self.upkeep)
                 if idle():
-                    n = await loop.run_in_executor(self._pool, self.embed_pending, batch)
+                    with syncstate.track("vectors", every_s) as p:
+                        n = p.added = await loop.run_in_executor(self._pool, self.embed_pending, batch)
+                        p.backlog = await loop.run_in_executor(self._pool, self.pending_count)
                     done += n
                     backlog = n == batch or self._old_vecs
                     if done and not backlog:

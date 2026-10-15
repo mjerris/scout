@@ -250,3 +250,8 @@ _memory: Any = None  # tests put a local memory.Memory here
 def memory() -> Any:
     """The remembered facts Scout uses: RemoteMemory, or a test's local Memory."""
     return _memory if _memory is not None else RemoteMemory(client())
+
+
+def sync_status(c: Client | None = None) -> list[dict[str, Any]]:
+    """Each sync's status from scout-memory (syncstate.Status as a dict), in order."""
+    return list((c or client()).call("/v1/sync", None)["sources"])

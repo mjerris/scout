@@ -2,7 +2,8 @@
 with no tokens: the time and date, timers, volume, play/pause, what's on the
 calendar today or tomorrow, free and busy time ("am I free at 3", "when am I free
 tomorrow"), reminder lists and what's due, the briefing ("brief me"), and the task list
-("what should I work on", "what am I waiting on", "what does Pat owe me").
+("what should I work on", "what am I waiting on", "what does Pat owe me"), and whether
+everything is syncing (syncstate.py).
 
 Tier 0 only reads. Adding or completing a reminder ("add milk to my shopping
 list") is left to Claude, whose reminder_add / reminder_complete calls are
@@ -33,6 +34,7 @@ from . import (
     trust,
     reminders_mac,
     starlink,
+    syncstate,
     tasks,
     weather,
 )
@@ -141,6 +143,7 @@ class Context:
     channel: str = "room"  # who asked: the room, or the phone agent (answer() sets it)
     said: Callable[[], _refs.Log] = lambda: _refs.log_of()  # what was said lately, with its refs
     store: Callable[[], Any] = lambda: _refs._store()  # where records resolve (index.default)
+    sync: Callable[[], list[syncstate.Status]] = syncstate.statuses
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
@@ -763,6 +766,16 @@ async def _trust_status(m: re.Match[str], c: Context) -> str:
 async def _ledger(m: re.Match[str], c: Context) -> str:
     period = (m.group("period") or "today").removeprefix("this ")
     return ledger.speak(period, ledger.summary(ledger.start_of(period, c.now())))
+
+
+@_rule(
+    r"(?:is (?:everything|it all|all) (?:syncing|in sync|up to date|synced)|"
+    r"(?:what(?:'s| is) )?(?:the )?sync(?:ing)? status|"
+    r"(?:is|are|how(?:'s| is)|how are) (?:the )?(?:sync|syncs|syncing)(?: (?:working|going|ok|okay|running))?)"
+)
+async def _sync_status(m: re.Match[str], c: Context) -> str:
+    sts = await asyncio.to_thread(c.sync)
+    return syncstate.speak(sts, c.now())
 
 
 # "Give me a link to that", "where did that come from": the record the last answer was

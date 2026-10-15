@@ -7,6 +7,8 @@ needs the user. No AI, nothing sent anywhere.
     tasks due today              "Due today: send Pat the budget." (once, morning)
     what others owe, overdue     "Pat owes you the vendor quote, overdue since October 9;
                                   maybe follow up." (once a day)
+    a sync failing or stalled    "Mail sync has been failing since 9 this morning." (once a
+                                  day per source, after an hour of failing; syncstate.py)
 
 Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
 when they end (the morning's overlaps and tasks, an event just after) is said then.
@@ -27,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import calendar_mac, freebusy, refs, reminders_mac, tasks
+from . import calendar_mac, freebusy, refs, reminders_mac, syncstate, tasks
 from .freebusy import clock
 from .mac import ToolError
 from .starlink import in_quiet_hours
@@ -37,6 +39,7 @@ log = logging.getLogger(__name__)
 Events = Callable[[str, str], Awaitable[dict[str, Any]]]
 Reminders = Callable[[], Awaitable[dict[str, Any]]]
 Tasks = Callable[[], Awaitable[list[tasks.Task]]]
+Syncs = Callable[[], list[syncstate.Status]]
 
 
 async def _events(start: str, end: str) -> dict[str, Any]:
@@ -61,6 +64,7 @@ class Pulse:
     events: Events = _events
     reminders: Reminders = _reminders
     tasks: Tasks = _tasks
+    sync: Syncs = syncstate.statuses
     _said: set[str] = field(default_factory=set)
     _conflicts_day: dt.date | None = None
     _tasks_day: dt.date | None = None
@@ -86,7 +90,17 @@ class Pulse:
         except ToolError as exc:
             log.debug("pulse: reminders skipped (%s)", exc)
         out += await self._task_day(now)
+        out += self._syncs(now)
         return out
+
+    def _syncs(self, now: dt.datetime) -> list[str]:
+        """A sync failing for an hour or stalled: said once a day per source."""
+        try:
+            found = syncstate.alerts(self.sync(), now)
+        except Exception as exc:  # an unreadable status file: nothing to say
+            log.info("pulse: sync status skipped (%s)", exc)
+            return []
+        return [text for source, text in found if self._once(f"sync:{source}:{now.date()}")]
 
     def wait(self, now: dt.datetime) -> float:
         """Seconds until the next check: the interval, or sooner when an event's heads-up

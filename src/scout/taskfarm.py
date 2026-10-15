@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import index, ledger, privacy, tasks
+from . import index, ledger, privacy, syncstate, tasks
 from .config import DATA, load
 from .mac import ToolError
 
@@ -586,6 +586,11 @@ async def read_slack(
         read_to[r.channel] = max(read_to.get(r.channel, 0.0), r.last)
 
 
+def _unmirrored(store: index.Store) -> int:
+    """Open tasks with no reminder yet (sync status: the Reminders backlog)."""
+    return sum(1 for t in tasks.all_tasks(store) if t.status == "open" and not t.fields.get("reminder"))
+
+
 async def loop(
     idle: Callable[[], bool],
     local: Callable[[], Any],
@@ -597,7 +602,10 @@ async def loop(
     while True:
         try:
             if idle():
-                c = await farm_pass(store(), claude_extract, local_extract(local()))
+                every = max(1.0, cfg.farm_every_min) * 60
+                with syncstate.track("tasks", every) as p:
+                    c = await farm_pass(store(), claude_extract, local_extract(local()))
+                    p.added, p.updated = c["added"], c["merged"]
                 if c["read"]:
                     log.info(
                         "tasks: farm read %d (%d added, %d merged, %d skipped)",
@@ -606,10 +614,12 @@ async def loop(
                         c["merged"],
                         c["skipped"],
                     )
-                await tasks.sync_from_reminders(store())
-                await tasks.repair_owners(store())
-                await tasks.mirror_missing(store())
-                await tasks.link_reminders(store())
+                with syncstate.track("reminders", every) as p:
+                    done = await tasks.sync_from_reminders(store())
+                    owners = await tasks.repair_owners(store())
+                    p.added = await tasks.mirror_missing(store())
+                    p.updated = done + owners + await tasks.link_reminders(store())
+                    p.backlog = await asyncio.to_thread(_unmirrored, store()) if load().tasks.mirror else None
         except Exception:
             log.exception("tasks: farm pass failed")
         await asyncio.sleep(max(1.0, cfg.farm_every_min) * 60)
