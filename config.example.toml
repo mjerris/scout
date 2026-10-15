@@ -156,3 +156,5 @@ enabled = true
 # app_token = "<xapp- app-level token>"  # live events over Socket Mode (connections:write)
 # live_every_min = 60                     # the poll while live events are flowing
 # announce = ["Luca"]                     # say out loud when they DM you (who, never what)
+# announce_dms = "listed"                 # "listed" (the people above), "all" (every DM), or "off"
+# announce_mentions = false               # also say an @-mention of you in a channel

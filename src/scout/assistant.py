@@ -444,7 +444,9 @@ class Assistant:
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         sc = self.cfg.slack
-        if sc.token and sc.app_token and sc.announce:  # DMs said out loud (slack_alerts.py)
+        from . import slack
+
+        if slack.announcing(sc):  # DMs and mentions said out loud (slack_alerts.py)
             from . import slack_alerts
 
             self._spawn(

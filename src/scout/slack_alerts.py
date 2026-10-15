@@ -1,12 +1,14 @@
 """Saying a Slack DM out loud, in the Scout app (docs/slack.md, Alerts).
 
 scout-memory hears Slack's live events (slack_events.py) and queues a DM or group DM
-from someone in `[slack] announce`; this takes that queue every POLL_S
+([slack] announce_dms: from the people in `announce`, or all) and @-mentions of you
+(announce_mentions); this takes that queue every POLL_S
 (memory_client.slack_alerts) and says who messaged:
 
     one message     "Luca messaged you on Slack."
     a burst         "Luca sent you 3 messages on Slack."
     two people      "Luca sent you 2 messages and Sam messaged you on Slack."
+    a mention       "Luca mentioned you in #launch on Slack."
 
 Only who, never what they wrote. A burst is said once: messages are gathered until
 SETTLE_S pass with nothing new (at most HOLD_S after the first). It's said like the
@@ -42,15 +44,25 @@ Take = Callable[[], list[dict[str, Any]]]
 
 
 def sentence(alerts: Sequence[dict[str, Any]]) -> refs.Spoken:
-    """Who messaged, each person once with their count, in the order they wrote."""
+    """Who messaged or mentioned you, each person once with their count, in the order
+    they wrote: "Luca mentioned you in #launch and Sam messaged you on Slack." """
     counts: OrderedDict[str, int] = OrderedDict()
+    mentions: OrderedDict[tuple[str, str], int] = OrderedDict()
     for a in alerts:
         who = str(a.get("who") or "Someone")
-        counts[who] = counts.get(who, 0) + 1
-    parts = [f"{who} messaged you" if n == 1 else f"{who} sent you {n} messages" for who, n in counts.items()]
-    if all(n == 1 for n in counts.values()) and len(counts) > 1:
+        if a.get("mention"):
+            k = (who, str(a["mention"]))
+            mentions[k] = mentions.get(k, 0) + 1
+        else:
+            counts[who] = counts.get(who, 0) + 1
+    if not mentions and all(n == 1 for n in counts.values()) and len(counts) > 1:
         text = f"{join(list(counts))} messaged you on Slack."
     else:
+        parts = [f"{who} mentioned you in {where}" if n == 1 else f"{who} mentioned you {n} times in {where}"
+                 for (who, where), n in mentions.items()]  # fmt: skip
+        parts += [
+            f"{who} messaged you" if n == 1 else f"{who} sent you {n} messages" for who, n in counts.items()
+        ]
         text = f"{join(parts)} on Slack."
     return refs.Spoken(text, [str(a["id"]) for a in alerts if a.get("id")])
 

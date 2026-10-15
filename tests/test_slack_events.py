@@ -854,3 +854,49 @@ def test_sigterm_closes_the_socket_then_ends_as_before(monkeypatch: pytest.Monke
 
     run(memory_service._terminate([close, stuck], wait_s=0.1))
     assert done == ["closed", "handler True", "kill True"]  # a stuck closer doesn't hold it up
+
+
+def test_announce_every_dm_and_mentions(fake: Fake, tmp_path: Path) -> None:
+    s = store()
+    lv = live(fake, tmp_path / "s.json", announce_dms="all", announce_mentions=True)
+    dm = msg(ts(5), "U2", "got a minute?")
+    assert [a["who"] for a in slack.handle_event(s, lv, ev("D1", dm, channel_type="im"), now=NOW)] == ["Sam"]
+    group = msg(ts(4), "U1", "group hello")
+    assert [a["who"] for a in slack.handle_event(s, lv, ev("G1", group), now=NOW)] == ["Pat"]
+    plain = msg(ts(4), "U2", "in a channel, not to me")
+    assert slack.handle_event(s, lv, ev("C1", plain), now=NOW) == []
+    to_me = msg(ts(3), "U3", "<@UME> can you look at the PR?")
+    assert slack.handle_event(s, lv, ev("C1", to_me), now=NOW) == [
+        {"id": f"slack:C1:{to_me['ts']}", "who": "Luca", "channel": "C1", "ts": to_me["ts"],
+         "group": False, "mention": "#launch"}
+    ]  # fmt: skip
+    assert slack.handle_event(s, lv, ev("C1", msg(ts(2), "UME", "<@UME> note to self")), now=NOW) == []
+
+
+def test_dms_off_still_says_mentions(fake: Fake, tmp_path: Path) -> None:
+    s = store()
+    lv = live(fake, tmp_path / "s.json", announce=["Luca"], announce_dms="off", announce_mentions=True)
+    assert slack.handle_event(s, lv, ev("D3", msg(ts(5), "U3", "hi"), channel_type="im"), now=NOW) == []
+    said = slack.handle_event(s, lv, ev("C1", msg(ts(4), "U3", "ping <@UME>")), now=NOW)
+    assert [a.get("mention") for a in said] == ["#launch"]
+
+
+def test_mention_sentences() -> None:
+    from scout import slack_alerts
+
+    one = [{"id": "slack:C1:1", "who": "Luca", "mention": "#launch"}]
+    assert slack_alerts.sentence(one) == "Luca mentioned you in #launch on Slack."
+    mixed = [*one, {"id": "slack:D1:2", "who": "Sam"}]
+    assert slack_alerts.sentence(mixed) == "Luca mentioned you in #launch and Sam messaged you on Slack."
+
+
+def test_announcing_needs_something_to_say() -> None:
+    sc = config.SlackConfig
+    assert not slack.announcing(sc(token="xoxp-x", app_token="xapp-x"))  # noqa: S106 (made up)
+    assert slack.announcing(sc(token="xoxp-x", app_token="xapp-x", announce=["Luca"]))  # noqa: S106
+    assert slack.announcing(sc(token="xoxp-x", app_token="xapp-x", announce_dms="all"))  # noqa: S106
+    assert slack.announcing(sc(token="xoxp-x", app_token="xapp-x", announce_mentions=True))  # noqa: S106
+    assert not slack.announcing(sc(token="xoxp-x", announce_dms="all"))  # noqa: S106 (no events)
+    c = config.Config(slack=sc(announce_dms="everyone"))
+    config._check(c)
+    assert c.slack.announce_dms == "listed"  # an unknown value: warned, and the default used
