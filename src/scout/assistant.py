@@ -84,9 +84,9 @@ PHONE_TOOLS = {
         "list_timers",
     )
 }
-# Never from the phone: email (sending or drafting, which opens a window on the Mac) and
-# starting a call on the Mac (nobody is there to take it; call_link puts the number on the phone).
-NOT_BY_PHONE = ("call_start",)  # the phone puts the number in Reminders instead (call_link)
+# Never from the phone: starting a call on the Mac (nobody is there to take it; call_link
+# puts the number on the phone). Email by phone has its own rules (mail_phone.py).
+NOT_BY_PHONE = ("call_start",)
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
 # An answer built from these is private: mail and messages, and what's indexed from them.
 _PRIVATE_TOOL = re.compile(
