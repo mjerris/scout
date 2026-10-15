@@ -204,7 +204,7 @@ def main() -> None:
     ap.add_argument("--json", type=Path)
     a = ap.parse_args()
     TMP.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Any] = {"windows_version": getattr(index, "WINDOWS_VERSION", 0)}
+    out: dict[str, Any] = {"windows_version": index.WINDOWS_VERSION}
     for name in a.sets.split(","):
         t0 = time.perf_counter()
         if name == "live":

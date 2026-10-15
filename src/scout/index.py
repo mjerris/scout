@@ -23,6 +23,16 @@ between; a search embeds only a few windows itself (its text hits, then the newe
 items of the kinds it asks for), so nothing is ever unreachable by full text, and
 nothing leaves the Mac.
 
+Windows are ~1,000 characters. A long item with markdown headings (a meeting summary, a
+note, a mail) is cut at its headings instead: each window holds one section (a long one
+split, short ones together) and starts with the item's title and the section's heading
+(SECTION_MARK between them). Measured against fixed windows on a copy of the real
+store, a task's title found its source meeting or mail in the top 5 for 12 of 15, up
+from 10; the synthetic year (short items only) is unchanged, and on synthetic meeting
+summaries both rank the right meeting first about as often (MRR 0.94). A new scheme
+(WINDOWS_VERSION) re-embeds the long items in the background once, their old vectors
+serving searches meanwhile.
+
 The embedder is bge-small-en-v1.5 (ONNX on CPU through fastembed, ~0.7 GB resident
 while loaded, loads in ~4 s); it unloads after 15 minutes idle ([index] unload_after_s). The model name and dimension are stored
 with each vector, so changing either re-embeds in the background.
@@ -434,6 +444,7 @@ class Index:
         per window) goes into pending. From then on put() and _store_vectors keep it."""
         if self.embedder is None:
             return
+        self._new_windows()
         model = self.embedder.model
         row = self._conn.execute("SELECT value FROM settings WHERE key = 'pending_model'").fetchone()
         if row and row[0] == model:
@@ -451,6 +462,27 @@ class Index:
                 "INSERT OR REPLACE INTO settings(key, value) VALUES ('pending_model', ?)", (model,)
             )
         log.info("index: %d items to embed for %s (found in %.2fs)", n, model, time.perf_counter() - t0)
+
+    def _new_windows(self) -> None:
+        """Once per window scheme (WINDOWS_VERSION): the long items go into pending, to be
+        embedded again in the background; their old vectors serve searches meanwhile. A
+        new store starts on the current scheme."""
+        row = self._conn.execute("SELECT value FROM settings WHERE key = 'windows_version'").fetchone()
+        if row and row[0] == str(WINDOWS_VERSION):
+            return
+        with self._tx():
+            n = 0
+            if row or self._conn.execute("SELECT 1 FROM vecs LIMIT 1").fetchone():
+                n = self._conn.execute(
+                    "INSERT OR IGNORE INTO pending(id, kind, ts) SELECT id, kind, ts FROM docs WHERE length(body) > ?",
+                    (EMBED_CHARS,),
+                ).rowcount
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES ('windows_version', ?)",
+                (str(WINDOWS_VERSION),),
+            )
+        if n:
+            log.info("index: %d long items to embed again (window scheme %d)", n, WINDOWS_VERSION)
 
     @contextlib.contextmanager
     def _tx(self) -> Iterator[None]:
@@ -1581,14 +1613,67 @@ WINDOW_OVERLAP = 100  # windows overlap a little, so a sentence cut at an edge i
 MAX_WINDOWS = 20  # an item's first 20 windows (~18,000 characters) are embedded
 
 
+# How items are cut into windows. A change re-embeds the long items in the background
+# (_fill_pending); short ones are one window either way. 2: cut at markdown headings.
+WINDOWS_VERSION = 2
+SECTION_MARK = " \u203a "  # between a window's title and heading; measured with it (a colon did worse)
+MIN_SECTION_CHARS = 300  # a window this short takes the next section too (tiny sections share)
+_HEADING = re.compile(r"^#{1,6}[ \t]+(.*?)[ \t#]*$", re.M)
+
+
 def _doc_texts(h: Hit) -> list[str]:
     """What gets embedded for an item: its title, who and opening; then each further
-    window of the body, with the title for context."""
+    window of the body, with the title for context. A long body with markdown headings
+    is cut at them (_section_windows); others in fixed windows."""
+    if len(h.body) > EMBED_CHARS and _HEADING.search(h.body):
+        return _section_windows(h)
+    return _fixed_windows(h)
+
+
+def _fixed_windows(h: Hit) -> list[str]:
     out = [" ".join(p for p in (h.title, h.who, h.body[:EMBED_CHARS]) if p)]
     start = EMBED_CHARS - WINDOW_OVERLAP
     while start + WINDOW_OVERLAP < len(h.body) and len(out) < MAX_WINDOWS:
         out.append(" ".join(p for p in (h.title, h.body[start : start + EMBED_CHARS]) if p))
         start += EMBED_CHARS - WINDOW_OVERLAP
+    return out
+
+
+def _pieces(text: str) -> list[str]:
+    """A section's text in windows of EMBED_CHARS, overlapping a little."""
+    out, start = [], 0
+    while True:
+        out.append(text[start : start + EMBED_CHARS])
+        if start + EMBED_CHARS >= len(text):
+            return out
+        start += EMBED_CHARS - WINDOW_OVERLAP
+
+
+def _section_windows(h: Hit) -> list[str]:
+    """Windows that start at a heading: each holds one section (a long one is split, a
+    short one shares with the next), prefixed with the title and its heading (SECTION_MARK
+    between them), so a window deep in a meeting summary says what it's part of.
+    The first window is the title, who and opening, as for any item."""
+    cuts = list(_HEADING.finditer(h.body))
+    units: list[tuple[str, str, bool]] = []  # (heading, text, starts its section)
+    for i, m in enumerate(cuts):
+        end = cuts[i + 1].start() if i + 1 < len(cuts) else len(h.body)
+        text = h.body[m.end() : end].strip()
+        units += [(m.group(1).strip(), t, n == 0) for n, t in enumerate(_pieces(text) if text else [""])]
+    opening = h.body[: cuts[0].start()].strip()
+    out = [" ".join(p for p in (h.title, h.who, opening) if p)]
+    size = len(opening)  # the current window's own text, without its prefix
+    whole = True  # the current window holds whole sections (not the rest of a long one)
+    for head, text, first in units:
+        part = f"{head}\n{text}".strip()
+        if first and whole and size < MIN_SECTION_CHARS and size + len(part) <= EMBED_CHARS:
+            out[-1] += ("\n\n" if out[-1] else "") + part
+            size += len(part)
+            continue
+        if len(out) == MAX_WINDOWS:
+            break
+        out.append(f"{h.title}{SECTION_MARK}{head}\n{text}" if h.title else part)
+        size, whole = len(text), first and len(text) < EMBED_CHARS
     return out
 
 
