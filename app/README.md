@@ -37,8 +37,9 @@ The app never needs Scout's web token. Three steps:
    `/phone` page) shows a QR code: point the iPhone Camera at it and tap the Scout banner.
    It opens `scout://pair?server=<Scout's https address>&code=<one-time code>` here.
    At home the app can also find Scout on the network (Bonjour, `_scout._tcp`): tap
-   **Pair** next to "Found <your Mac>", and say yes when Scout asks out loud (the phone and
-   Scout show the same two-digit number). **No code? Ask Scout to approve** does the same
+   **Pair** next to "Found <your Mac>": from your own Tailscale login it pairs at once;
+   otherwise say yes when Scout asks out loud (the phone and Scout show the same two-digit
+   number). `[phone] pair_mode` in Scout's config can require the yes, or codes only. **No code? Ask Scout to approve** does the same
    with a typed address.
 3. Tap **Pair** ("Pair with <host>?").
 

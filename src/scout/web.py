@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import subprocess
 import time
 import uuid
 from collections import deque
@@ -132,6 +133,8 @@ class VoiceApp(Protocol):
     def answer_confirm(self, approved: bool | str, confirm_id: int | None = None) -> object: ...
 
     async def approve_pairing(self, name: str, match: str) -> bool | None: ...
+
+    async def announce(self, text: str, who: str = "announce") -> None: ...
 
     def remove_rule(self, rule_id: str) -> object: ...
 
@@ -410,6 +413,50 @@ def tailnet_peer(remote: str | None) -> bool:
     except ValueError:
         return False
     return ip.is_loopback or ip in _CGNAT or ip in _TAILNET6
+
+
+def serve_login(remote: str | None, headers: Any) -> str:
+    """The Tailscale login Tailscale Serve vouches for (Tailscale-User-Login), or "". Only
+    on a request Serve proxied: from this Mac's loopback, as https. Serve removes any copy
+    a client sends, and adds none for tagged devices or Funnel; a LAN or tailnet listener
+    gets whatever the client sent, so it is never believed there."""
+    try:
+        ip = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return ""
+    if not ip.is_loopback:
+        return ""
+    if headers.get("X-Forwarded-Proto", "").split(",")[0].strip() != "https":
+        return ""
+    return str(headers.get("Tailscale-User-Login", "")).strip()
+
+
+def owner_login(status: Any) -> str:
+    """This Mac's own Tailscale login, from `tailscale status --json`."""
+    try:
+        uid = status["Self"]["UserID"]
+        return str(status["User"][str(uid)]["LoginName"]).strip()
+    except (KeyError, TypeError):
+        return ""
+
+
+def _tailscale_owner() -> str:
+    for exe in _tailscale_exes():
+        try:
+            out = subprocess.run(  # noqa: S603 (a fixed program with fixed arguments)
+                [exe, "status", "--json"], capture_output=True, text=True, timeout=5, check=False
+            ).stdout
+            login = owner_login(json.loads(out or "{}"))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            log.info("web: tailscale status not read (%s)", exc)
+            continue
+        if login:
+            return login
+    return ""
+
+
+PAIR_MODES = ("tailnet", "approve", "code")
+OWNER_TTL_S = 600.0
 
 
 def _netloc(scheme: str, host: str) -> str:
@@ -697,6 +744,19 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
     pair_requests = phone_pairing.PairRequests(
         assistant.approve_pairing, lambda name: phone_devices.pair(name)
     )
+    pair_mode = phone.pair_mode if phone.pair_mode in PAIR_MODES else "approve"
+    if pair_mode != phone.pair_mode:
+        log.warning(
+            "web: [phone] pair_mode %r is not one of %s; asking in the room", phone.pair_mode, PAIR_MODES
+        )
+    owner_cache: list[tuple[float, str]] = []
+
+    async def owners() -> set[str]:
+        """The logins that count as the owner: this Mac's own (kept a while) and [phone] owners."""
+        if not owner_cache or time.monotonic() - owner_cache[0][0] > OWNER_TTL_S:
+            owner_cache[:] = [(time.monotonic(), await asyncio.to_thread(_tailscale_owner))]
+        return {o.casefold() for o in [owner_cache[0][1], *phone.owners] if o.strip()}
+
     # A phone's signed token request: its secret over device|ts|nonce|TOKEN_PURPOSE.
     token_check = phone_devices.CallCheck(phone_pairing.TOKEN_PURPOSE, 60.0)
 
@@ -925,6 +985,26 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             return refused(400, str(exc))
         if (r := no_address()) is not None:
             return r
+        if pair_mode == "code":
+            return refused(
+                403, "Scout pairs phones by code only here: run scoutctl phone pair and scan the QR code."
+            )
+        login = serve_login(req.remote, req.headers)
+        if pair_mode == "tailnet" and login and login.casefold() in await owners():
+            try:
+                device, secret = await asyncio.to_thread(phone_devices.pair, name)
+            except (OSError, ValueError) as exc:
+                log.warning("web: pairing %r failed: %s", name, exc)
+                return refused(500, f"Couldn't pair: {exc}")
+            log.info("web: paired %s (%s) at once: it is the owner's Tailscale login %s", device, name, login)
+            hub.spawn(assistant.announce(f"Paired {name}."))
+            resp = web.json_response(
+                {"status": "approved", "device": device, "secret": secret, "address": phone.address}
+            )
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+        if login:
+            log.info("web: pairing request from Tailscale login %s (not the owner): asking the room", login)
         try:
             started = pair_requests.start(name)
         except phone_pairing.PairRefused as exc:
@@ -1267,7 +1347,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         log.info("web: bound %s", runner.addresses)
     else:
         rebind_task.append(asyncio.create_task(rebind()))
-        if Path(DNS_SD).exists():
+        if Path(DNS_SD).exists() and pair_mode != "code":
             rebind_task.append(asyncio.create_task(advertise()))
     shown = next((h for h in sites if not h.startswith("127.")), next(iter(sites), "127.0.0.1"))
     log.info("web UI: http://%s:%d/?token=<the contents of %s>", shown, cfg.port, TOKEN_PATH)

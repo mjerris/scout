@@ -17,8 +17,9 @@ type Server = Pick<ScoutServer, 'pairWithCode' | 'requestPairing' | 'pairStatus'
  * phone's own device secret:
  * - a scout://pair link (the iPhone Camera scanned the QR code from `scoutctl phone pair`
  *   or Scout's /phone page): "Pair with <host>?" and one tap;
- * - Scout found on the local network (Bonjour), or its address typed in: the app asks,
- *   and Scout asks the room out loud, with the same two-digit number on both;
+ * - Scout found on the local network (Bonjour), or its address typed in: the app asks;
+ *   from your own Tailscale login Scout pairs at once, otherwise it asks the room out
+ *   loud, with the same two-digit number on both;
  * - the address and the code typed in (or the link pasted).
  */
 export function PairScreen({
@@ -118,6 +119,12 @@ export function PairScreen({
       const s = makeServer(base);
       const r = await s.requestPairing(n);
       if (mine !== askId.current) return;
+      if ('status' in r) {
+        // Your own Tailscale login: Scout paired it at once (and says so in the room).
+        const { status: _, ...p } = r;
+        await finish(base, n, p);
+        return;
+      }
       setAsking({ match: r.match, host: hostOf(base) });
       for (;;) {
         const st = await s.pairStatus(r.request, 20);
@@ -201,7 +208,10 @@ export function PairScreen({
               <Button testID={`found-${i}`} title="Pair" kind="go" onPress={() => ask(f.server)} disabled={busy} />
             </Row>
           ))}
-          <Muted>Scout asks out loud in the room, and shows a two-digit number on this phone and on the Mac.</Muted>
+          <Muted>
+            From your own Tailscale login it pairs at once. Otherwise Scout asks out loud in the room, with a two-digit
+            number on this phone and on the Mac.
+          </Muted>
         </Section>
       ) : null}
       <Section title="Pair with Scout">

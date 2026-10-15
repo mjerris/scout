@@ -144,9 +144,13 @@ export class ScoutServer {
     return ScoutServer.paired((await this.post('/api/phone/pair', { code, name })) as Partial<Paired> | null, 'pairing');
   }
 
-  /** Ask to pair without a code: Scout asks the room, with `match` shown on both. */
-  async requestPairing(name: string): Promise<PairRequest> {
-    const d = (await this.post('/api/phone/pair/request', { name })) as Partial<PairRequest> | null;
+  /**
+   * Ask to pair without a code: Scout asks the room, with `match` shown on both. From the
+   * owner's own Tailscale login ([phone] pair_mode = "tailnet") it pairs at once.
+   */
+  async requestPairing(name: string): Promise<PairRequest | ({ status: 'approved' } & Paired)> {
+    const d = (await this.post('/api/phone/pair/request', { name })) as (Partial<PairRequest> & { status?: unknown }) | null;
+    if (d && d.status === 'approved') return { status: 'approved', ...ScoutServer.paired(d as Partial<Paired>, 'pairing') };
     if (!d || typeof d.request !== 'string' || typeof d.match !== 'string') {
       throw new ServerError('Scout answered the pairing request with something unexpected', 502);
     }

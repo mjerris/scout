@@ -91,3 +91,13 @@ test('a network failure says to turn Tailscale on', async () => {
     /Couldn't reach Scout at https:\/\/m.*Turn on Tailscale/,
   );
 });
+
+test("the owner's request comes back paired", async () => {
+  const f = fakeFetch(200, { status: 'approved', device: 'd1', secret: 's', address: '/private/scout' });
+  expect(await new ScoutServer('https://m', null, f.impl).requestPairing('Mike iPhone')).toEqual({
+    status: 'approved',
+    device: 'd1',
+    secret: 's',
+    address: '/private/scout',
+  });
+});
