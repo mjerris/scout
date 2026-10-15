@@ -56,9 +56,10 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    skipped too, and so is mail that is also stored as a meeting summary (it's read once,
    as the meeting). Meetings go through once all their parts have been stored for five
    minutes (a Granola note's transcript arrives in pieces). Slack (kind `slack`, synced
-   by scout-memory, docs/slack.md): bot messages and messages without an action cue are
-   skipped, and a conversation's new messages are read together, up to 3,000 characters
-   per read.
+   by scout-memory, docs/slack.md): only what involves you is read (see "What involves
+   you" below); bot messages and messages without an action cue are skipped, and a
+   conversation's new messages are read together, up to 3,000 characters per read.
+   Mail you're only Cc'd on, or a list's mail, is skipped unless it names you (below).
 2. **Extract.** Meetings go to Claude (Haiku; see "Which model reads meetings"), email and Slack to the local model, with one prompt; in
    strict privacy mode, meeting summaries that came by email go to the local model too.
    It returns JSON: one item per task with title, owner (`me` or a name), due date,
@@ -84,6 +85,33 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    importance or urgency.
 4. **Write.** The task goes into its file and Reminders. The farm doesn't write to the
    journal; the Scout app's log says what it found.
+
+### What involves you
+
+Found tasks are only useful when they're yours to do or to chase, so the farm reads
+and keeps less than everything it can see (2026-10-15, after a follow-up task came
+from a channel conversation between two other people):
+
+- **Slack**: DMs and group DMs you're in; channel messages and threads you wrote in or
+  are @-mentioned or named in. Channel chatter between others is skipped before any AI.
+  A found task is kept when it's for you and you were addressed (or it's your own
+  commitment; in a group DM an unaddressed ask counts), or it's someone else's and you
+  asked for it or were asked (the quoted line is yours or speaks to you, or it's the
+  owner answering a line that is). In a DM, everything is kept. Details and the
+  once-over of tasks found before: docs/slack.md, "Tasks".
+- **Mail**: read when one of your addresses in `[tasks] me` is in To, or the mail names
+  you ("Mike, can you ..."); a thread you're only Cc'd on, or a list's mail to everyone,
+  doesn't make tasks. The recipients are kept with each message from now on
+  (`mailindex`, meta `to`/`cc`); mail stored before that, and everything while
+  `[tasks] me` has no address, is read as before.
+- **Meetings**: unchanged. You were there, and the prompt already asks only for what
+  was asked of you or promised to you.
+
+Measured on a synthetic set of 16 Slack conversations (`scripts/bench_taskfarm.py
+slack`, the local Qwen3-4B, 9 tasks that belong on the list): before, every
+conversation was read and every quoted task kept: 14 found, 7 right (50%). After: 10
+reads instead of 16, 7 found, 7 right (100%), the same 7 of 9 real ones (the model
+missed the other two either way).
 
 Backfill: on the first run, meetings and mail from the last `[tasks] backfill_days`
 (14) are read. Older ones are left alone, since what they asked for is likely done.

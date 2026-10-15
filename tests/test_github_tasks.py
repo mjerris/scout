@@ -76,7 +76,7 @@ def farm(s: index.Index, answer: dict[str, Any]) -> None:
 
 def test_a_task_about_a_pr_links_to_it_and_opens_it(store: index.Index) -> None:
     gh_item(store, "acme/api", 117, "Fix the jitter buffer")
-    slack_msg(store, "C1", NOW - 600, "can you review https://github.com/acme/api/pull/117 today?")
+    slack_msg(store, "C1", NOW - 600, "Mike, can you review https://github.com/acme/api/pull/117 today?")
     farm(store, {"tasks": [{"title": "Review PR 117", "owner": "me", "evidence": "can you review"}]})
     [h] = store.recent(["task"])
     assert h.meta["github"] == "acme/api#117" and h.meta["link"] == "https://github.com/acme/api/pull/117"
@@ -91,7 +91,10 @@ def test_a_task_about_a_pr_links_to_it_and_opens_it(store: index.Index) -> None:
 
 def test_a_task_not_about_the_item_gets_no_github_line(store: index.Index) -> None:
     slack_msg(
-        store, "C1", NOW - 600, "see https://github.com/acme/api/pull/117; also can you send the budget?"
+        store,
+        "C1",
+        NOW - 600,
+        "Mike, see https://github.com/acme/api/pull/117; also can you send the budget?",
     )
     farm(
         store, {"tasks": [{"title": "Send the budget", "owner": "me", "evidence": "can you send the budget"}]}

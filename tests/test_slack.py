@@ -179,6 +179,21 @@ def test_a_pass_stores_messages_and_threads(fake: FakeSlack, tmp_path: Path) -> 
     assert state["users"]["U1"] == "Pat Doe"
 
 
+def test_items_say_who_wrote_each_line_and_whom_it_mentions(fake: FakeSlack, tmp_path: Path) -> None:
+    """The farm's scope (taskfarm.slack_involves) needs the senders and @-mentions by id:
+    names in the text can be anyone's. The user's own id (auth.test) is kept in the state."""
+    s = store()
+    slack.sync_pass(s, fake, 14, state_path=tmp_path / "slack.json", now=NOW)
+    root_ts = fake.history["C1"][2]["ts"]
+    deck_ts = fake.history["C1"][3]["ts"]
+    thread = s.get(f"slack:C1:{root_ts}")
+    deck = s.get(f"slack:C1:{deck_ts}")
+    assert thread is not None and deck is not None
+    assert thread.meta["lines"] == [["U1", []], ["U2", []], ["U2", []]]
+    assert deck.meta["lines"] == [["U2", ["U1"]]]
+    assert json.loads((tmp_path / "slack.json").read_text())["me"] == "UME"
+
+
 def test_the_next_pass_resumes_and_picks_up_new_replies(fake: FakeSlack, tmp_path: Path) -> None:
     s, path = store(), tmp_path / "slack.json"
     slack.sync_pass(s, fake, 14, state_path=path, now=NOW)
@@ -356,6 +371,7 @@ def farm_store(monkeypatch: pytest.MonkeyPatch) -> index.Index:
 
     monkeypatch.setattr(reminders_mac, "available", no_reminders)
     monkeypatch.setattr(tasks, "_people", lambda: [])
+    monkeypatch.setattr(taskfarm, "slack_me", lambda: taskfarm.SlackMe("UME", ("mike j", "mike")))
     return store()
 
 
@@ -382,7 +398,7 @@ def test_the_farm_reads_a_conversations_new_messages_together(
     farm_store: index.Index, tmp_path: Path
 ) -> None:
     s, state = farm_store, tmp_path / "farm.json"
-    put_slack(s, "C1", "#launch", ts(5), "Pat Doe: the launch is on Tuesday")
+    put_slack(s, "C1", "#launch", ts(5), "Pat Doe: the launch is on Tuesday, can you all review it?")
     put_slack(s, "C1", "#launch", ts(4), "Pat Doe: Mike, can you send the deck by Friday?")
     put_slack(s, "C1", "#launch", ts(3), "deploybot: please review build 12", bot=True)
     put_slack(s, "C2", "#random", ts(4), "Sam: cats are great")  # no action cue
@@ -393,20 +409,21 @@ def test_the_farm_reads_a_conversations_new_messages_together(
     c = asyncio.run(taskfarm.farm_pass(s, claude, local, now=NOW, state_path=state))
     assert c == {"read": 1, "added": 1, "merged": 0, "skipped": 2}
     assert claude.read == []  # Slack stays on the Mac
+    # Only what involves the user is read: the message to Mike, not the one to everyone.
     assert (
         len(local.read) == 1
-        and "the launch is on Tuesday" in local.read[0]
         and "can you send" in local.read[0]
+        and "launch is on Tuesday" not in local.read[0]
     )
     (t,) = [tasks.of(h) for h in s.recent(["task"], limit=5)]
     assert t.title == "Send Pat the deck" and t.fields["source"].startswith("slack:C1@")
     assert t.context.startswith("From the Slack conversation '#launch'")
     assert asyncio.run(taskfarm.farm_pass(s, claude, local, now=NOW, state_path=state))["read"] == 0
-    put_slack(s, "C1", "#launch", ts(1), "Sam: I'll book the room for the review")
+    put_slack(s, "C1", "#launch", ts(2), "Sam: I'll book the room for the review")  # not the user's
+    put_slack(s, "C1", "#launch", ts(1), "Mike J: I'll print the handouts")
     c = asyncio.run(taskfarm.farm_pass(s, claude, local, now=NOW, state_path=state))
-    assert (
-        c["read"] == 1 and "book the room" in local.read[-1] and "launch is on Tuesday" not in local.read[-1]
-    )
+    assert c["read"] == 1 and "print the handouts" in local.read[-1] and "book the room" not in local.read[-1]
+    assert "can you send" not in local.read[-1]
 
 
 def test_a_busy_conversation_is_read_in_bounded_pieces_and_waits_on_failure(
@@ -414,7 +431,9 @@ def test_a_busy_conversation_is_read_in_bounded_pieces_and_waits_on_failure(
 ) -> None:
     s, state = farm_store, tmp_path / "farm.json"
     for i in range(20):
-        put_slack(s, "C1", "#busy", ts(20 - i), f"Pat Doe: please handle item {i} " + "detail " * 60)
+        put_slack(
+            s, "D1", "DM with Pat Doe", ts(20 - i), f"Pat Doe: please handle item {i} " + "detail " * 60
+        )
     calls: list[str] = []
 
     async def down_once(system: str, text: str) -> str:
@@ -450,7 +469,7 @@ def test_claude_reads_a_few_meetings_at_once_and_the_local_model_one_at_a_time(
         s.put(
             f"mail:{i}", "mail", f"Ask {i}", "Could you review this?", "Sam <sam@example.com>", ts=NOW - 3600
         )
-        put_slack(s, f"C{i}", f"#c{i}", ts(1), "Pat: please review")
+        put_slack(s, f"D{i}", f"DM with Pat {i}", ts(1), "Pat: please review")
     peak = {"claude": 0, "local": 0}
     now_in = {"claude": 0, "local": 0}
 

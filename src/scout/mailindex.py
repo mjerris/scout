@@ -28,6 +28,7 @@ BODIES = 50  # message texts read per pass
 CHUNK = 10  # per call to Mail (25 at a time ran past 30 s live)
 MESSAGE_IDS = 20  # already-indexed messages given their Message-ID per pass (no text read)
 TIMEOUT_S = 90.0  # background work: Mail can be slow on a big inbox
+RECIPIENTS = 30  # To and Cc addresses kept per message
 
 
 def _ts(iso: str) -> float:
@@ -111,10 +112,19 @@ def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
     meta = {"mail_id": mid, "read": bool(m.get("read")), "date": m.get("date")}
     if body is None:
         meta["partial"] = True  # sender and subject only, until its text is read
+    old: index.Hit | None = None
     if msgid := str(m.get("message_id") or "").strip():
         meta["message_id"] = msgid  # Mail's message:// link (links.py)
     elif (old := ix.get(f"mail:{mid}")) is not None and old.meta.get("message_id"):
         meta["message_id"] = old.meta["message_id"]  # read again without it: kept
+    # Recipients (addresses only): the task farm reads mail sent to the user (taskfarm.mail_to_me).
+    if isinstance(m.get("to"), list):
+        for key in ("to", "cc"):
+            meta[key] = [str(a).strip().lower() for a in m.get(key) or [] if str(a).strip()][:RECIPIENTS]
+    else:
+        old = old or ix.get(f"mail:{mid}")
+        if old is not None and isinstance(old.meta.get("to"), list):
+            meta["to"], meta["cc"] = old.meta["to"], old.meta.get("cc") or []
     ix.put(
         f"mail:{mid}",
         KIND,
