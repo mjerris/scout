@@ -21,7 +21,6 @@
     "@signalwire/react": "file:vendor/signalwire-react",
     "@signalwire/react-native": "file:vendor/signalwire-react-native",
     "expo": "54.0.37",
-    "expo-linking": "~8.0.12",
     "expo-secure-store": "~15.0.8",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",

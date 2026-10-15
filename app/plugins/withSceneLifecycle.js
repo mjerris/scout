@@ -4,7 +4,7 @@
 // and a SceneDelegate that puts the AppDelegate's window on the scene.
 //
 // With scenes, iOS sends URLs and user activities to the scene, not the app delegate, so
-// the SceneDelegate forwards them: scout:// links to React Native's Linking, and a call
+// the SceneDelegate forwards them (on a cold start, once the first screen is up): scout:// links to React Native's Linking, and a call
 // started from the Phone app's recents (INStartCallIntent) to react-native-callkeep,
 // which emits didReceiveStartCallAction. callkeep's class method is reached through the
 // Objective-C runtime because Swift can't import RNCallKeep (react-native-callkeep#856).
@@ -29,11 +29,23 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     appWindow.frame = windowScene.coordinateSpace.bounds
     window = appWindow
     appWindow.makeKeyAndVisible()
-    for context in connectionOptions.urlContexts {
-      _ = RCTLinkingManager.application(UIApplication.shared, open: context.url, options: [:])
-    }
-    for activity in connectionOptions.userActivities {
-      SceneDelegate.forward(activity)
+    // A cold start: React Native's Linking reads its initial URL from the launch options,
+    // which carry nothing under scenes, and nothing listens yet. Hand the link (or the
+    // recents call) over once the first screen is up.
+    let urls = connectionOptions.urlContexts.map { $0.url }
+    let activities = Array(connectionOptions.userActivities)
+    if urls.isEmpty && activities.isEmpty { return }
+    var token: NSObjectProtocol?
+    token = NotificationCenter.default.addObserver(
+      forName: NSNotification.Name("RCTContentDidAppearNotification"), object: nil, queue: .main
+    ) { _ in
+      if let t = token { NotificationCenter.default.removeObserver(t) }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        for url in urls {
+          _ = RCTLinkingManager.application(UIApplication.shared, open: url, options: [:])
+        }
+        for activity in activities { SceneDelegate.forward(activity) }
+      }
     }
   }
 
