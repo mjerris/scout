@@ -153,3 +153,6 @@ enabled = true
 # every_min = 15
 # backfill_days = 14
 # skip = ["random", "Pat"]                # channels, or the person a DM is with, to leave out
+# app_token = "<xapp- app-level token>"  # live events over Socket Mode (connections:write)
+# live_every_min = 60                     # the poll while live events are flowing
+# announce = ["Luca"]                     # say out loud when they DM you (who, never what)

@@ -21,6 +21,7 @@ token (state/memory.token, readable by this user only):
     POST /v1/links/add {src, dst, rel} | /v1/links/list {id} -> {links} | /v1/links/url {id} -> {url}
     POST /v1/docs/missing {kind, key, limit}              -> {hits}
     GET  /v1/sync                                         -> {sources}: each sync's status (syncstate.py)
+    POST /v1/slack/alerts {}                              -> {alerts}: DMs to say, taken (slack_events.py)
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -38,10 +39,12 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime as dt
+import functools
 import json
 import logging
 import os
 import secrets
+import signal
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
@@ -156,6 +159,9 @@ class Service:
         self.ix = ix
         self.memory = memory
         self.secret = secret
+        from .slack_events import Alerts
+
+        self.slack_alerts = Alerts()  # DMs for the app to say ([slack] announce)
         memory.on_change = self._index_memories
         self._index_memories()
 
@@ -209,6 +215,7 @@ class Service:
             "/v1/links/url": lambda a: {"url": self.ix.open_url(str(a["id"]))},
             "/v1/docs/missing": lambda a: {"hits": [_hit(h) for h in self.ix.missing(
                 str(a["kind"]), str(a["key"]), int(a.get("limit") or 20))]},
+            "/v1/slack/alerts": lambda a: {"alerts": self.slack_alerts.take()},
             "/v1/journal/add": lambda a: {"file": self.ix.journal_add(
                 float(a["ts"]), str(a.get("who") or "room"), str(a.get("q") or ""), str(a.get("a") or ""),
                 [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")),
@@ -297,18 +304,43 @@ async def granola_loop(ix: index.Index, cfg: Any, state: Path = GRANOLA_STATE) -
 SLACK_STATE = DATA / "state" / "slack.json"
 
 
-async def slack_loop(ix: index.Index, cfg: Any, state: Path = SLACK_STATE) -> None:
-    """Every cfg.every_min minutes: Slack messages new since each conversation's last pass."""
+async def slack_loop(
+    ix: index.Index,
+    cfg: Any,
+    state: Path = SLACK_STATE,
+    shared: Any = None,
+    live: Callable[[], float | None] = lambda: None,
+) -> None:
+    """Every cfg.every_min minutes: Slack messages new since each conversation's last pass.
+    `shared`: the slack.State the event handler uses too; `live()`: since when live events
+    have been flowing (slack_events.Socket.healthy_since). While they have been since a
+    pass began, the next one waits cfg.live_every_min instead, and reads back less."""
     from . import slack
 
     get = slack.fetcher(cfg.token)
+    st = shared if shared is not None else slack.State(state)
     loop = asyncio.get_running_loop()
+    every = max(1.0, cfg.every_min) * 60
+    live_every = max(every, float(getattr(cfg, "live_every_min", 0) or 0) * 60)
     while True:
+        started = time.time()
+        since = live()
+        interval = live_every if since is not None else every
         try:
-            with syncstate.track("slack", max(1.0, cfg.every_min) * 60) as p:
+            with syncstate.track("slack", interval) as p:
                 t0 = time.monotonic()
                 msgs, changed = await loop.run_in_executor(
-                    None, lambda: slack.sync_pass(ix, get, cfg.backfill_days, cfg.skip, state)
+                    None,
+                    functools.partial(
+                        slack.sync_pass,
+                        ix,
+                        get,
+                        cfg.backfill_days,
+                        cfg.skip,
+                        state,
+                        state=st,
+                        live_since=since,
+                    ),
                 )
                 p.added = changed
             if changed:
@@ -319,7 +351,51 @@ async def slack_loop(ix: index.Index, cfg: Any, state: Path = SLACK_STATE) -> No
             log.warning("slack: sync failed: %s", exc)
         except Exception:
             log.exception("slack: sync failed")
-        await asyncio.sleep(max(1.0, cfg.every_min) * 60)
+        # The next pass: every_min from this one, or live_every_min while events have
+        # been flowing all along since this one began.
+        while True:
+            waited = time.time() - started
+            since = live()
+            if waited >= live_every or (waited >= every and (since is None or since > started)):
+                break
+            await asyncio.sleep(
+                min(30.0, max(1.0, every - waited if waited < every else live_every - waited))
+            )
+
+
+async def slack_events_loop(
+    ix: index.Index,
+    cfg: Any,
+    st: Any,
+    alerts: Any,
+    socket_out: list[Any] | None = None,
+    stop: asyncio.Event | None = None,
+) -> None:
+    """Slack's live events over Socket Mode (slack_events.py): each stored as the poller
+    would, and a DM from someone in [slack] announce queued for the app to say."""
+    from . import slack, slack_events
+
+    live = slack.Live(slack.fetcher(cfg.token), st, cfg.skip, cfg.announce)
+    loop = asyncio.get_running_loop()
+
+    async def on_event(payload: dict[str, Any]) -> None:
+        for a in await loop.run_in_executor(None, slack.handle_event, ix, live, payload["event"]):
+            alerts.add(a)
+
+    async def report(conn: str, error: BaseException | None, handled: int) -> None:
+        await asyncio.to_thread(
+            syncstate.record,
+            "slack_events",
+            slack_events.STATUS_EVERY_S,
+            error=error,
+            added=handled,
+            conn=conn,
+        )
+
+    sock = slack_events.Socket(cfg.app_token, on_event, api=slack_events.API, report=report)
+    if socket_out is not None:
+        socket_out.append(sock)
+    await sock.run(stop)
 
 
 async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
@@ -334,6 +410,14 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     _sync_files(ix)
     ix.upkeep()
     svc = Service(ix, Memory(root / "facts.md", legacy=OLD_FACTS), token())
+    closing: list[Callable[[], Awaitable[None]]] = []  # run on SIGTERM, before the process ends
+    ending: list[asyncio.Task[None]] = []
+
+    def on_term() -> None:
+        ending.append(asyncio.create_task(_terminate(closing)))
+
+    with contextlib.suppress(NotImplementedError, RuntimeError):
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, on_term)
     runner = web.AppRunner(svc.app(), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
@@ -342,8 +426,23 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         asyncio.create_task(_load_matrix(ix))  # noqa: RUF006 (runs once, logs its own failure)
     if load().granola.api_key:
         asyncio.create_task(granola_loop(ix, load().granola))  # noqa: RUF006 (runs for the service's life)
-    if load().slack.token:
-        asyncio.create_task(slack_loop(ix, load().slack))  # noqa: RUF006 (runs for the service's life)
+    if (sc := load().slack).token:
+        from . import slack
+
+        st = slack.State(SLACK_STATE)
+        socks: list[Any] = []
+        if sc.app_token:
+            stop = asyncio.Event()
+            events = asyncio.create_task(slack_events_loop(ix, sc, st, svc.slack_alerts, socks, stop))
+
+            async def close_events() -> None:
+                stop.set()
+                await events
+
+            closing.append(close_events)
+        asyncio.create_task(  # noqa: RUF006 (runs for the service's life)
+            slack_loop(ix, sc, SLACK_STATE, st, lambda: socks[0].healthy_since if socks else None)
+        )
     if cfg.semantic and cfg.background_embed:
         await ix.background(lambda: True)  # embeds, and re-reads edited journal files
     else:
@@ -351,6 +450,15 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
             await asyncio.sleep(60)
             await asyncio.get_running_loop().run_in_executor(None, _sync_files, ix)
             await asyncio.get_running_loop().run_in_executor(None, ix.upkeep)
+
+
+async def _terminate(closing: list[Callable[[], Awaitable[None]]], wait_s: float = 3.0) -> None:
+    """SIGTERM: close what must say goodbye (Slack's socket), then end as SIGTERM always
+    has, without waiting for work in flight."""
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(asyncio.gather(*(c() for c in closing), return_exceptions=True), wait_s)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 async def _load_matrix(ix: index.Index) -> None:

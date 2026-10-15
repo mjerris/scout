@@ -5,7 +5,7 @@ take it back. Never a global switch.
     ask   -> confirmed by voice every time (the default)
     auto  -> done without asking (promoted by the user, logged)
 
-Sending email can't be promoted: it leaves the Mac under the user's name. A "yes,
+Sending email or a Slack message can't be promoted: it leaves the Mac under the user's name. A "yes,
 always" to a confirmation promotes that action; after OFFER_AFTER yeses in a row Scout
 mentions it once. Every decision is kept in state/trust.json's action log.
 """
@@ -35,7 +35,7 @@ PROMOTABLE = {
     "calendar_create_event": "adding calendar events",
     "note_delete": "deleting notes",
 }
-NEVER = {"mail_send": "sending email"}
+NEVER = {"mail_send": "sending email", "slack_send": "sending Slack messages"}
 
 # How people name them in speech.
 _SAID = [
@@ -44,6 +44,7 @@ _SAID = [
     (r"(?:adding |add |creating |new )?(?:calendar )?(?:events?|appointments?|meetings?)(?: to (?:my |the )?calendar)?|calendar", "calendar_create_event"),
     (r"(?:deleting |delete |removing )notes?", "note_delete"),
     (r"(?:sending |send )?(?:e-?mails?|mail)", "mail_send"),
+    (r"(?:sending |send )?slack(?: messages?)?", "slack_send"),
 ]  # fmt: skip
 
 
@@ -111,7 +112,7 @@ class Trust:
     def promote(self, name: str) -> str:
         b = base(name)
         if b in NEVER:
-            return f"{NEVER[b].capitalize()} always asks; that one can't be turned off."
+            return f"{NEVER[b][0].upper()}{NEVER[b][1:]} always asks; that one can't be turned off."
         if b not in PROMOTABLE:
             return "That kind of action always asks."
         with self._lock:
