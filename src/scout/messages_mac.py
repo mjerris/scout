@@ -2,7 +2,8 @@
 helper (native/messages). The helper is the only program with Full Disk Access:
 it runs as its own login item and answers a few fixed, capped questions on a Unix
 socket in DATA/state, with a token from DATA/state/messages_token. Nothing here
-opens chat.db, and nothing can send a message.
+opens chat.db, and nothing here sends a message (messages_send.py does, through
+Messages.app, after a yes).
 
 Full Disk Access has no consent prompt, so the first time a tool finds it missing
 this module opens System Settings at Full Disk Access and a Finder window with the

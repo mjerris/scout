@@ -584,7 +584,8 @@ _QUOTED = (
 
 
 async def list_text(a: dict[str, Any], store: index.Store | None = None) -> str:
-    """Open tasks in order; who: mine, waiting or all; query narrows by words and meaning."""
+    """Open tasks in order; who: mine, waiting or all; owner: one person's (a name from
+    Contacts, matched to every name they go by); query narrows by words and meaning."""
     store = store or index.default()
     who = str(a.get("who") or "all").lower()
     if who not in WHO:
@@ -595,6 +596,13 @@ async def list_text(a: dict[str, Any], store: index.Store | None = None) -> str:
         raise ToolError("limit must be a number from 1 to 50") from None
     today = dt.date.today()
     tasks = await asyncio.to_thread(all_tasks, store)
+    if owner := " ".join(str(a.get("owner") or "").split()):  # one person's, by any name (people.py)
+        from . import people
+
+        got = await people.owed_by(owner, tasks, store)
+        if isinstance(got, str):
+            return got
+        tasks = got
     if q := str(a.get("query") or "").strip():
         hits = await store.asearch(q, kinds=["task"], limit=50)
         keep = {int(h.id.split(":", 1)[1]) for h in hits}

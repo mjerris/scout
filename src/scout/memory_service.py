@@ -22,6 +22,8 @@ token (state/memory.token, readable by this user only):
     POST /v1/docs/missing {kind, key, limit}              -> {hits}
     GET  /v1/sync                                         -> {sources}: each sync's status (syncstate.py)
     POST /v1/slack/alerts {}                              -> {alerts}: DMs to say, taken (slack_events.py)
+    POST /v1/people/candidates {limit} -> {emails} | /v1/people/put {people, complete} -> {people, removed, links}
+    POST /v1/people/search {person, query, kinds, since, limit, semantic} -> {hits}  (people.py)
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -216,6 +218,11 @@ class Service:
             "/v1/docs/missing": lambda a: {"hits": [_hit(h) for h in self.ix.missing(
                 str(a["kind"]), str(a["key"]), int(a.get("limit") or 20))]},
             "/v1/slack/alerts": lambda a: {"alerts": self.slack_alerts.take()},
+            "/v1/people/candidates": lambda a: {"emails": self.ix.people_candidates(int(a.get("limit") or 400))},
+            "/v1/people/put": lambda a: self.ix.put_people(list(a.get("people") or []), bool(a.get("complete", True))),
+            "/v1/people/search": lambda a: {"hits": [_hit(h) for h in self.ix.person_search(
+                str(a.get("person") or ""), str(a.get("query") or ""), kinds=_kinds(a.get("kinds")),
+                since=a.get("since"), limit=int(a.get("limit") or 8), semantic=a.get("semantic", None))]},
             "/v1/journal/add": lambda a: {"file": self.ix.journal_add(
                 float(a["ts"]), str(a.get("who") or "room"), str(a.get("q") or ""), str(a.get("a") or ""),
                 [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")),

@@ -484,7 +484,9 @@ monthly).
 
 ## Messages (iMessage and SMS)
 
-Scout can read your texts, never send them. Messages keeps its history in
+Scout reads your texts through this helper; it sends one only when you ask and say
+yes to the read-back (`message_draft` / `message_send`, through Messages.app: see
+[docs/contacts.md](docs/contacts.md), Text). Messages keeps its history in
 `~/Library/Messages/chat.db`, which macOS guards with Full Disk Access. That
 permission goes to one small helper, `bin/scout-messages` (`native/messages`),
 not to Scout's Python, Claude or a terminal:
@@ -533,7 +535,17 @@ that under System Settings → Privacy & Security → Contacts, where turning it
 it back. "What's Pat's number", "what's Pat's email", "when is Sam's birthday" and
 "what's Pat's address" are answered without Claude; Claude gets `contacts_search` and
 `contact_get` (birthdays and addresses as the privacy mode allows), texts and mail show
-names instead of bare numbers and addresses, and a mail draft can go to "Pat". Details:
+names instead of bare numbers and addresses, and a mail draft can go to "Pat".
+
+"Text Pat I'm running late" drafts a text to Pat's number (or the iMessage address you
+last texted), reads it back ("Text Pat Doe: I'm running late?") and sends it through
+Messages.app after your yes; the first send shows macOS's prompt to let Scout control
+Messages. "Call Pat" asks "Call Pat Doe at 5 5 5, ...?" and, after your yes, opens the
+call prompt on the Mac, which places the call through your iPhone; on the phone app it
+puts the number in your Scout reminders as a link to tap instead. And a contact is one
+person across mail, meetings and Slack (by email address: a `same_person` link), so
+"what did Pat say about the launch" searches only Pat's messages, mail and meetings,
+and "what does Pat owe me" finds tasks owed under any name Pat goes by. Details:
 [docs/contacts.md](docs/contacts.md).
 
 ## Trust: what asks first

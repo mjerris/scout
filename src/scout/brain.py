@@ -184,6 +184,14 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
         from . import slack_send
 
         return slack_send.describe(args)
+    if name in MESSAGE_SEND_TOOLS or name == "message_send":
+        from . import messages_send
+
+        return messages_send.describe(args)
+    if name in CALL_TOOLS or name == "call_start":
+        from . import calls
+
+        return calls.describe(args)
     if name in REMINDER_WRITE_TOOLS or name in ("reminder_add", "reminder_complete"):
         spoken, detail = _describe_reminder(name, args)
         add = full and not name.endswith("reminder_complete")
@@ -379,6 +387,9 @@ CALENDAR_WRITE_TOOLS = ("mcp__voice_app__calendar_create_event",)
 MAIL_SEND_TOOLS = ("mcp__voice_app__mail_send",)
 # Sending a Slack message asks every time too (slack_send.py: the draft is read back).
 SLACK_SEND_TOOLS = ("mcp__voice_app__slack_send",)
+# Texting someone and starting a call ask every time too (messages_send.py, calls.py).
+MESSAGE_SEND_TOOLS = ("mcp__voice_app__message_send",)
+CALL_TOOLS = ("mcp__voice_app__call_start",)
 # Adding or completing a reminder asks every time too.
 REMINDER_WRITE_TOOLS = ("mcp__voice_app__reminder_add", "mcp__voice_app__reminder_complete")
 # Deleting a note asks every time (adding one doesn't: it only adds).
@@ -391,6 +402,8 @@ ALWAYS_ASK_TOOLS = (
     *CALENDAR_WRITE_TOOLS,
     *MAIL_SEND_TOOLS,
     *SLACK_SEND_TOOLS,
+    *MESSAGE_SEND_TOOLS,
+    *CALL_TOOLS,
     *REMINDER_WRITE_TOOLS,
     *NOTE_WRITE_TOOLS,
     *SESSION_SEND_TOOLS,

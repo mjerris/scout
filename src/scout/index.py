@@ -59,7 +59,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, links, notefiles, syncstate, taskfiles, xref
+from . import journal, links, notefiles, people, syncstate, taskfiles, xref
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -426,6 +426,7 @@ class Index:
     discuss_min: float = xref.DISCUSS_MIN
     # Where the phone reaches Scout's web UI (links.web_base in the service): record pages.
     web_base: Callable[[], str] = lambda: ""
+    _people_at: str = field(init=False, repr=False, default="")  # link_people's place in the list
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1042,6 +1043,158 @@ class Index:
             linked += g is not None
         return linked
 
+    # --- people (people.py): one person across mail, meetings and Slack -----------------------
+
+    def people_candidates(self, limit: int = people.MAX_EMAILS) -> list[str]:
+        """The email addresses Scout has seen for people (mail senders, meeting
+        attendees), newest first: what the app asks Contacts about."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, who, meta FROM docs WHERE kind IN ('mail', 'meeting') AND instr(id, '#') = 0 "
+                "ORDER BY ts DESC LIMIT 20000"
+            ).fetchall()
+        return people.candidate_emails(((str(k), str(w), str(m)) for k, w, m in rows), limit)
+
+    def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]:
+        """Store the people the app found (people.build) and link each to what's theirs.
+        complete: the list is everyone, so a person no longer found is removed."""
+        keep: list[str] = []
+        for p in found:
+            r = people.record(p)
+            self.put(r["id"], people.KIND, r["title"], r["body"], r["who"], None, r["meta"])
+            keep.append(r["id"])
+        removed = 0
+        if complete:
+            with self._lock:
+                old = [
+                    str(r[0])
+                    for r in self._conn.execute("SELECT id FROM docs WHERE kind = ?", (people.KIND,))
+                ]
+            for id in set(old) - set(keep):
+                self.delete(id)
+                removed += 1
+        made = sum(self.link_person(id) for id in keep)
+        return {"people": len(keep), "removed": removed, "links": made}
+
+    def link_person(self, id: str) -> int:
+        """Make a person's same_person links exactly the records that are theirs now
+        (people.matches), the newest people.LINKS_PER_SOURCE of each source."""
+        h = self.get(id)
+        if h is None or h.kind != people.KIND:
+            return 0
+        found: dict[str, list[tuple[float, str]]] = {k: [] for k in people.SOURCES}
+        seen: set[str] = set()
+        for kind, needle in people.prefilter(h.meta):
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id, kind, who, meta, ts FROM docs WHERE kind = ? AND instr(id, '#') = 0 AND "
+                    "(instr(who, ?) > 0 OR instr(lower(who), ?) > 0 OR instr(lower(meta), ?) > 0) "
+                    "ORDER BY ts DESC LIMIT ?",
+                    (kind, needle, needle.lower(), needle.lower(), people.LINKS_PER_SOURCE * 2),
+                ).fetchall()
+            for rid, k, who, meta, ts in rows:
+                if rid not in seen and people.matches(h.meta, str(k), str(who), _meta(meta)):
+                    seen.add(rid)
+                    found[str(k)].append((float(ts), str(rid)))
+        to = [
+            (rid, "same_person")
+            for k in people.SOURCES
+            for _, rid in sorted(found[k], reverse=True)[: people.LINKS_PER_SOURCE]
+        ]
+        self._set_links(id, ("same_person",), to)
+        return len(to)
+
+    def link_people(self, limit: int = 20) -> int:
+        """The upkeep's share: the next `limit` people relinked (new mail and messages
+        join them), round the list. Returns the links they have."""
+        with self._lock:
+            ids = [
+                str(r[0])
+                for r in self._conn.execute(
+                    "SELECT id FROM docs WHERE kind = ? AND id > ? ORDER BY id LIMIT ?",
+                    (people.KIND, self._people_at, limit),
+                )
+            ]
+        self._people_at = ids[-1] if len(ids) == limit else ""
+        return sum(self.link_person(id) for id in ids)
+
+    def person_items(self, person: str) -> list[str]:
+        """The records linked same_person to a person, with their parts (a thread's
+        chunks, a meeting's transcript)."""
+        bases = [ln["id"] for ln in self.links(person) if ln["rel"] == "same_person" and ln["dir"] == "out"]
+        if not bases:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM docs WHERE id IN (SELECT value FROM json_each(?1)) OR (instr(id, '#') > 0 "
+                "AND substr(id, 1, instr(id, '#') - 1) IN (SELECT value FROM json_each(?1)))",
+                (json.dumps(bases),),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def person_search(
+        self,
+        person: str,
+        query: str,
+        kinds: Sequence[str] | None = None,
+        since: float | None = None,
+        limit: int = 8,
+        semantic: bool | None = True,
+    ) -> list[Hit]:
+        """Like search, over one person's records only (person_items): what Pat said or
+        sent, best match first; with no query words, the newest."""
+        ids = self.person_items(person)
+        cands = [
+            h
+            for h in self._get_many(ids)
+            if (not kinds or h.kind in kinds) and (since is None or h.ts >= since)
+        ]
+        if not cands:
+            return []
+        text = (
+            self.text_search(query, kinds, since, limit=60, ids=[h.id for h in cands])
+            if query.strip()
+            else []
+        )
+        if semantic is None:
+            semantic = bool(getattr(self.embedder, "loaded", True))
+        sims: dict[str, float] = {}
+        if semantic and self.embedder is not None and query.strip():
+            try:
+                self._ensure_vectors(cands, self.max_new_per_search, MAX_WINDOWS_PER_SEARCH)
+                q = self._call_embedder([query], query=True, urgent=True)[0]
+                self.load_matrix()
+                with self._lock:
+                    assert self._matrix is not None  # noqa: S101 (loaded above)
+                    sims = self._matrix.best([h.id for h in cands], q)
+            except Exception as exc:
+                log.warning(
+                    "index: a person's search by meaning failed (%s); full text only", type(exc).__name__
+                )
+        if not text and not sims:
+            cands.sort(key=lambda h: -h.ts)
+            return cands[:limit]
+        rank = {h.id: i for i, h in enumerate(text)}
+        out = []
+        for h in cands:
+            t, sim = rank.get(h.id), sims.get(h.id)
+            if t is None and (sim is None or sim < self.min_similarity):
+                continue
+            h.similarity = sim
+            h.score = (sim if sim is not None else self.min_similarity) + (
+                TEXT_BONUS / (1 + t) if t is not None else 0.0
+            )
+            h.how = (
+                "text+meaning"
+                if t is not None and sim is not None
+                else "text"
+                if t is not None
+                else "meaning"
+            )
+            out.append(h)
+        out.sort(key=lambda h: -h.score)
+        return out[:limit]
+
     # --- cross-references (xref.py): what a record's text points at -----------------------
 
     def _xref_settings(self) -> tuple[list[str], xref.Allow]:
@@ -1385,6 +1538,7 @@ class Index:
                 n = p.updated = self.link_tasks()
                 read, made = self.link_xrefs()
                 p.backlog = self.xref_backlog()
+                self.link_people()
             if n:
                 log.info("index: %d tasks got their link", n)
             if made:
@@ -1410,13 +1564,22 @@ class Index:
     # --- searching ------------------------------------------------------------------
 
     def text_search(
-        self, query: str, kinds: Sequence[str] | None = None, since: float | None = None, limit: int = 50
+        self,
+        query: str,
+        kinds: Sequence[str] | None = None,
+        since: float | None = None,
+        limit: int = 50,
+        ids: Sequence[str] | None = None,
     ) -> list[Hit]:
-        """Full-text matches, best first (BM25: titles count most, then people, then bodies)."""
+        """Full-text matches, best first (BM25: titles count most, then people, then
+        bodies); `ids`: only among these."""
         q = fts_query(query)
         if not q:
             return []
         where, args = _filters(kinds, since, "d.")
+        if ids is not None:
+            where += " AND d.id IN (SELECT value FROM json_each(?))"
+            args.append(json.dumps(list(ids)))
         with self._lock:
             rows = self._conn.execute(
                 "SELECT d.id, d.kind, d.title, d.body, d.who, d.ts, d.meta, bm25(docs_fts, 3.0, 1.0, 2.0) AS r "  # noqa: S608 (only placeholders and fixed column names are joined in)
@@ -2013,6 +2176,12 @@ class Store(Protocol):
     def open_url(self, id: str) -> str | None: ...
     def resolve(self, id: str) -> dict[str, Any] | None: ...
     def missing(self, kind: str, key: str, limit: int = 20) -> list[Hit]: ...
+    def people_candidates(self, limit: int = 400) -> list[str]: ...
+    def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]: ...
+    def person_search(
+        self, person: str, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
+        limit: int = 8, semantic: bool | None = True,
+    ) -> list[Hit]: ...  # fmt: skip
 
 
 _index: Store | None = None  # tests put a local Index here

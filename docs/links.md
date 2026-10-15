@@ -103,6 +103,7 @@ table in `state/memory.db`, `(src, dst, rel)`, read either way:
 | `told_in` | a fact → the journal turn it was told in | the turn's `refs:` line, or the upkeep's match (below) |
 | `mentions` | a record → a record its text names: a pasted link, a GitHub item, a meeting by its title | the cross-reference pass (below); a task's from its file |
 | `discusses` | a Slack message or email → the meeting it talks about; a meeting → a Slack thread in a channel its notes name | the cross-reference pass, by meaning (below) |
+| `same_person` | a person (`person:<contact id>`) → a record that's theirs: mail from one of their addresses, a meeting they attended, a Slack message or thread they wrote in | the people pass (docs/contacts.md, People): set exactly when the app hands over the people, and in the upkeep, 20 people a minute |
 
 The task files stay the truth for their own sources: the `found_in` and `merged_from`
 rows are re-derived from the file each time it's read, so an edit by hand moves them.
@@ -110,6 +111,16 @@ A task's source key is the farm's: `meeting:<granola note>`, `meeting:mail:<n>` 
 emailed summary), `mail:<n>`, `slack:<channel>@<newest ts>` (found by its conversation
 and newest message). A deleted record takes its own links with it; a link to it from a
 task stays (the task still names it) and is left out of `resolve`.
+
+**One person, many identities** (`people.py`, `Index.put_people`, `link_person`). A
+`person:<contact id>` record (kind `person`, private) holds a contact's addresses seen
+in mail and meetings, their Slack user (by profile email) and their names; its
+`same_person` links point at their records, the newest 200 of each source, matched
+exactly (mail by sender address, a meeting by an attendee address or, without
+addresses, the full name, Slack by the name the user's messages are stored under).
+`person_search` searches only those records and their parts; the record page shows the
+identities ("Also known as") and "Same person" on each record of theirs. Details and
+live counts: docs/contacts.md, People.
 
 **Where a fact was told.** The turn that told Scout a fact lists it on its `refs:`
 line. When that turn says remember (its remember tool ran, or the request says
