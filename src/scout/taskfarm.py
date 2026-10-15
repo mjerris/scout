@@ -81,12 +81,94 @@ Answer with JSON only, nothing else: {{"tasks": [{{"title": ..., "owner": ..., "
 - A task is a clear commitment with a concrete action: something the user agreed, promised
   or was asked to do (owner "me"), or something someone else agreed to do for the user
   (owner: that person's name). Not topics, ideas, opinions, or things already done.
+- owner: "me", or the name of the person who owes it. Never a pronoun or a group ("them",
+  "they", "he", "she", "someone", "the team"): work out from the text who it is (the
+  attendees, who was speaking, who was asked) and give their name; if you can't tell,
+  "unknown".
 - title: what to do, in the imperative, under 12 words ("Send Pat the revised budget").
-- due: YYYY-MM-DD if a date or deadline is given or implied, else null. Today is {today}.
+  Dates in a title are written as dates, never relative to the {what}: not "today's
+  meeting", "tomorrow" or "by Friday" but "the {day_short} meeting", "{tomorrow_short}",
+  "by Fri {friday_short}".
+- due: YYYY-MM-DD if a date or deadline is given or implied, else null. The text is from
+  {when}: "today", "tomorrow" and weekdays in it mean days counted from then. Today is {today}.
 - importance: high, normal or low. urgency: urgent or normal. effort: small, medium or large.
 - evidence: the words that show it, under 25 words, quoted exactly from the text.
-In a transcript, lines starting "Me:" are the user's own words.
+In a transcript, lines starting "Me:" are the user's own words; "Them:" is another
+attendee Granola couldn't name.
 If there are none, answer {{"tasks": []}}."""
+
+
+def system_prompt(what: str, me: str, today: dt.date, when: dt.date) -> str:
+    """The extraction prompt for an item from day `when`, read on day `today`."""
+    fri = when + dt.timedelta(days=(4 - when.weekday()) % 7 or 7)
+    return SYSTEM.format(
+        what=what, me=me, today=today.isoformat(), when=f"{when:%A} {when.isoformat()}",
+        day_short=_short(when), tomorrow_short=_short(when + dt.timedelta(days=1)), friday_short=_short(fri),
+    )  # fmt: skip
+
+
+def _short(d: dt.date) -> str:
+    return f"{d:%b} {d.day}"
+
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_MONTHS = r"jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec"
+# A date already written after a weekday: "Friday Oct 17", "Friday, 10/17", "Friday the 17th".
+_DATED = re.compile(
+    rf"^,?\s*(?:(?:{_MONTHS})[a-z]*\.?\s+\d|\d{{1,2}}[/-]\d|the\s+\d|\d{{1,2}}(?:st|nd|rd|th)\b)", re.I
+)
+_RELATIVE = re.compile(
+    r"\b(?:(today|tomorrow|yesterday|tonight)(?:['\u2019]s)?\b(?:\s+(\w+))?"
+    r"|(this|next)\s+(week(?:end)?)\b"
+    r"|(?:(this|next|on|by)\s+)?(" + "|".join(_WEEKDAYS) + r")\b"
+    r"|(end of (?:the )?day|eod)\b)",
+    re.I,
+)
+
+
+def absolute_dates(title: str, when: dt.date) -> str:
+    """A found task's title with relative dates written out from the day it came from
+    ("today's meeting" -> "the Oct 14 meeting", "by Friday" -> "by Fri Oct 17",
+    "tomorrow" -> "Oct 15"); dates already given are left alone. Plain code, after the
+    model, which is asked for the same."""
+
+    def day(d: dt.date) -> str:
+        return _short(d)
+
+    def sub(m: re.Match[str]) -> str:
+        word, after = m.group(1), m.group(2)
+        if word:
+            w = word.lower()
+            d = when + dt.timedelta(days={"today": 0, "tonight": 0, "tomorrow": 1, "yesterday": -1}[w])
+            possessive = m.group(0)[len(word) :].lstrip().startswith(("'", "\u2019"))
+            if possessive and after:  # "today's meeting" -> "the Oct 14 meeting"
+                lead = "" if re.search(r"\b(?:the|a|an)\s*$", title[: m.start()], re.I) else "the "
+                return f"{lead}{day(d)} {after}"
+            text = f"the night of {day(d)}" if w == "tonight" else day(d)
+            return text + (f" {after}" if after else "")
+        if m.group(4):  # this/next week(end)
+            monday = (
+                when
+                - dt.timedelta(days=when.weekday())
+                + dt.timedelta(days=7 if m.group(3).lower() == "next" else 0)
+            )
+            if m.group(4).lower() == "weekend":
+                return f"the weekend of {day(monday + dt.timedelta(days=5))}"
+            return f"the week of {day(monday)}"
+        if m.group(6):
+            if _DATED.match(title[m.end() :]):
+                return m.group(0)
+            lead = (m.group(5) or "").lower()
+            target = _WEEKDAYS.index(m.group(6).lower())
+            ahead = (target - when.weekday()) % 7
+            if lead == "next" and ahead == 0:
+                ahead = 7
+            d = when + dt.timedelta(days=ahead)
+            keep = f"{m.group(5)} " if lead in ("on", "by") else ""
+            return f"{keep}{d:%a} {day(d)}"
+        return f"end of day {day(when)}"
+
+    return _RELATIVE.sub(sub, title)
 
 
 def load_state(path: Path = STATE) -> dict[str, Any]:
@@ -242,6 +324,12 @@ def meetings_since(store: index.Store, since: float) -> list[Meeting]:
     return out
 
 
+def _attendees(text: str) -> list[str]:
+    """A meeting's attendees, from its "Attendees:" line (meetings_since writes it)."""
+    m = re.search(r"^Attendees: (.*)$", text, re.M)
+    return [p.strip() for p in m.group(1).split(",") if p.strip()] if m else []
+
+
 async def claude_extract(system: str, text: str) -> str:
     """One Claude call, no tools, none of the user's settings: just the answer."""
     from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
@@ -278,15 +366,28 @@ def local_extract(model: Any) -> Extract | None:
 
 
 async def add_found(
-    found: Sequence[dict[str, Any]], source: str, label: str, store: index.Store
+    found: Sequence[dict[str, Any]],
+    source: str,
+    label: str,
+    store: index.Store,
+    when: float | None = None,
+    people: Sequence[str] = (),
 ) -> tuple[int, int]:
-    """Add found tasks, folding each into an open one it repeats. Returns (added, merged)."""
+    """Add found tasks, folding each into an open one it repeats. Returns (added, merged).
+    `when` is the item's time (relative dates in titles are written out from it);
+    `people` who was there (a meeting's attendees, an email's sender): an owner given as
+    "them" is the one other person among them, else "unknown"."""
     added = merged = 0
     kind = "meeting" if source.startswith("meeting:") else "slack" if source.startswith("slack:") else "mail"
+    day = dt.date.fromtimestamp(when) if when is not None else None
     for t in found:
         title = " ".join(str(t.get("title") or "").split())[:200]
+        if day is not None:
+            title = absolute_dates(title, day)[:200]
         owner = " ".join(str(t.get("owner") or "me").split())[:80] or "me"
         owner = "me" if tasks.is_me(owner) else owner
+        if owner != "me" and not tasks.owner_known(owner):
+            owner = tasks.likely_owner(people) or tasks.UNKNOWN_OWNER
         evidence = " ".join(str(t.get("evidence") or "").split())[:300]
         context = f"From {label}" + (f': "{evidence}"' if evidence else ".") + f" ({source})"
         a = {"title": title, "owner": owner, "context": context, "source": source, "from": kind}
@@ -357,7 +458,7 @@ async def farm_pass(
     tries: dict[str, int] = state.setdefault("tries", {})
     start = now - cfg.backfill_days * 86400
     me = ", ".join(cfg.me) or "the person this assistant works for"
-    today = dt.date.fromtimestamp(now).isoformat()
+    today = dt.date.fromtimestamp(now)
     strict = privacy.current().mode == "strict"
     counts = {"read": 0, "added": 0, "merged": 0, "skipped": 0}
 
@@ -379,10 +480,13 @@ async def farm_pass(
     down: list[Extract] = []  # extractors that failed this pass: the rest waits for the next
     adding = asyncio.Lock()  # one read's tasks at a time, so dedupe sees the one before
 
-    async def read(key: str, label: str, what: str, text: str, extract: Extract) -> None:
+    async def read(
+        key: str, label: str, what: str, text: str, extract: Extract,
+        when: float | None = None, people: Sequence[str] = (),
+    ) -> None:  # fmt: skip
         if extract in down:
             return
-        system = SYSTEM.format(what=what, me=me, today=today)
+        system = system_prompt(what, me, today, dt.date.fromtimestamp(when if when is not None else now))
         try:
             found = parse_found(await extract(system, text))
         except Exception as exc:  # a model that's down: try again next pass
@@ -397,7 +501,7 @@ async def farm_pass(
         if len(kept) < len(found):
             log.info("tasks: %s: %d found tasks dropped (quote not in the text)", key, len(found) - len(kept))
         async with adding:
-            a, m = await add_found(kept[:MAX_FOUND], key, label, store)
+            a, m = await add_found(kept[:MAX_FOUND], key, label, store, when, people)
         counts["read"] += 1
         counts["added"] += a
         counts["merged"] += m
@@ -418,7 +522,7 @@ async def farm_pass(
         day = dt.date.fromtimestamp(mt.when)
         label = f"the meeting {mt.title[:LABEL_CHARS]!r} on {day:%b} {day.day}"
         text = mt.text[:LOCAL_MEETING_CHARS] if local else mt.text
-        job = functools.partial(read, mt.key, label, "a meeting", text, extract)
+        job = functools.partial(read, mt.key, label, "a meeting", text, extract, mt.when, _attendees(mt.text))
         if local:
             local_reads.append(job)
         else:
@@ -436,7 +540,9 @@ async def farm_pass(
                 continue
             text = f"From: {h.who}\nSubject: {h.title}\n\n{h.body[:MAIL_CHARS]}"
             label = f"the email {h.title[:LABEL_CHARS]!r} from {h.who[:LABEL_CHARS]}"
-            local_reads.append(functools.partial(read, h.id, label, "an email", text, mail_extract))
+            local_reads.append(
+                functools.partial(read, h.id, label, "an email", text, mail_extract, h.ts, [h.who])
+            )
         read_to: dict[str, float] = state.setdefault("slack", {})
         local_reads += [
             functools.partial(read_slack, reads, read, read_to, seen, counts, mail_extract)
@@ -460,7 +566,7 @@ async def farm_pass(
 
 async def read_slack(
     reads: Sequence[SlackRead],
-    read: Callable[[str, str, str, str, Extract], Awaitable[None]],
+    read: Callable[..., Awaitable[None]],
     read_to: dict[str, float],
     seen: set[str],
     counts: dict[str, int],
@@ -472,7 +578,7 @@ async def read_slack(
         if r.worth and r.key not in seen:
             day = dt.date.fromtimestamp(r.when)
             await read(r.key, f"the Slack conversation {r.title[:LABEL_CHARS]!r} on {day:%b} {day.day}",
-                       "a Slack conversation", r.text, extract)  # fmt: skip
+                       "a Slack conversation", r.text, extract, r.when)  # fmt: skip
             if r.key not in seen:
                 return
         elif not r.worth:
@@ -501,7 +607,9 @@ async def loop(
                         c["skipped"],
                     )
                 await tasks.sync_from_reminders(store())
+                await tasks.repair_owners(store())
                 await tasks.mirror_missing(store())
+                await tasks.link_reminders(store())
         except Exception:
             log.exception("tasks: farm pass failed")
         await asyncio.sleep(max(1.0, cfg.farm_every_min) * 60)

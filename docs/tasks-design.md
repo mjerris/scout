@@ -26,6 +26,7 @@ result; a periodic deterministic check, with interruptions only for what's urgen
 - urgency: normal
 - effort: small
 - source: meeting:not_1d3tmYTlCICgjy
+- link: https://notes.granola.ai/d/1d3tmYTlCICgjy
 - found: 2026-10-13 14:02
 - reminder: x-apple-reminder://...
 - from: meeting
@@ -38,7 +39,10 @@ cut by Friday?").
 `status` is open, done or dropped. `owner` is `me` or the person who owes it (waiting on);
 a name or address from `[tasks] me` (or just your first name) is stored as `me`. `from`
 (mail, meeting or slack) marks a task the farm found; `reminder_title` is the title its reminder
-was made with (the helper checks it when completing). You can edit any line, add tasks by
+was made with (the helper checks it when completing). `link` is where its source opens
+(the Granola note, the email in Mail, the Slack thread; docs/links.md), written when the
+task is added or, for a source without one yet, on a later pass; `reminder_url` is the
+link its reminder carries. An owner nobody can name is `unknown`. You can edit any line, add tasks by
 hand, or delete a file; the index follows within a minute.
 
 ## Finding tasks (the farm, in the Scout app)
@@ -60,7 +64,16 @@ Every few minutes the farm looks at items new to the store since its checkpoint
    It returns JSON: one item per task with title, owner (`me` or a name), due date,
    importance, urgency, effort, and a short quote as evidence. Only commitments count,
    not ideas or topics. You are identified by `[tasks] me` (names and addresses), and
-   in Granola transcripts by the lines marked "Me:". A task whose quote isn't in the
+   in Granola transcripts by the lines marked "Me:". The owner must be "me" or a
+   person's name, never a pronoun or a group ("them", "they", "the team"; Granola labels
+   speakers it can't name "Them"): the prompt asks the model to work out who from the
+   meeting, and plain code then takes the one other attendee (or the email's sender)
+   when there's exactly one, else `unknown`, which is said as "Someone owes you ..."
+   (`tasks.owes_you`), never "Them owes you". Dates in titles are written out from the
+   day of the meeting or email, not the day it's read: the prompt says what day the text
+   is from and asks for "the Oct 14 meeting", not "today's meeting", and plain code
+   (`taskfarm.absolute_dates`) rewrites what's left ("tomorrow", "by Friday", "next
+   week") the same way, leaving dates already given alone. A task whose quote isn't in the
    text (case and spacing aside) is dropped, and at most five come from one item. An
    answer that isn't valid JSON (cut short, say) isn't taken as "no tasks": the item is
    tried again next pass, three times in all, then left. Claude reads up to three
@@ -152,7 +165,11 @@ Only the Mac's Reminders is mirrored to, never Scout's own lists (`[lists] backe
 tried again on each farm pass. Completions are read by reminder id (the helper's
 `reminder-get`), so they sync however long the lists are. A renamed task or a new due
 date changes its reminder (`reminder-update`); a task moved between yours and waiting on
-finishes its old reminder and gets one in the other list.
+finishes its old reminder and gets one in the other list. Each reminder carries the
+task's link (its source's, else its page on Scout's web UI) as its URL and on a line of
+its notes, so it opens from the phone; reminders made before links get theirs on the
+next farm pass. Found tasks whose owner was a pronoun are repaired on each farm pass
+(their owner field only, by the rule above).
 
 ## Asking out loud (tier 0, no Claude)
 

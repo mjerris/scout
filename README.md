@@ -680,7 +680,13 @@ Memories and the search index live in a separate local service, **scout-memory**
 over HTTP on 127.0.0.1:8767 to Scout and any other local program holding the token
 in `state/memory.token`: `/v1/docs/*` (put, delete, sync, get, count, recent,
 prune), `/v1/search` and `/v1/memories/*` (add, forget, matching, relevant, newest,
-list) and `/v1/journal/add`. It keeps running while the voice app restarts;
+list), `/v1/journal/add`, and the links between records: `GET /v1/resolve?id=`
+(a record, where it opens, and what it's linked to) and `/v1/links/*`. A task links to
+the meeting, email or Slack message it was found in, an emailed meeting summary to the
+Granola note of the same meeting, a journal entry to the records it was about; each
+record opens where it lives (notes.granola.ai, Slack, `message://` in Mail) or, for
+Scout's own, on its page on the web UI (`/r/<id>`, reachable from the phone over
+Tailscale). See docs/links.md. It keeps running while the voice app restarts;
 `scripts/launchd.sh status memory` shows it.
 
 **The journal.** Every exchange with Scout, in the room or by phone, is written to a

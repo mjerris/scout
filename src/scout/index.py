@@ -46,7 +46,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, notefiles, taskfiles
+from . import journal, links, notefiles, taskfiles
 from .config import DATA
 
 log = logging.getLogger(__name__)
@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, kind TEXT NOT NULL, ts 
 CREATE INDEX IF NOT EXISTS pending_ts ON pending(ts);
 CREATE INDEX IF NOT EXISTS pending_kind_ts ON pending(kind, ts);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- How records point at each other (links.py, docs/links.md): a task to what it was found
+-- in, an emailed meeting summary to its Granola note, a journal turn to what it used.
+CREATE TABLE IF NOT EXISTS links (
+    src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL, ts REAL NOT NULL,
+    PRIMARY KEY (src, dst, rel)
+);
+CREATE INDEX IF NOT EXISTS links_dst ON links(dst);
 """
 
 
@@ -394,6 +401,8 @@ class Index:
     _turn: threading.Condition = field(init=False, repr=False, default_factory=threading.Condition)
     _urgent: int = field(init=False, repr=False, default=0)
     _fresh: bool = field(init=False, repr=False, default=False)  # new text since the background looked
+    # Where the phone reaches Scout's web UI (links.web_base in the service): record pages.
+    web_base: Callable[[], str] = lambda: ""
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -410,6 +419,7 @@ class Index:
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
         self._fill_pending()
+        self._link_tasks_once()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="index")
 
     def _fill_pending(self) -> None:
@@ -535,6 +545,9 @@ class Index:
             row = self._conn.execute("DELETE FROM docs WHERE id = ? RETURNING kind", (id,)).fetchone()
             self._conn.execute("DELETE FROM vecs WHERE id = ?", (id,))
             self._conn.execute("DELETE FROM pending WHERE id = ?", (id,))
+            # Its own links go with it; links to it stay (a task still names the mail it came
+            # from after the mail ages out: resolve() leaves out what's gone).
+            self._conn.execute("DELETE FROM links WHERE src = ? OR (dst = ? AND rel = 'same_as')", (id, id))
             if row and self._counts is not None:
                 self._counts[row[0]] -= 1
             self._changed(id)
@@ -601,11 +614,15 @@ class Index:
         a: str,
         tools: Sequence[tuple[str, dict[str, Any]]] = (),
         private: bool = False,
+        refs: Sequence[str] = (),
     ) -> str:
-        """Append one exchange to the day's journal file and index it; returns the file."""
+        """Append one exchange to the day's journal file and index it; returns the file.
+        `refs`: the records the answer was about (its "about" links)."""
         if self.journal_root is None:
             raise RuntimeError("no journal")
-        e = journal.Entry(ts, who, q, a, [(str(n), dict(args or {})) for n, args in tools], private)
+        e = journal.Entry(
+            ts, who, q, a, [(str(n), dict(args or {})) for n, args in tools], private, [str(r) for r in refs]
+        )
         p = journal.append(self.journal_root, e, self.keep_private())
         self.sync_file(p)
         return str(p)
@@ -633,6 +650,9 @@ class Index:
         """A new task file (taskfiles.py), indexed; returns its number."""
         if self.journal_root is None:
             raise RuntimeError("no journal")
+        if fields.get("source") and not fields.get("link"):
+            url = self.source_url(str(fields["source"]))
+            fields = {**fields, "link": url} if url else fields
         p = taskfiles.write(self.journal_root, title, fields, context)
         self.sync_file(p)
         return taskfiles.number(p) or 0
@@ -677,6 +697,13 @@ class Index:
                 stat, data = "", None
             items = self._parse(kind, p, data) if data is not None else []
             changed = sum(self.put(kind=kind, **it) for it in items)
+            if kind == "task":
+                for it in items:
+                    self._link_task(it["id"], it.get("meta") or {}, str(it.get("body") or ""))
+            elif kind == "turn":  # a journal entry's refs line: what the answer was about
+                for it in items:
+                    refs = [str(r) for r in (it.get("meta") or {}).get("refs") or [] if str(r) != it["id"]]
+                    self._set_links(it["id"], ("about",), [(r, "about") for r in dict.fromkeys(refs)])
             keep = {it["id"] for it in items}
             with self._lock:
                 row = self._conn.execute("SELECT ids FROM files WHERE path = ?", (str(p),)).fetchone()
@@ -787,6 +814,213 @@ class Index:
         except Exception:
             log.exception("index: couldn't index %s; trying again next time", p)
             return 0
+
+    # --- links between records (links.py, docs/links.md) -------------------------------
+
+    def link(self, src: str, dst: str, rel: str) -> None:
+        """Note that record src points at dst (rel: one of links.RELS). Idempotent."""
+        if rel not in links.RELS:
+            raise ValueError(f"rel must be one of {', '.join(links.RELS)}")
+        if not src or not dst or src == dst:
+            raise ValueError("a link needs two different records")
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO links(src, dst, rel, ts) VALUES (?, ?, ?, ?)",
+                (src, dst, rel, time.time()),
+            )
+
+    def links(self, id: str) -> list[dict[str, Any]]:
+        """Every link of a record, either way: [{id (the other record), rel, dir: "out"
+        (this one points at it) or "in"}], oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT dst, rel, 'out', ts FROM links WHERE src = ? "
+                "UNION ALL SELECT src, rel, 'in', ts FROM links WHERE dst = ? ORDER BY 4",
+                (id, id),
+            ).fetchall()
+        return [{"id": r[0], "rel": r[1], "dir": r[2]} for r in rows]
+
+    def _set_links(self, src: str, rels: Sequence[str], to: Sequence[tuple[str, str]]) -> None:
+        """Make src's links of these rels exactly `to` ((dst, rel) pairs); the ones kept
+        keep their time."""
+        with self._tx():
+            have = set(
+                self._conn.execute(
+                    f"SELECT dst, rel FROM links WHERE src = ? AND rel IN ({','.join('?' * len(rels))})",  # noqa: S608 (placeholders only)
+                    (src, *rels),
+                ).fetchall()
+            )
+            want = set(to)
+            for dst, rel in have - want:
+                self._conn.execute("DELETE FROM links WHERE src = ? AND dst = ? AND rel = ?", (src, dst, rel))
+            now = time.time()
+            for dst, rel in want - have:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO links(src, dst, rel, ts) VALUES (?, ?, ?, ?)", (src, dst, rel, now)
+                )
+
+    def source_record(self, key: str) -> str | None:
+        """The record a task's source key names (links.source_record; a Slack read's key
+        is found by its conversation and newest message)."""
+        rec = links.source_record(key)
+        m = re.fullmatch(r"slack:([^:@\s]+)@(\d+(?:\.\d+)?)", rec or "")
+        if m is None:
+            return rec
+        ch, ts = m.group(1), float(m.group(2))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM docs WHERE kind = 'slack' AND id >= ? AND id < ? AND instr(id, '#') = 0 "
+                "AND (abs(CAST(json_extract(meta, '$.last_ts') AS REAL) - ?) < 0.000002 "
+                "OR abs(CAST(json_extract(meta, '$.ts') AS REAL) - ?) < 0.000002) ORDER BY ts DESC LIMIT 1",
+                (f"slack:{ch}:", f"slack:{ch};", ts, ts),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def _link_task(self, id: str, meta: dict[str, Any], body: str) -> None:
+        """A task's found_in (its source) and merged_from (sources merged into it) links,
+        from its file: the file is the truth, so they're re-derived whenever it's read."""
+        recs: list[str] = []
+        for key in links.task_sources(meta, body):
+            rec = self.source_record(key)
+            if rec and rec != id and rec not in recs:
+                recs.append(rec)
+        self._set_links(
+            id, ("found_in", "merged_from"),
+            [(r, "found_in" if i == 0 else "merged_from") for i, r in enumerate(recs)],
+        )  # fmt: skip
+
+    def _link_tasks_once(self) -> None:
+        """Once: links for the tasks indexed before there were links (later, each task's
+        are made when its file is read)."""
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM settings WHERE key = 'links_tasks'").fetchone():
+                return
+            rows = self._conn.execute("SELECT id, meta, body FROM docs WHERE kind = 'task'").fetchall()
+        for id, meta, body in rows:
+            self._link_task(id, _meta(meta), body)
+        with self._lock:
+            self._conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('links_tasks', '1')")
+        if rows:
+            log.info("index: links made for %d tasks", len(rows))
+
+    def link_meetings(self, since: float | None = None) -> int:
+        """same_as links from meeting summaries that came by email to the Granola note of
+        the same meeting (links.same_meeting: its start just before the email, a similar
+        title, and no equally good other). Returns how many emails are linked now."""
+        since = time.time() - 30 * 86400 if since is None else since
+        with self._lock:
+            emails = self._conn.execute(
+                "SELECT id, ts, title FROM docs WHERE kind = 'meeting' AND ts >= ? "
+                "AND substr(id, 1, 12) = 'mailmeeting:'",
+                (since,),
+            ).fetchall()
+        linked = 0
+        for id, ts, title in emails:
+            with self._lock:
+                cands = self._conn.execute(
+                    "SELECT id, ts, title FROM docs WHERE kind = 'meeting' AND ts BETWEEN ? AND ? "
+                    "AND substr(id, 1, 8) = 'granola:' AND instr(id, '#') = 0",
+                    (ts - links.SAME_MEETING_BEFORE_S, ts + links.SAME_MEETING_AFTER_S),
+                ).fetchall()
+            found = [(str(c[0]), float(c[1]), str(c[2])) for c in cands]
+            g = links.same_meeting(float(ts), str(title), found)
+            self._set_links(id, ("same_as",), [(g, "same_as")] if g else [])
+            linked += g is not None
+        return linked
+
+    def missing(self, kind: str, key: str, limit: int = 20) -> list[Hit]:
+        """The newest items of a kind whose meta has no `key` (partial items aside)."""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError("key must be a plain field name")
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_COLS} FROM docs WHERE kind = ? AND json_extract(meta, '$.{key}') IS NULL "  # noqa: S608 (key checked above)
+                "AND coalesce(json_extract(meta, '$.partial'), 0) = 0 ORDER BY ts DESC LIMIT ?",
+                (kind, limit),
+            ).fetchall()
+        return [_hit(r) for r in rows]
+
+    def open_url(self, id: str) -> str | None:
+        """Where a record opens: a Granola note's page, a Slack message's permalink, a
+        mail's message:// link (from its Message-ID), an emailed meeting summary's mail;
+        Scout's own records (tasks, notes, journal turns, facts) their page on Scout's
+        web UI. None when there's nowhere to go (no such record; mail whose Message-ID
+        isn't known yet)."""
+        h = self.get(id)
+        return self._url(h) if h is not None else None
+
+    def _url(self, h: Hit) -> str | None:
+        m = h.meta
+        if h.kind == "meeting" and m.get("source") == "email":
+            mail = self.get(str(m.get("note") or f"mail:{m.get('mail_id')}"))
+            return self._url(mail) if mail is not None and mail.kind == "mail" else None
+        if h.kind == "meeting":
+            return str(m["url"]) if m.get("url") else None
+        if h.kind == "slack":
+            return str(m["permalink"]) if m.get("permalink") else None
+        if h.kind == "mail":
+            return links.message_url(str(m.get("message_id") or ""))
+        if h.kind in links.OWN_KINDS:
+            return links.page_url(self.web_base(), h.id)
+        return None
+
+    def source_url(self, key: str) -> str | None:
+        """The link out of a task source key's record (not a Scout page), or None."""
+        rec = self.source_record(key)
+        h = self.get(rec) if rec else None
+        return self._url(h) if h is not None and h.kind not in links.OWN_KINDS else None
+
+    def resolve(self, id: str) -> dict[str, Any] | None:
+        """A record with where it opens and what it's linked to: {id, kind, title, url,
+        page, private, related: [{id, rel, dir, kind, title, url}]}. A task's url is its
+        source's (the meeting it was found in) when that has one, else its own page;
+        `page` is a Scout record's page on the web UI (None for records from outside)."""
+        h = self.get(id)
+        if h is None:
+            return None
+        related = []
+        for ln in self.links(id):
+            r = self.get(ln["id"])
+            if r is None:
+                continue
+            related.append({**ln, "kind": r.kind, "title": r.title, "url": self._url(r)})
+        own = h.kind in links.OWN_KINDS
+        page = links.page_url(self.web_base(), h.id) if own else None
+        url = self._url(h)
+        if h.kind == "task":
+            src = next((r["url"] for r in related if r["rel"] == "found_in" and r["url"]), None)
+            url = src or str(h.meta.get("link") or "") or page
+        private = (
+            h.kind in links.PRIVATE_KINDS
+            or bool(h.meta.get("private"))
+            or (h.kind == "task" and str(h.meta.get("from") or "") in ("mail", "meeting", "slack"))
+        )
+        return {"id": h.id, "kind": h.kind, "title": h.title, "url": url, "page": page,
+                "private": private, "related": related}  # fmt: skip
+
+    def upkeep(self) -> None:
+        """The links that follow from what's stored: emailed meeting summaries to their
+        Granola notes, and tasks' `- link:` lines. Never fails the caller."""
+        try:
+            self.link_meetings()
+            n = self.link_tasks()
+            if n:
+                log.info("index: %d tasks got their link", n)
+        except Exception:
+            log.exception("index: making links failed; trying again next time")
+
+    def link_tasks(self) -> int:
+        """Tasks with a source but no `- link:` line get one when their source has a link
+        out (a mail's waits for its Message-ID). Returns how many were written."""
+        if self.journal_root is None:
+            return 0
+        n = 0
+        for h in self.missing("task", "link", limit=5000):
+            src = str(h.meta.get("source") or "")
+            url = self.source_url(src) if src else None
+            if url and self.task_update(int(h.meta.get("n") or 0), {"link": url}):
+                n += 1
+        return n
 
     # --- searching ------------------------------------------------------------------
 
@@ -1170,6 +1404,7 @@ class Index:
                     n = await loop.run_in_executor(self._pool, self.sync_files)
                     if n:
                         log.info("index: %d journal entries re-read from edited files", n)
+                    await loop.run_in_executor(self._pool, self.upkeep)
                 if idle():
                     n = await loop.run_in_executor(self._pool, self.embed_pending, batch)
                     done += n
@@ -1321,6 +1556,11 @@ class Store(Protocol):
         limit: int = 8, semantic: bool | None = True,
     ) -> list[Hit]: ...  # fmt: skip
     async def asearch(self, query: str, **kw: Any) -> list[Hit]: ...
+    def link(self, src: str, dst: str, rel: str) -> None: ...
+    def links(self, id: str) -> list[dict[str, Any]]: ...
+    def open_url(self, id: str) -> str | None: ...
+    def resolve(self, id: str) -> dict[str, Any] | None: ...
+    def missing(self, kind: str, key: str, limit: int = 20) -> list[Hit]: ...
 
 
 _index: Store | None = None  # tests put a local Index here

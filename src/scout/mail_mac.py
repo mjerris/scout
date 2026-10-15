@@ -267,9 +267,10 @@ function run(argv) {
   }
   if (m === null) return JSON.stringify({error: "no inbox message with id " + id});
   const content = m.content() || "";
+  let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
   return JSON.stringify({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
     to: m.toRecipients().map(r => r.address()), cc: m.ccRecipients().map(r => r.address()),
-    body: content.slice(0, limit), truncated: content.length > limit});
+    body: content.slice(0, limit), truncated: content.length > limit, message_id: mid});
 }
 """
 
@@ -285,8 +286,9 @@ function run(argv) {
       let m;
       try { m = mb.messages.byId(id); m.id(); } catch (e) { continue; }
       const content = m.content() || "";
+      let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
       out.push({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
-        body: content.slice(0, limit), truncated: content.length > limit});
+        body: content.slice(0, limit), truncated: content.length > limit, message_id: mid});
       want.delete(id);
       break;
     }
@@ -319,13 +321,32 @@ function run(argv) {
       const m = mb.messages.byId(ids[i]);
       if (norm(m.subject()) !== want) continue;
       const content = m.content() || "";
+      let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
       return JSON.stringify({id: ids[i], date: m.dateReceived().toISOString(), sender: m.sender(),
         subject: m.subject(), to: m.toRecipients().map(r => r.address()),
         cc: m.ccRecipients().map(r => r.address()), body: content.slice(0, limit),
-        truncated: content.length > limit});
+        truncated: content.length > limit, message_id: mid});
     }
   }
   return JSON.stringify({error: "couldn't find that message in Mail"});
+}
+"""
+
+# The Message-ID header of messages by id (mail indexed before Scout kept it): one Apple
+# event per message, no text read. It's what Mail's message:// links name (links.py).
+_MESSAGE_IDS = r"""
+function run(argv) {
+  const want = argv[0].split(",").map(x => parseInt(x));
+  const Mail = Application("Mail");
+  const boxes = Mail.inbox.mailboxes();
+  const out = {};
+  for (const id of want) {
+    for (const mb of boxes) {
+      let m;
+      try { m = mb.messages.byId(id); out[id] = m.messageId() || ""; break; } catch (e) { continue; }
+    }
+  }
+  return JSON.stringify({ids: out});
 }
 """
 
@@ -781,6 +802,21 @@ async def bodies(
     if have:
         log.info("mail: text of %d message(s) from Scout's index, %d from Mail", len(have), len(got))
     return {i: m for i in wanted if (m := have.get(i) or got.get(i)) is not None}
+
+
+async def message_ids(ids: list[int], run: Runner = _jxa) -> dict[int, str]:
+    """The Message-ID header of each of these inbox messages (by Mail's id); ids Mail
+    doesn't have, or without one, are left out."""
+    if not ids:
+        return {}
+    if len(ids) > 50:
+        raise ToolError("at most 50 messages at a time")
+    data = await _call(run, _MESSAGE_IDS, ",".join(str(_check_id(i)) for i in ids))
+    out: dict[int, str] = {}
+    for k, v in (data.get("ids") or {}).items():
+        if isinstance(v, str) and v.strip():
+            out[int(k)] = v.strip()
+    return out
 
 
 async def verify_index_ids(n: int = 5, run: Runner = _jxa, index: Index | None = None) -> str:

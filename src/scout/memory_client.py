@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -166,9 +167,37 @@ class Store:
         a: str,
         tools: Sequence[tuple[str, dict[str, Any]]] = (),
         private: bool = False,
+        refs: Sequence[str] = (),
     ) -> str:
         args = {"ts": ts, "who": who, "q": q, "a": a, "tools": [list(t) for t in tools], "private": private}
+        if refs:
+            args["refs"] = [str(r) for r in refs]
         return str(self.c.call("/v1/journal/add", args)["file"])
+
+    def resolve(self, id: str) -> dict[str, Any] | None:
+        """index.Index.resolve: the record, where it opens and what it's linked to; None
+        when there's no such record."""
+        try:
+            out = self.c.call("/v1/resolve?" + urllib.parse.urlencode({"id": id}), None)
+        except ToolError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+        return out or None
+
+    def link(self, src: str, dst: str, rel: str) -> None:
+        self.c.call("/v1/links/add", {"src": src, "dst": dst, "rel": rel})
+
+    def links(self, id: str) -> list[dict[str, Any]]:
+        return list(self.c.call("/v1/links/list", {"id": id})["links"])
+
+    def open_url(self, id: str) -> str | None:
+        url = self.c.call("/v1/links/url", {"id": id}).get("url")
+        return str(url) if url else None
+
+    def missing(self, kind: str, key: str, limit: int = 20) -> list[index.Hit]:
+        out = self.c.call("/v1/docs/missing", {"kind": kind, "key": key, "limit": limit})
+        return [_hit(h) for h in out["hits"]]
 
     def health(self) -> dict[str, Any]:
         return self.c.call("/v1/health", None, timeout=5)

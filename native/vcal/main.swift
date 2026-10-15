@@ -9,12 +9,14 @@
 //   vcal create --title S --start T --end T [--calendar ID] [--location S] [--notes S] [--all-day]
 //   vcal reminder-lists                 list reminder lists
 //   vcal reminders [--list NAME]... [--include-completed] [--due-before T] [--limit N]
-//   vcal reminder-add --title S [--list NAME] [--due T] [--notes S] [--create-list]
+//   vcal reminder-add --title S [--list NAME] [--due T] [--notes S] [--url U] [--create-list]
 //   vcal reminder-get --id ID [--id ID]...      those reminders (ids not found: "missing")
-//   vcal reminder-update --id ID [--title S] [--due T|none]
+//   vcal reminder-update --id ID [--title S] [--due T|none] [--url U|none]
 //   vcal reminder-complete --id ID [--title S]   (--title must match: a guard against a stale id)
 //
 // --create-list makes the named list (in the default list's account) when there is none.
+// --url sets the reminder's URL and puts it on a line of its notes too (Reminders on the
+// iPhone shows the notes, with the link tappable); add and update echo it as "url".
 //
 // A list NAME matches its title ignoring case, spaces, punctuation and a trailing
 // "list" ("shopping list" finds "Shopping", "to-do" finds "To Do").
@@ -209,6 +211,21 @@ func reminderInfo(_ r: EKReminder) -> [String: Any] {
     return d
 }
 
+/// Set (or with "none" clear) a reminder's URL; a URL is also put on a line of the notes
+/// unless it's there already.
+func setURL(_ r: EKReminder, _ value: String) {
+    if value == "none" {
+        r.url = nil
+        return
+    }
+    guard let u = URL(string: value), u.scheme != nil else { fail("--url must be a URL: \(value)") }
+    r.url = u
+    let notes = r.notes ?? ""
+    if !notes.components(separatedBy: "\n").contains(value) {
+        r.notes = notes.isEmpty ? value : notes + "\n" + value
+    }
+}
+
 func dueDate(_ r: EKReminder) -> Date? {
     r.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
 }
@@ -364,12 +381,13 @@ case "reminder-add":
     r.calendar = list
     if let n = o["notes"]?.last { r.notes = n }
     if let due = o["due"]?.last { setDue(r, due) }
+    if let u = o["url"]?.last { setURL(r, u) }
     do {
         try store.save(r, commit: true)
     } catch {
         fail("could not save: \(error.localizedDescription)")
     }
-    emit(["created": true, "reminder": reminderInfo(r)])
+    emit(["created": true, "reminder": reminderInfo(r), "url": r.url?.absoluteString ?? ""])
 
 case "reminder-get":
     requireAccess(.reminder)
@@ -404,12 +422,13 @@ case "reminder-update":
             setDue(r, due)
         }
     }
+    if let u = o["url"]?.last { setURL(r, u) }
     do {
         try store.save(r, commit: true)
     } catch {
         fail("could not save: \(error.localizedDescription)")
     }
-    emit(["updated": true, "reminder": reminderInfo(r)])
+    emit(["updated": true, "reminder": reminderInfo(r), "url": r.url?.absoluteString ?? ""])
 
 case "reminder-complete":
     requireAccess(.reminder)

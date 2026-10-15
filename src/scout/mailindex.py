@@ -26,6 +26,7 @@ KIND = "mail"
 NEWEST = 100  # messages listed per pass
 BODIES = 50  # message texts read per pass
 CHUNK = 10  # per call to Mail (25 at a time ran past 30 s live)
+MESSAGE_IDS = 20  # already-indexed messages given their Message-ID per pass (no text read)
 TIMEOUT_S = 90.0  # background work: Mail can be slow on a big inbox
 
 
@@ -110,6 +111,10 @@ def _put(ix: index.Store, m: dict[str, Any], body: str | None) -> None:
     meta = {"mail_id": mid, "read": bool(m.get("read")), "date": m.get("date")}
     if body is None:
         meta["partial"] = True  # sender and subject only, until its text is read
+    if msgid := str(m.get("message_id") or "").strip():
+        meta["message_id"] = msgid  # Mail's message:// link (links.py)
+    elif (old := ix.get(f"mail:{mid}")) is not None and old.meta.get("message_id"):
+        meta["message_id"] = old.meta["message_id"]  # read again without it: kept
     ix.put(
         f"mail:{mid}",
         KIND,
@@ -250,6 +255,9 @@ async def sync_pass(
                     ix.delete(f"mail:{row['id']}")
                 done.add(int(row["id"]))
                 stored += 1
+    t2 = time.monotonic()
+    ids_added = await _add_message_ids(ix, run)
+    t_ids = time.monotonic() - t2
     left = [_ts(str(m.get("date") or "")) for m in due if int(m["id"]) not in done]
     if left:  # next pass starts at the oldest message not stored yet
         _mark(min(left))
@@ -257,10 +265,33 @@ async def sync_pass(
         _mark(max([_ts(str(m.get("date") or "")) for m in listed] + ([mark] if mark is not None else [])))
     out = {
         "listed": len(listed), "how": how, "new": len(new), "filled": len(partial), "stored": stored,
-        "list_s": round(t_list, 1), "read_s": round(time.monotonic() - t1, 1), "total": ix.count(KIND),
+        "list_s": round(t_list, 1), "read_s": round(t2 - t1, 1), "message_ids": ids_added,
+        "ids_s": round(t_ids, 1), "total": ix.count(KIND),
     }  # fmt: skip
     log.info("mail index: %s", out)
     return out
+
+
+async def _add_message_ids(ix: index.Store, run: mail_mac.Runner, n: int = MESSAGE_IDS) -> int:
+    """Mail indexed before Scout kept the Message-ID gets it, the newest n a pass (one
+    Apple event each, no text read). A message Mail no longer has keeps none and is
+    asked for again only while it's among the newest without one. Never fails the pass."""
+    try:
+        todo = [h for h in ix.missing(KIND, "message_id", n) if h.meta.get("mail_id")]
+        if not todo:
+            return 0
+        got = await mail_mac.message_ids([int(h.meta["mail_id"]) for h in todo], run)
+    except Exception as exc:  # Mail can't answer this pass: the mail itself was indexed
+        log.info("mail index: Message-IDs not read: %s", exc)
+        return 0
+    added = 0
+    for h in todo:
+        if msgid := got.get(int(h.meta["mail_id"])):
+            ix.put(h.id, h.kind, h.title, h.body, h.who, h.ts, {**h.meta, "message_id": msgid})
+            added += 1
+        else:  # Mail hasn't got it (moved, deleted): "" stops it being asked for every pass
+            ix.put(h.id, h.kind, h.title, h.body, h.who, h.ts, {**h.meta, "message_id": ""})
+    return added
 
 
 async def backfill_meetings(ix: index.Store, run: mail_mac.Runner = _slow_jxa, days: float = 14.0) -> int:

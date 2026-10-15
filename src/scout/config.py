@@ -233,6 +233,9 @@ class WebConfig:
     # literal IPs. Never all interfaces.
     hosts: list[str] = field(default_factory=lambda: ["localhost", "lan", "tailscale"])
     port: int = 8765
+    # Where links to Scout's record pages (/r/<id>) point, e.g. "https://<mac>.<tailnet>.ts.net".
+    # Empty: the Tailscale Serve name forwarding to this port, else the tailnet address.
+    public_url: str = ""
 
 
 @dataclass

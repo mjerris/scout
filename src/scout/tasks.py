@@ -13,6 +13,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -112,7 +113,7 @@ def score(t: Task, today: dt.date, people: Iterable[str] = ()) -> tuple[float, s
         s -= ((today - found).days - 14) / 7
     if not t.mine:
         s -= 15  # what others owe you comes up when it's due or overdue
-        why = why or f"waiting on {t.owner}"
+        why = why or f"waiting on {t.owner if owner_known(t.owner) else 'someone'}"
     return s, why or "open"
 
 
@@ -176,6 +177,78 @@ def is_me(owner: str) -> bool:
     return False
 
 
+# An owner that isn't a person: a pronoun or a group, as a model may write it from a
+# transcript (Granola labels speakers it can't name "Them").
+_VAGUE_OWNERS = frozenset({
+    "them", "they", "he", "she", "him", "her", "his", "hers", "their", "theirs", "it", "you", "we", "us",
+    "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "team", "the team",
+    "the group", "group", "others", "other", "the other person", "other person", "speaker", "unknown",
+    "the attendee", "attendee", "attendees", "the attendees", "participant", "participants", "n/a", "none",
+    "tbd", "?", "they/them",
+})  # fmt: skip
+UNKNOWN_OWNER = "unknown"  # what a found task's owner is when nobody can tell who
+
+
+def owner_known(owner: str) -> bool:
+    """Whether a waiting-on owner names someone (not "them", "the team", "unknown")."""
+    o = " ".join(re.sub(r"[^\w\s/?']", " ", str(owner or "")).split()).lower()
+    return bool(o) and o not in _VAGUE_OWNERS and not re.fullmatch(r"speaker ?\w?\d*", o)
+
+
+def owner_name(owner: str) -> str:
+    """Who to say owes it: the owner, or "Someone" when that isn't a person."""
+    return owner if owner_known(owner) else "Someone"
+
+
+def owes_you(t: Task, what: str) -> str:
+    """ "Pat owes you the vendor quote" — or "Someone owes you ..." when the owner isn't
+    known (never "Them owes you"). For the pulse and the briefing too."""
+    return f"{owner_name(t.owner)} owes you {what}"
+
+
+def follow_up(t: Task, what: str) -> str:
+    """ "follow up with Pat on X", or "follow up on X" when the owner isn't known."""
+    return f"follow up with {t.owner} on {what}" if owner_known(t.owner) else f"follow up on {what}"
+
+
+def likely_owner(people: Iterable[str]) -> str | None:
+    """The one person besides you among these (a meeting's attendees, an email's
+    sender), or None when there isn't exactly one: who "them" must be."""
+    others: list[str] = []
+    for p in people:
+        name = " ".join(re.sub(r"\s*<[^>]*>", "", str(p)).split()).strip(" ,\"'")
+        if name and not is_me(name) and owner_known(name) and name.lower() not in (o.lower() for o in others):
+            others.append(name)
+    return others[0] if len(others) == 1 else None
+
+
+async def repair_owners(store: index.Store | None = None) -> int:
+    """Found tasks whose owner is a pronoun or a group ("Them", "they", "the team"):
+    the owner becomes the one other person in the meeting (or the email's sender) when
+    there's exactly one, else "unknown"; the reminder's title follows. Fields only:
+    titles and context are left as they are. Returns how many were changed."""
+    store = store or index.default()
+    n = 0
+    for t in await asyncio.to_thread(all_tasks, store):
+        if t.mine or owner_known(t.owner) or t.owner == UNKNOWN_OWNER or not found_from(t.fields):
+            continue  # a task you added keeps the owner you gave it
+        src = str(t.fields.get("source") or "")
+        who = ""
+        try:
+            r = await asyncio.to_thread(store.resolve, f"task:{t.n}") if src else None
+            found = next((x for x in (r or {}).get("related", []) if x.get("rel") == "found_in"), None)
+            h = await asyncio.to_thread(store.get, str(found["id"])) if found else None
+            who = h.who if h is not None else ""
+        except (ToolError, AttributeError) as exc:
+            log.info("task %d's source not read: %s", t.n, exc)
+        owner = likely_owner(who.split(",")) or UNKNOWN_OWNER
+        await asyncio.to_thread(store.task_update, t.n, {"owner": owner})
+        await remirror(t, store)
+        log.info("task %d: owner %r was not a person; now %s", t.n, t.owner, owner)
+        n += 1
+    return n
+
+
 def _people() -> list[str]:
     try:
         from . import memory_client
@@ -190,12 +263,26 @@ def _people() -> list[str]:
 
 def _reminder_title(title: str, fields: dict[str, Any]) -> str:
     owner = str(fields.get("owner") or "me")
-    return (title if owner.lower() == "me" else f"{owner}: {title}")[:200]
+    # In Waiting On: "Pat: the vendor quote", or just the title when nobody knows who.
+    return (f"{owner}: {title}" if owner.lower() != "me" and owner_known(owner) else title)[:200]
 
 
-async def _mirror_add(t_title: str, fields: dict[str, Any], n: int) -> dict[str, str]:
-    """The task as a reminder in the Mac's Reminders (never Scout's own lists): the fields
-    that remember it ({"reminder": id, "reminder_title": its title}), or {}."""
+def best_link(store: index.Store, n: int) -> str | None:
+    """Where task n opens: its source's link (the meeting, mail or Slack message it was
+    found in), else its page on Scout's web UI; None when neither is known."""
+    try:
+        r = store.resolve(f"task:{n}")
+    except (ToolError, AttributeError) as exc:  # the memory service is down: no link yet
+        log.info("task %d's link not known: %s", n, exc)
+        return None
+    url = (r or {}).get("url")
+    return str(url) if url else None
+
+
+async def _mirror_add(t_title: str, fields: dict[str, Any], n: int, url: str | None = None) -> dict[str, str]:
+    """The task as a reminder in the Mac's Reminders (never Scout's own lists), with its
+    link as the reminder's URL: the fields that remember it ({"reminder": id,
+    "reminder_title": its title, "reminder_url": the link, when the helper set it}), or {}."""
     cfg = load().tasks
     if not cfg.mirror or not await reminders_mac.available():
         return {}
@@ -205,19 +292,65 @@ async def _mirror_add(t_title: str, fields: dict[str, Any], n: int) -> dict[str,
                          "notes": f"Scout task {n}"}  # fmt: skip
     if fields.get("due"):
         a["due"] = str(fields["due"])
+    if url:
+        a["url"] = url
     try:
         r = await reminders_mac.add_data(a, mirror=True)
     except ToolError as exc:
         log.info("task %d not mirrored to Reminders: %s", n, exc)
         return {}
-    return {"reminder": str(r["id"]), "reminder_title": title} if r.get("id") else {}
+    if not r.get("id"):
+        return {}
+    out = {"reminder": str(r["id"]), "reminder_title": title}
+    if url and r.get("url") == url:
+        out["reminder_url"] = url
+    return out
 
 
 async def _mirror(t: Task, store: index.Store) -> bool:
-    got = await _mirror_add(t.title, t.fields, t.n)
+    url = await asyncio.to_thread(best_link, store, t.n)
+    got = await _mirror_add(t.title, t.fields, t.n, url)
     if got:
         await asyncio.to_thread(store.task_update, t.n, got)
     return bool(got)
+
+
+_URL_RETRY_S = 6 * 3600.0  # after the helper didn't set a URL (built before --url), wait this long
+_url_off_until = 0.0
+
+
+async def link_reminders(store: index.Store | None = None, limit: int = 20) -> int:
+    """Open tasks' reminders get the task's link as their URL (and on a line of their
+    notes): ones mirrored before reminders had links, and ones whose link changed (a
+    mail's Message-ID came later). Returns how many were set."""
+    global _url_off_until
+    if not load().tasks.mirror or time.monotonic() < _url_off_until:
+        return 0
+    store = store or index.default()
+    todo = [t for t in await asyncio.to_thread(all_tasks, store)
+            if t.status == "open" and t.fields.get("reminder")
+            and not str(t.fields["reminder"]).startswith("scout:")]  # fmt: skip
+    if not todo or not await reminders_mac.available():
+        return 0
+    n = 0
+    for t in todo:
+        url = await asyncio.to_thread(best_link, store, t.n)
+        if not url or url == t.fields.get("reminder_url"):
+            continue
+        try:
+            r = await reminders_mac.update({"id": str(t.fields["reminder"]), "url": url})
+        except ToolError as exc:
+            log.info("task %d's reminder link not set: %s", t.n, exc)
+            continue
+        if r.get("url") != url:  # a helper from before --url: it ignored it
+            log.info("tasks: the Reminders helper doesn't set links yet (rebuild native/vcal)")
+            _url_off_until = time.monotonic() + _URL_RETRY_S
+            return n
+        await asyncio.to_thread(store.task_update, t.n, {"reminder_url": url})
+        n += 1
+        if n >= limit:
+            break
+    return n
 
 
 async def _mirror_done(t: Task) -> None:
@@ -246,7 +379,9 @@ async def remirror(old: Task, store: index.Store) -> None:
         return
     if new.mine != old.mine:
         await _mirror_done(old)
-        await asyncio.to_thread(store.task_update, new.n, {"reminder": None, "reminder_title": None})
+        await asyncio.to_thread(
+            store.task_update, new.n, {"reminder": None, "reminder_title": None, "reminder_url": None}
+        )
         new.fields.pop("reminder", None)
         await _mirror(new, store)
         return
@@ -346,14 +481,17 @@ async def add(a: dict[str, Any], store: index.Store | None = None) -> dict[str, 
     fields = _fields(a)
     store = store or index.default()
     n = await asyncio.to_thread(store.task_add, title, fields, str(a.get("context") or "")[:4000])
-    if got := await _mirror_add(title, fields, n):
+    url = await asyncio.to_thread(best_link, store, n) if load().tasks.mirror else None
+    if got := await _mirror_add(title, fields, n, url):
         await asyncio.to_thread(store.task_update, n, got)
     return {"n": n, "title": title, "owner": fields.get("owner", "me"), "due": fields.get("due")}
 
 
 async def add_text(a: dict[str, Any]) -> str:
     t = await add(a)
-    who = "" if t["owner"] == "me" else f" (waiting on {t['owner']})"
+    who = (
+        "" if t["owner"] == "me" else f" (waiting on {t['owner'] if owner_known(t['owner']) else 'someone'})"
+    )
     return f"Added task {t['n']}: {t['title']}{who}" + (f", due {t['due']}." if t["due"] else ".")
 
 
@@ -427,7 +565,7 @@ def _mode() -> str:
 
 def _line(t: Task, why: str, mode: str) -> str:
     due = t.due()
-    who = "" if t.mine else f" [waiting on {t.owner}]"
+    who = "" if t.mine else f" [waiting on {t.owner if owner_known(t.owner) else 'someone (not known who)'}]"
     title, _ = shown(t.fields, t.title, "", mode)
     src = found_from(t.fields)
     tag = f" [from {FROM[src]}]" if src and mode != "strict" else ""
@@ -547,7 +685,7 @@ def speak_next(tasks: Sequence[Task], today: dt.date, people: Iterable[str] = ()
         return "Your task list is empty.", False
     parts = []
     for t, _, why in rows:
-        what = spoken_title(t) if t.mine else f"follow up with {t.owner} on {spoken_title(t)}"
+        what = spoken_title(t) if t.mine else follow_up(t, spoken_title(t))
         due = t.due()
         if due is not None and (why.startswith("overdue") or why.startswith("due")):
             why = due_words(due, today)
@@ -627,7 +765,7 @@ def speak_waiting(tasks: Sequence[Task], today: dt.date, name: str = "") -> tupl
         return "You're not waiting on anyone.", False
     groups: dict[str, list[Task]] = {}
     for t in sorted(waiting, key=_due_key):
-        key = t.owner.split()[0].lower() if t.owner.split() else t.owner.lower()
+        key = "" if not owner_known(t.owner) else t.owner.split()[0].lower()
         groups.setdefault(key, []).append(t)
     order = sorted(groups.values(), key=lambda g: _due_key(g[0]))
     said: list[Task] = []
@@ -640,7 +778,7 @@ def speak_waiting(tasks: Sequence[Task], today: dt.date, name: str = "") -> tupl
             said.append(t)
         if len(g) > 3:
             items.append(f"{count_word(len(g) - 3)} more")
-        who = g[0].owner
+        who = owner_name(g[0].owner)
         if len(g) == 1:
             out.append(f"{who} owes you {items[0]}.")
         else:
