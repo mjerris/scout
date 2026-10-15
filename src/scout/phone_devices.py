@@ -232,7 +232,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(f"no paired device {args[1]!r} (see scoutctl phone list)", file=sys.stderr)
         return 1
-    print("usage: scoutctl phone pair | list | forget <device>", file=sys.stderr)
+    if cmd == "calls" and len(args) == 1:  # the calls going on now (stale ones dropped)
+        from .phone_service import active_calls
+
+        calls = active_calls(PATH.parent / "phone_calls.json")
+        for cid, device in calls.items():
+            print(f"{cid}  device {device}")
+        print(f"{len(calls)} active call{'s' * (len(calls) != 1)}")
+        return 0
+    print("usage: scoutctl phone pair | list | forget <device> | calls", file=sys.stderr)
     return 2
 
 

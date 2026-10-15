@@ -324,8 +324,9 @@ def test_forgetting_a_phone_ends_its_tools_mid_call(rig: Rig) -> None:
 
 def test_summary_and_call_end_write_ledger_rows(rig: Rig) -> None:
     rig.swml("call-8", uvars(rig.device, rig.secret))
-    rig.agent.on_summary({"text": "asked about the weather"}, {"call_id": "call-8"})
-    rig.agent._call_ended([{"role": "user", "content": "hi"}], {"call_id": "call-8"})
+    hi = [{"role": "user", "content": "hi"}]
+    rig.agent.on_summary({"text": "asked about the weather"}, {"call_id": "call-8", "call_log": hi})
+    rig.agent._call_ended(hi, {"call_id": "call-8"})  # the hangup after the summary ended it: no second row
     rows = ledger.rows(0)
     assert [r["event"] for r in rows] == ["summary", "call_end"]
     assert all(r["tier"] == "phone" and r["client"] == "phone" and r["verified"] for r in rows)

@@ -280,11 +280,17 @@ def test_shared_tools_are_offered_alike_to_the_room_and_other_sessions() -> None
     from scout import brain, mcp_server
     from scout.shared_tools import SHARED
 
+    from scout.shared_tools import NOT_DESK
+
     _, names = build_server(Timers(lambda label: None))
-    asks = {f"mcp__voice_app__{t.name}" for t in SHARED if t.asks}
+    room = {f"mcp__voice_app__{t.name}" for t in (*SHARED, *NOT_DESK)} & set(names)
+    asks = {f"mcp__voice_app__{t.name}" for t in (*SHARED, *NOT_DESK) if t.asks} & room
     assert {f"mcp__voice_app__{t.name}" for t in SHARED} <= set(names)
+    assert {"mcp__voice_app__sessions_list", "mcp__voice_app__session_ask"} <= room
+    assert "mcp__voice_app__phone_timer" not in names  # the room has set_timer
     assert set(brain.ALWAYS_ASK_TOOLS) == asks
     offered = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    assert not {t.name for t in NOT_DESK} & set(offered)  # desk sessions have their own
     for t in SHARED:
         assert t.name in offered, t.name
         theirs = offered[t.name].input_schema or {}
@@ -431,7 +437,10 @@ def test_lean_room_keeps_the_users_rules_model_and_effort_but_not_the_rest(
     assert "model" not in json.loads(opts.settings or "{}")
     # No settings file: Scout's own settings only.
     monkeypatch.setattr(brain_mod, "CLAUDE_SETTINGS", tmp_path / "missing.json")
-    assert set(json.loads(_brain(tmp_path)._options().settings or "{}")) == {"permissions"}
+    assert set(json.loads(_brain(tmp_path)._options().settings or "{}")) == {
+        "permissions",
+        "crossSessionInbound",
+    }
 
 
 def test_merge_settings_joins_rule_lists_without_duplicates() -> None:
