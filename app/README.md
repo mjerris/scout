@@ -25,3 +25,25 @@ For a Debug build with live reload: `npx expo run:ios` (starts Metro).
 
 For an iPhone: `SCOUT_IOS_BUNDLE_ID=<an id your team owns> npx expo prebuild --platform ios --clean`,
 open `ios/Scout.xcworkspace`, pick your signing team, and run on the device.
+
+## Patches (each drafted as an upstream PR)
+
+- `vendor/patches/01-…`: a voice call starts in voice mode (receiver, or a connected
+  Bluetooth headset or car), not on the loudspeaker; the mode follows the call's own media
+  instead of the app's `supportsVideo`.
+- `vendor/patches/02-…`: the CallKit observer takes a display name, so the call screen and
+  Recents say "Scout", not the agent's address.
+- `vendor/patches/03-…`: Bluetooth and earpiece routes on iOS (route failures were
+  unhandled rejections; "Phone" couldn't take a call off Bluetooth).
+- `patches/react-native-incall-manager+4.2.2.patch` (patch-package, applied on install):
+  iOS `chooseAudioRoute`, `getAudioDeviceStatus` and the `onAudioDeviceChanged` event,
+  which until now were Android-only.
+
+## Simulator
+
+The Simulator can't place a call (no SignalWire config, and CallKit doesn't run calls
+there), but everything up to it runs against a stand-in for Scout:
+
+    node scripts/mock-scout.mjs          # prints a scout://pair link
+    xcrun simctl launch booted com.example.scoutphone -ScoutTestLink '<that link>' -ScoutTestPair 1
+    xcrun simctl launch booted com.example.scoutphone -ScoutTestCall 1   # stops at Scout's token (409)

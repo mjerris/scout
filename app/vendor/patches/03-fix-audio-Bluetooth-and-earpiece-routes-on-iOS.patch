@@ -1,0 +1,52 @@
+Upstream: github.com/lpradovera/signalwire-react-native-unofficial, local branch scout/voice-calls-start-on-receiver (29c3b8f); its tests are upstream, not vendored.
+
+diff --git a/signalwire-react-native/src/audio/AudioRouteController.ts b/signalwire-react-native/src/audio/AudioRouteController.ts
+index 2f7a1b2..88b44fc 100644
+--- a/signalwire-react-native/src/audio/AudioRouteController.ts
++++ b/signalwire-react-native/src/audio/AudioRouteController.ts
+@@ -1,3 +1,4 @@
++import { Platform } from 'react-native';
+ import InCallManager from 'react-native-incall-manager';
+ import { BehaviorSubject } from 'rxjs';
+ 
+@@ -82,17 +83,37 @@ export class AudioRouteController {
+     if (!force && route === this._route$.value) {
+       return;
+     }
+-    this.applyRoute(route);
++    this.applyRoute(route, !force);
+     this._route$.next(route);
+   }
+ 
+-  private applyRoute(route: AudioRoute): void {
++  /**
++   * @param chosen - The user asked for this route, as opposed to `start()` and
++   *   `stop()` setting the default. Only a choice moves a call off a connected
++   *   Bluetooth headset or car onto the earpiece.
++   */
++  private applyRoute(route: AudioRoute, chosen = false): void {
++    // chooseAudioRoute returns a promise: a failure is a rejection, which the
++    // try/catch below never sees. On iOS the native method doesn't exist
++    // before react-native-incall-manager's iOS routes, so every call to it
++    // rejected, unhandled.
++    const choose = (name: 'BLUETOOTH' | 'EARPIECE'): void => {
++      Promise.resolve(InCallManager.chooseAudioRoute(name)).catch((error: unknown) =>
++        logger.warn(`Failed to apply audio route "${route}":`, error)
++      );
++    };
+     try {
+       if (route === 'bluetooth') {
+-        void InCallManager.chooseAudioRoute('BLUETOOTH');
++        choose('BLUETOOTH');
+         return;
+       }
+       InCallManager.setForceSpeakerphoneOn(route === 'speaker');
++      // On iOS, turning the speaker off leaves a connected Bluetooth device in
++      // charge (iOS routes calls to it): only the preferred input moves a call
++      // to the phone itself.
++      if (route === 'earpiece' && chosen && Platform.OS === 'ios') {
++        choose('EARPIECE');
++      }
+     } catch (error) {
+       logger.warn(`Failed to apply audio route "${route}":`, error);
+     }
