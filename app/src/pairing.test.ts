@@ -1,6 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 
-import { clearPairing, loadPairing, parsePairLink, savePairing } from './pairing';
+import { clearPairing, loadPairing, parseCode, parsePairLink, savePairing } from './pairing';
 
 jest.mock('expo-secure-store', () => {
   const items = new Map<string, string>();
@@ -14,7 +14,6 @@ jest.mock('expo-secure-store', () => {
 
 const P = {
   server: 'https://mac.ts.net',
-  accessToken: 'tok',
   name: 'Mike iPhone',
   device: 'd1234567890abcdef',
   secret: 'c2VjcmV0',
@@ -38,14 +37,37 @@ test('a damaged or partial item reads as unpaired', async () => {
   expect(await loadPairing()).toBeNull();
 });
 
-test('pairing links', () => {
-  expect(parsePairLink('scout://pair?server=mac.tail1.ts.net&token=abc')).toEqual({
+test('pairing links carry the server and a one-time code, never the web token', () => {
+  expect(parsePairLink('scout://pair?server=https%3A%2F%2Fmac.tail1.ts.net&code=ABCD-EFGH')).toEqual({
     server: 'https://mac.tail1.ts.net',
-    accessToken: 'abc',
+    code: 'ABCD-EFGH',
   });
-  expect(parsePairLink('scout://pair?server=http%3A%2F%2Fmac.tail1.ts.net&token=abc')).toBeNull();
-  expect(parsePairLink('scout://pair?server=mac.tail1.ts.net')).toBeNull();
+  expect(parsePairLink('scout://pair?server=mac.tail1.ts.net&code=abcdefgh')).toEqual({
+    server: 'https://mac.tail1.ts.net',
+    code: 'ABCD-EFGH',
+  });
+  expect(parsePairLink(' scout://pair?server=mac.tail1.ts.net&code=ABCD-EFGH ')).not.toBeNull();
+  expect(parsePairLink('scout://pair?server=mac.tail1.ts.net&token=abc')).toBeNull(); // the old kind
+  expect(parsePairLink('scout://pair?server=http%3A%2F%2Fmac.tail1.ts.net&code=ABCD-EFGH')).toBeNull();
+  expect(parsePairLink('scout://pair?server=mac.tail1.ts.net&code=short')).toBeNull();
+  expect(parsePairLink('scout://pair?code=ABCD-EFGH')).toBeNull();
   expect(parsePairLink('scout://call')).toBeNull();
-  expect(parsePairLink('https://pair?server=a&token=b')).toBeNull();
+  expect(parsePairLink('https://pair?server=a&code=ABCD-EFGH')).toBeNull();
   expect(parsePairLink('not a link')).toBeNull();
+});
+
+test('codes are read loosely and shown as ABCD-EFGH', () => {
+  expect(parseCode('abcd-efgh')).toBe('ABCD-EFGH');
+  expect(parseCode(' ABCD EFGH ')).toBe('ABCD-EFGH');
+  expect(parseCode('ABCDEFG')).toBeNull();
+  expect(parseCode('ABCD-EFG0')).toBeNull(); // no 0, 1, I, L or O in a code
+  expect(parseCode('')).toBeNull();
+});
+
+test('a pairing made before codes (with the web token) still loads', async () => {
+  await savePairing({ ...P, accessToken: 'tok' });
+  expect(await loadPairing()).toMatchObject({ device: P.device, accessToken: 'tok' });
+  const { accessToken: _, ...noToken } = { ...P, accessToken: '' };
+  await savePairing(noToken);
+  expect(await loadPairing()).toEqual(noToken);
 });

@@ -18,7 +18,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test('pairs with Scout and keeps the secret in the Keychain', async () => {
+test('pairs with a typed code and keeps the secret in the Keychain', async () => {
   const fetchMock = jest.fn(async () => ({
     ok: true,
     status: 200,
@@ -28,13 +28,14 @@ test('pairs with Scout and keeps the secret in the Keychain', async () => {
   render(<App />);
   await screen.findByText('Pair with Scout');
   fireEvent.changeText(screen.getByTestId('server'), 'mac.tail1.ts.net');
-  fireEvent.changeText(screen.getByTestId('token'), 'web-token-value');
+  fireEvent.changeText(screen.getByTestId('code'), 'ABCD-EFGH');
   fireEvent.changeText(screen.getByTestId('name'), 'Mike iPhone');
-  await act(async () => fireEvent.press(screen.getByTestId('pair')));
+  await act(async () => fireEvent.press(screen.getByTestId('pair-code')));
   await waitFor(() => expect(screen.getByTestId('paired')).toHaveTextContent(/Mike iPhone \(d1234567890abcdef\)/));
   expect(fetchMock).toHaveBeenCalledWith('https://mac.tail1.ts.net/api/phone/pair', expect.anything());
   const stored = JSON.parse((SecureStore.setItemAsync as jest.Mock).mock.calls.at(-1)[1]);
-  expect(stored).toMatchObject({ secret: 'c2VjcmV0', accessToken: 'web-token-value', device: 'd1234567890abcdef' });
+  expect(stored).toMatchObject({ secret: 'c2VjcmV0', device: 'd1234567890abcdef' });
+  expect(stored).not.toHaveProperty('accessToken');
 });
 
 test('shows why pairing failed', async () => {
@@ -47,7 +48,7 @@ test('shows why pairing failed', async () => {
   render(<App />);
   await screen.findByText('Pair with Scout');
   fireEvent.changeText(screen.getByTestId('server'), 'https://mac.tail1.ts.net');
-  fireEvent.changeText(screen.getByTestId('token'), 'tok');
-  await act(async () => fireEvent.press(screen.getByTestId('pair')));
-  expect(await screen.findByTestId('error')).toHaveTextContent(/HTTP 409.*\[phone\] address/);
+  fireEvent.changeText(screen.getByTestId('code'), 'ABCD-EFGH');
+  await act(async () => fireEvent.press(screen.getByTestId('pair-code')));
+  expect(await screen.findByTestId('error')).toHaveTextContent(/\[phone\] address/);
 });

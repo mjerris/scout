@@ -58,7 +58,6 @@ jest.mock('@signalwire/js', () => {
 
 const PAIRING = {
   server: 'https://mac.tail1.ts.net',
-  accessToken: 'web-token-value',
   name: 'Mike iPhone',
   device: 'd1234567890abcdef',
   secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',

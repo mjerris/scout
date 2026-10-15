@@ -35,7 +35,7 @@ function Main() {
       });
   }, []);
 
-  // scout://pair?server=...&token=... (from a QR code, through the Camera app).
+  // scout://pair?server=...&code=... (from a QR code, through the Camera app).
   useEffect(() => {
     const take = (url: string | null) => {
       const l = url ? parsePairLink(url) : null;
@@ -71,7 +71,7 @@ function Main() {
             <ActivityIndicator />
           </View>
         ) : pairing === null ? (
-          <PairScreen link={link} onPaired={setPairing} autoPair={testFlags.pair} />
+          <PairScreen link={link} onPaired={setPairing} onDismissLink={() => setLink(null)} autoPair={testFlags.pair} />
         ) : (
           <Paired pairing={pairing} onForget={forget} />
         )}

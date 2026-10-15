@@ -1,6 +1,7 @@
 // What pairing leaves on the phone, kept in the iOS Keychain (expo-secure-store), never
-// in AsyncStorage: Scout's address and web token, and this phone's device id, secret and
-// the agent address it dials (the secret signs every call). Readable only while the
+// in AsyncStorage: Scout's address, and this phone's device id, secret and the agent
+// address it dials (the secret signs every call and every token request). A pairing made
+// before one-time codes also holds Scout's web token (accessToken), which is still sent. Readable only while the
 // phone is unlocked, and only on this device (not in backups or iCloud Keychain).
 import * as SecureStore from 'expo-secure-store';
 
@@ -8,7 +9,7 @@ import { normalizeServer } from './server';
 
 export interface Pairing {
   server: string;
-  accessToken: string;
+  accessToken?: string;
   name: string;
   device: string;
   secret: string;
@@ -24,7 +25,8 @@ const OPTIONS: SecureStore.SecureStoreOptions = {
 function valid(p: unknown): p is Pairing {
   if (!p || typeof p !== 'object') return false;
   const o = p as Record<string, unknown>;
-  return ['server', 'accessToken', 'name', 'device', 'secret', 'address'].every(
+  if (o.accessToken !== undefined && typeof o.accessToken !== 'string') return false;
+  return ['server', 'name', 'device', 'secret', 'address'].every(
     (k) => typeof o[k] === 'string' && (o[k] as string).length > 0,
   );
 }
@@ -51,17 +53,27 @@ export async function clearPairing(): Promise<void> {
 
 export interface PairLink {
   server: string;
-  accessToken: string;
+  code: string;
+}
+
+// Scout's code alphabet (phone_pairing.ALPHABET): no 0/O or 1/I/L.
+const CODE_CHARS = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+
+/** A one-time pairing code, read loosely (abcd efgh, ABCD-EFGH) and shown as ABCD-EFGH. Null if it isn't one. */
+export function parseCode(text: string): string | null {
+  const raw = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return CODE_CHARS.test(raw) ? `${raw.slice(0, 4)}-${raw.slice(4)}` : null;
 }
 
 /**
- * A pairing link, scout://pair?server=<Scout's address>&token=<web token>: what a QR code
- * shown by Scout would carry (the iPhone camera opens it in the app). Null if it isn't one.
+ * A pairing link, scout://pair?server=<Scout's https address>&code=<one-time code>: what
+ * the QR code from `scoutctl phone pair` or the /phone page carries (the iPhone Camera
+ * opens it in the app). Null if it isn't one.
  */
 export function parsePairLink(link: string): PairLink | null {
   let url: URL;
   try {
-    url = new URL(link);
+    url = new URL(link.trim());
   } catch {
     return null;
   }
@@ -69,10 +81,10 @@ export function parsePairLink(link: string): PairLink | null {
   const where = (url.host || url.pathname.replace(/^\/+/, '')).toLowerCase();
   if (where !== 'pair') return null;
   const server = url.searchParams.get('server') ?? '';
-  const accessToken = url.searchParams.get('token') ?? '';
-  if (!server || !accessToken) return null;
+  const code = parseCode(url.searchParams.get('code') ?? '');
+  if (!server || !code) return null;
   try {
-    return { server: normalizeServer(server), accessToken };
+    return { server: normalizeServer(server), code };
   } catch {
     return null;
   }

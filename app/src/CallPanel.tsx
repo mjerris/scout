@@ -53,7 +53,7 @@ export function CallPanel({ pairing }: { pairing: Pairing }) {
     setError('');
     setState('getting a token from Scout');
     try {
-      const server = new ScoutServer(pairing.server, pairing.accessToken);
+      const server = new ScoutServer(pairing.server, pairing);
       const first: MintedToken = await server.token();
       if (mine !== attempt.current) return;
       setSession({ id: mine, credentials: scoutCredentials(server, first) });
