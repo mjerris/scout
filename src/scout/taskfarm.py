@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import index, ledger, privacy, syncstate, tasks
+from . import index, ledger, privacy, reminders_mac, syncstate, tasks
 from .config import DATA, load
 from .mac import ToolError
 
@@ -615,6 +615,8 @@ async def loop(
                         c["skipped"],
                     )
                 with syncstate.track("reminders", every) as p:
+                    if load().tasks.mirror and not await reminders_mac.available():
+                        p.failed = "Reminders isn't available"
                     done = await tasks.sync_from_reminders(store())
                     owners = await tasks.repair_owners(store())
                     p.added = await tasks.mirror_missing(store())

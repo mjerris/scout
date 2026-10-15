@@ -14,7 +14,18 @@ from typing import Any
 
 import pytest
 
-from scout import config, index, local_intents, mailindex, memory_service, pulse, syncstate, taskfarm, tasks
+from scout import (
+    config,
+    index,
+    local_intents,
+    mailindex,
+    memory_service,
+    pulse,
+    reminders_mac,
+    syncstate,
+    taskfarm,
+    tasks,
+)
 from scout.mac import ToolError
 from scout.memory import Memory
 
@@ -426,6 +437,7 @@ def test_the_farm_loop_reports_tasks_and_reminders(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(tasks, "repair_owners", lambda store: n(0))
     monkeypatch.setattr(tasks, "mirror_missing", lambda store: n(3))
     monkeypatch.setattr(tasks, "link_reminders", lambda store: n(2))
+    monkeypatch.setattr(reminders_mac, "available", lambda: yes(True))
     index.default().task_add("Send Pat the budget", {"status": "open", "owner": "me"})
     stop_after(1, monkeypatch)
     with pytest.raises(asyncio.CancelledError):
@@ -434,6 +446,25 @@ def test_the_farm_loop_reports_tasks_and_reminders(monkeypatch: pytest.MonkeyPat
     assert (t.state, t.added, t.updated) == ("ok", 1, 1)
     r = state("reminders")
     assert (r.state, r.added, r.updated, r.backlog) == ("ok", 3, 3, 1)  # one open task not mirrored
+
+
+async def yes(v: bool) -> bool:
+    return v
+
+
+def test_reminders_away_reports_failing_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def farm(store: Any, a: Any, b: Any) -> dict[str, int]:
+        return {"read": 0, "added": 0, "merged": 0, "skipped": 0}
+
+    monkeypatch.setattr(taskfarm, "farm_pass", farm)
+    monkeypatch.setattr(reminders_mac, "available", lambda: yes(False))
+    index.default().task_add("Send Pat the budget", {"status": "open", "owner": "me"})
+    stop_after(1, monkeypatch)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(taskfarm.loop(lambda: True, lambda: None))
+    r = state("reminders")
+    assert r.state == "failing" and "Reminders isn't available" in (r.last_error or "")
+    assert state("tasks").state == "ok"
 
 
 def test_a_failed_farm_pass_reports_failing(monkeypatch: pytest.MonkeyPatch) -> None:

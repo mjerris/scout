@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DATA, Config, load
+from .mac import ToolError
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,7 @@ class Pass:
     added: int = 0  # items new or changed in the store
     updated: int = 0  # other records it touched (a Message-ID, a reminder done)
     backlog: int | None = None  # what's still waiting, when known
+    failed: str = ""  # why the pass couldn't do its work, when it didn't raise (Reminders away)
 
 
 @contextlib.contextmanager
@@ -183,6 +185,9 @@ def track(source: str, every_s: float, path: Path | None = None) -> Iterator[Pas
     except Exception as exc:
         record(source, every_s, error=exc, started=t0, path=path)
         raise
+    if p.failed:
+        record(source, every_s, error=ToolError(p.failed), started=t0, path=path)
+        return
     record(source, every_s, added=p.added, updated=p.updated, backlog=p.backlog, started=t0, path=path)
 
 
