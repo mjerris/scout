@@ -20,6 +20,8 @@ STILL_WORKING = "Still working on it."
 
 def progress_phrase(what: str) -> str:
     """A short line for a lookup: `what` is a tool name or the request."""
+    if what == "ToolSearch":  # Claude loading one of Scout's tools, not a search for the user
+        return "One moment."
     low = what.lower().replace("_", " ")
     return next((said for pattern, said in _PROGRESS if pattern.search(low)), "One moment.")
 
