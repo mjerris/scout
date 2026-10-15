@@ -71,5 +71,5 @@ def test_ensure_drops_a_stale_client(tmp_path: Path, monkeypatch: Any) -> None:
     first: Any = asyncio.run(b._ensure())
     assert asyncio.run(b._ensure()) is first  # nothing used yet: kept
     b._used(now=time.time(), context_tokens=500)
-    second = asyncio.run(b._ensure())
-    assert second is not first and first.closed and b._context == 0
+    second: Any = asyncio.run(b._ensure())
+    assert second is not first and made[0].closed and len(made) == 2 and b._context == 0
