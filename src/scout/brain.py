@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast, get_args
@@ -481,6 +482,8 @@ class Brain:
         self.client: ClaudeSDKClient | None = None
         self.session_id: str | None = None
         self._session_cost = 0.0  # the CLI's running total for this session, so far
+        self._last_used: float | None = None  # when the session last finished a turn
+        self._context = 0  # tokens the last turn carried (input + cache reads and writes)
         self._lock = asyncio.Lock()
         self._options()  # validates permission_mode, setting_sources and approval_policy now
 
@@ -652,7 +655,27 @@ class Brain:
             return PermissionResultAllow()
         return PermissionResultDeny(message=_NO_ANSWER if answer is None else _DENIED)
 
+    def _used(self, now: float, context_tokens: int) -> None:
+        self._last_used, self._context = now, context_tokens
+
+    def _stale(self, now: float) -> bool:
+        """Whether the session should start fresh before the next turn: quiet too long, or
+        carrying too much (session_idle_min, session_max_tokens; 0 turns one off)."""
+        if self._last_used is None:
+            return False
+        idle = self.cfg.session_idle_min
+        if idle > 0 and now - self._last_used > idle * 60:
+            return True
+        return 0 < self.cfg.session_max_tokens < self._context
+
     async def _ensure(self) -> ClaudeSDKClient:
+        if self.client is not None and self._stale(time.time()):
+            log.info("Claude session started fresh (%d tokens of context, idle %.0f min)",
+                     self._context, (time.time() - (self._last_used or time.time())) / 60)  # fmt: skip
+            with contextlib.suppress(Exception):
+                await self.client.disconnect()
+            self.client, self.session_id, self._session_cost = None, None, 0.0
+            self._last_used, self._context = None, 0
         if self.client is None:
             self.client = ClaudeSDKClient(self._options())
             await self.client.connect()
@@ -702,6 +725,9 @@ class Brain:
                     pending, streamed = "", False
                 elif isinstance(msg, ResultMessage):
                     self.session_id = msg.session_id
+                    u = msg.usage or {}
+                    keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                    self._used(time.time(), sum(int(u.get(k) or 0) for k in keys))
                     yield "result", self._turn_cost(msg)
 
     def _turn_cost(self, msg: ResultMessage) -> ResultMessage:
