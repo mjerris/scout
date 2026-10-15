@@ -14,9 +14,12 @@ token (state/memory.token, readable by this user only):
     POST /v1/search {query, kinds, since, limit, semantic} -> {hits}
     POST /v1/memories/add {text} | /forget {about} | /matching {about}
     POST /v1/memories/relevant {request, limit} | /newest {limit} | /list
-    POST /v1/journal/add {ts, who, q, a, tools, private}  -> {file}
+    POST /v1/journal/add {ts, who, q, a, tools, private, refs} -> {file}
     POST /v1/notes/add {title, body, ts} -> {id} | /v1/notes/delete {id} -> {deleted}
     POST /v1/tasks/add {title, fields, context} -> {id} | /v1/tasks/update {id, fields, context} -> {updated}
+    GET  /v1/resolve?id=<id>                             -> index.Index.resolve's dict, or {} (404)
+    POST /v1/links/add {src, dst, rel} | /v1/links/list {id} -> {links} | /v1/links/url {id} -> {url}
+    POST /v1/docs/missing {kind, key, limit}              -> {hits}
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -46,7 +49,7 @@ from typing import Any
 
 from aiohttp import web
 
-from . import index
+from . import index, links
 from .config import DATA, load
 from .memory import Memory
 
@@ -175,6 +178,7 @@ class Service:
         app = web.Application(middlewares=[self._auth], client_max_size=8 * 1024 * 1024)
         r = app.router
         r.add_get("/v1/health", self._health)
+        r.add_get("/v1/resolve", self._resolve)
         routes: dict[str, Callable[[dict[str, Any]], Any]] = {
             "/v1/docs/put": lambda a: {"changed": self.ix.put(
                 str(a["id"]), str(a["kind"]), str(a.get("title") or ""), str(a.get("body") or ""),
@@ -198,9 +202,15 @@ class Service:
             "/v1/notes/delete": lambda a: {"deleted": self.ix.note_delete(int(a["id"]))},
             "/v1/tasks/add": lambda a: {"id": self.ix.task_add(str(a.get("title") or ""), dict(a.get("fields") or {}), str(a.get("context") or ""))},
             "/v1/tasks/update": lambda a: {"updated": self.ix.task_update(int(a["id"]), dict(a.get("fields") or {}), str(a.get("context") or ""))},
+            "/v1/links/add": lambda a: self.ix.link(str(a["src"]), str(a["dst"]), str(a["rel"])),
+            "/v1/links/list": lambda a: {"links": self.ix.links(str(a["id"]))},
+            "/v1/links/url": lambda a: {"url": self.ix.open_url(str(a["id"]))},
+            "/v1/docs/missing": lambda a: {"hits": [_hit(h) for h in self.ix.missing(
+                str(a["kind"]), str(a["key"]), int(a.get("limit") or 20))]},
             "/v1/journal/add": lambda a: {"file": self.ix.journal_add(
                 float(a["ts"]), str(a.get("who") or "room"), str(a.get("q") or ""), str(a.get("a") or ""),
-                [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")))},
+                [(str(t[0]), dict(t[1] or {})) for t in a.get("tools") or []], bool(a.get("private")),
+                [str(r) for r in a.get("refs") or []])},
         }  # fmt: skip
         for path, fn in routes.items():
             r.add_post(path, self._handler(fn))
@@ -220,6 +230,13 @@ class Service:
             "ok": True, "docs": self.ix.count(), "memories": len(self.memory.facts),
             "model": getattr(emb, "model", None), "model_loaded": bool(getattr(emb, "loaded", False)),
         })  # fmt: skip
+
+    async def _resolve(self, request: web.Request) -> web.Response:
+        id = request.query.get("id", "").strip()
+        if not id:
+            return web.json_response({"error": "bad request: id is required"}, status=400)
+        out = await asyncio.get_running_loop().run_in_executor(None, self.ix.resolve, id)
+        return web.json_response(out or {}, status=200 if out else 404)
 
     def _handler(
         self, fn: Callable[[dict[str, Any]], Any]
@@ -301,9 +318,11 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
     ix = index.Index(db, emb, cfg.min_similarity)
     ix.journal_root = root
     ix.keep_private = lambda: load().privacy.mode == "open"
+    ix.web_base = links.web_base
     migrate(ix)
     migrate_turns(ix)
     _sync_files(ix)
+    ix.upkeep()
     svc = Service(ix, Memory(root / "facts.md", legacy=OLD_FACTS), token())
     runner = web.AppRunner(svc.app(), access_log=None)
     await runner.setup()
@@ -321,6 +340,7 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         while True:  # still pick up journal edits
             await asyncio.sleep(60)
             await asyncio.get_running_loop().run_in_executor(None, _sync_files, ix)
+            await asyncio.get_running_loop().run_in_executor(None, ix.upkeep)
 
 
 async def _load_matrix(ix: index.Index) -> None:

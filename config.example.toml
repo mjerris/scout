@@ -79,6 +79,7 @@ local_recall = true           # tier 1 also answers the weather, tasks and "what
 enabled = true
 hosts = ["localhost", "lan", "tailscale"]   # never all interfaces; drop "lan" to keep it off Wi-Fi
 port = 8765
+# public_url = "https://<mac>.<tailnet>.ts.net"  # where record links (/r/<id>) point; empty: the Tailscale Serve name
 
 [floor]
 hold_seconds = 10.0       # a session may keep the floor this long between turns

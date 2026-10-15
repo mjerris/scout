@@ -6,7 +6,8 @@
     - status: open
     - owner: me
     - due: 2026-10-20
-    - source: granola:not_1d3tmYTlCICgjy
+    - source: meeting:not_1d3tmYTlCICgjy
+    - link: https://notes.granola.ai/d/...
 
     Pat asked for the revised numbers before Monday's review.
 
@@ -30,7 +31,7 @@ from .notefiles import next_number, write_atomic
 
 FIELDS = (
     "status", "owner", "due", "importance", "urgency", "effort", "pin",
-    "source", "found", "done", "reminder",
+    "source", "link", "found", "done", "reminder",
 )  # fmt: skip
 STATUSES = ("open", "done", "dropped")
 _NAME = re.compile(r"^(\d+)-[^/]*\.md$")

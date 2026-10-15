@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -247,6 +248,8 @@ async def add_data(a: dict[str, Any], helper: Path | None = None, mirror: bool =
         args += ["--due", due if "T" not in due and " " not in due else iso(t)]
     if notes := text_arg(a.get("notes"), "notes", 2000):
         args += ["--notes", notes]
+    if url := _url_arg(a.get("url")):
+        args += ["--url", url]
     if mirror:
         args.append("--create-list")
     if not await _apple(helper):  # after the checks: bad arguments never touch either store
@@ -254,12 +257,29 @@ async def add_data(a: dict[str, Any], helper: Path | None = None, mirror: bool =
             raise ToolError("Reminders can't be reached")
         return {"said": await locallists.add(a)}
     try:
-        r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
+        data = await vcal(*args, helper=helper)
     except ToolError as exc:
         if not mirror or "--create-list" not in str(exc):
             raise
         # A helper built before --create-list: add to the list if it's there.
-        r = (await vcal(*args[:-1], helper=helper)).get("reminder", {})
+        data = await vcal(*args[:-1], helper=helper)
+    return _with_url(data)
+
+
+def _url_arg(value: Any) -> str:
+    """A URL for a reminder (http(s) or message://), or "" for none; anything else is refused."""
+    url = text_arg(value, "url", 2000) if value else ""
+    if url and not re.match(r"^(?:https?|message)://\S+$", url):
+        raise ToolError("url must be an http(s) or message:// link")
+    return url
+
+
+def _with_url(data: dict[str, Any]) -> dict[str, Any]:
+    """The helper's reminder, with the URL it set ("url": a helper from before --url
+    doesn't echo one, so a caller can tell the link wasn't set)."""
+    r: dict[str, Any] = dict(data.get("reminder", {}))
+    if data.get("url"):
+        r["url"] = str(data["url"])
     return r
 
 
@@ -311,7 +331,9 @@ async def _states_from_all(ids: list[str], helper: Path | None) -> dict[str, Any
 
 
 async def update(a: dict[str, Any], helper: Path | None = None) -> dict[str, Any]:
-    """Change a reminder's title or due date (due "" clears it). The Mac's Reminders only."""
+    """Change a reminder's title, due date (due "" clears it) or URL (url "" clears it;
+    a URL is also put on a line of its notes). The Mac's Reminders only. The answer has
+    "url" when the helper set one."""
     rid = text_arg(a.get("id"), "id", 200)
     if not rid:
         raise ToolError("id is required")
@@ -326,7 +348,8 @@ async def update(a: dict[str, Any], helper: Path | None = None) -> dict[str, Any
         if due:
             parse_time(due, "due")
         args += ["--due", due or "none"]
+    if "url" in a:
+        args += ["--url", _url_arg(a.get("url")) or "none"]
     if not await _apple(helper):
         raise ToolError("Reminders can't be reached")
-    r: dict[str, Any] = (await vcal(*args, helper=helper)).get("reminder", {})
-    return r
+    return _with_url(await vcal(*args, helper=helper))

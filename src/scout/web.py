@@ -839,6 +839,32 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
     async def phone_index(req: web.Request) -> web.StreamResponse:
         return page_response(req, phone_page, _PHONE_CSP)
 
+    async def record_page(req: web.Request) -> web.StreamResponse:
+        """A record of Scout's store (/r/<id>): what a link from Scout opens on the phone."""
+        from . import index, recordpage
+
+        if not authed(req, allow_query=True):
+            return page_response(req, "", recordpage.CSP)  # the 401 page, which says how
+        id = req.match_info["id"]
+        if len(id) > 300:
+            raise web.HTTPNotFound()
+        store = index.default()
+
+        def look() -> tuple[dict[str, Any] | None, Any]:
+            rec = store.resolve(id)
+            return rec, (store.get(id) if rec else None)
+
+        try:
+            rec, hit = await asyncio.to_thread(look)
+        except Exception as exc:  # the memory service is down
+            log.warning("web: record %s not read: %s", id, exc)
+            return web.Response(status=503, text="Scout's memory service isn't answering; try again shortly.")
+        if rec is None:
+            resp = page_response(req, recordpage.not_found(id), recordpage.CSP)
+            resp.set_status(404)
+            return resp
+        return page_response(req, recordpage.render(rec, hit), recordpage.CSP)
+
     async def phone_script(req: web.Request) -> web.StreamResponse:
         if not authed(req):
             raise web.HTTPUnauthorized()
@@ -953,6 +979,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.post("/api/ask", api_ask),
             web.get("/api/status", api_status),
             web.get("/phone", phone_index),
+            web.get("/r/{id:.+}", record_page),
             web.get(r"/phone/{name:phone(?:_sign)?\.js}", phone_script),
             web.post("/api/phone/pair", api_phone_pair),
             web.post("/api/phone/token", api_phone_token),
