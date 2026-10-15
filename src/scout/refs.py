@@ -59,13 +59,15 @@ KIND = {
     "memory": "something you told me to remember",
     "fact": "something you told me to remember",
     "reference": "the offline reference",
+    "github": "a GitHub item",
 }
 _SOURCE_RELS = ("found_in", "merged_from", "same_as", "told_in")
 
 
 def norm(ref: str) -> str:
-    """One id per record: a chunk's id is its record's."""
-    return _CHUNK.sub("", str(ref).strip())
+    """One id per record: a chunk's id is its record's (a GitHub item's #number isn't a chunk)."""
+    ref = str(ref).strip()
+    return ref if ref.startswith("github:") else _CHUNK.sub("", ref)  # github:owner/repo#117 is whole
 
 
 def clean(refs: Iterable[str]) -> tuple[str, ...]:
@@ -190,6 +192,7 @@ _OUT = {
     "send_link": (re.compile(r"^ref: (\S+)", re.M), "{}"),
     "reference_search": (re.compile(r"\(ref (zim:[^\s)]+)\)"), "{}"),
     "reference_read": (re.compile(r"^ref: (zim:\S+)", re.M), "{}"),
+    "github_items": (re.compile(r"\(ref (github:[^\s)]+)\)"), "{}"),
 }
 _ARG = {
     "task_done": "task:{}",
@@ -260,7 +263,10 @@ def source_of(r: dict[str, Any]) -> dict[str, Any] | None:
 
 def best_url(r: dict[str, Any]) -> str | None:
     """The link to give for a record: its source's (a task found in a meeting opens the
-    meeting), else its own."""
+    meeting), else its own. A task's own is already the right one (the store's resolve:
+    the GitHub item it's about, else its source's)."""
+    if r.get("kind") == "task" and r.get("url"):
+        return str(r["url"])
     src = source_of(r)
     if src is not None and src.get("url"):
         return str(src["url"])
@@ -318,6 +324,42 @@ async def _fact_from(r: dict[str, Any], src: dict[str, Any] | None, store: Any) 
     return "It's a fact you saved" + (f" on {_day(h.ts)}" if h and h.ts else "") + "."
 
 
+def _mention(x: dict[str, Any], h: index.Hit | None) -> str:
+    """ "a Slack message from Pat on October 14", "your meeting Vendor sync on October 13"."""
+    from .briefing import sender_name
+
+    kind, title = str(x.get("kind") or ""), str(x.get("title") or "").strip().rstrip(".")
+    who = sender_name(h.who.split(",")[0]) if h and h.who.strip() else ""
+    when = f" on {_day(h.ts)}" if h and h.ts else ""
+    if kind == "meeting":
+        return f"your meeting {title}{when}" if title else f"a meeting{when}"
+    if kind == "mail":
+        return f"an email from {who}{when}" if who else f"an email{when}"
+    if kind == "slack":
+        return f"a Slack message from {who}{when}" if who else f"a Slack message{when}"
+    if kind == "task":
+        return f"task {str(x.get('id', '')).split(':', 1)[-1]}, {title}"
+    return f"{kind_word(kind)}{when}"
+
+
+async def _github_from(r: dict[str, Any], store: Any) -> str:
+    """ "It's PR 117 in api, Fix the jitter buffer. It was merged on October 14. It came up in
+    a Slack message from Pat on October 14." (the first record that named it)."""
+    from .github import name, state_words
+
+    h = await _hit(str(r.get("id") or ""), store)
+    if h is not None:
+        title = " ".join(h.title.split()).rstrip(".")
+        said = f"It's {name(h)}" + (f", {title}" if title else "") + f". It {state_words(h)}."
+    else:
+        said = f"It's {shown_title(r, 'open')}, on GitHub."
+    named = [x for x in r.get("related") or [] if x.get("rel") == "mentions" and x.get("dir") == "in"]
+    if not named:
+        return said
+    first = named[0]
+    return f"{said} It came up in {_mention(first, await _hit(str(first.get('id') or ''), store))}."
+
+
 async def where_from(r: dict[str, Any], store: Any = None) -> str:
     """ "It's from your meeting Vendor sync, on October 13." Spoken on the Mac or the
     phone (the user's own), so with the real title."""
@@ -325,6 +367,8 @@ async def where_from(r: dict[str, Any], store: Any = None) -> str:
     src = source_of(r)
     if r.get("kind") == "memory":
         return await _fact_from(r, src, store)
+    if r.get("kind") == "github":
+        return await _github_from(r, store)
     thing = src or r
     h = await _hit(str(thing.get("id") or ""), store)
     kind = str(thing.get("kind") or (h.kind if h else ""))

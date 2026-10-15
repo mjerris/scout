@@ -695,7 +695,7 @@ class PhoneAgent(AgentBase):
 
 # An answer that used these may hold mail, messages or what's indexed from them: kept in
 # the journal only in open privacy mode. ask_scout too, since Scout may have answered from them.
-_PRIVATE_TOOL = ("mail_", "messages_", "ask_scout", "local_search", "task_why", "tasks_list")
+_PRIVATE_TOOL = ("mail_", "messages_", "ask_scout", "local_search", "task_why", "tasks_list", "github_items")
 
 
 def _seconds(stamp: Any) -> float | None:

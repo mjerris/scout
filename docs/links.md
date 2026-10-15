@@ -10,8 +10,9 @@ the conversation keeps the ids of the records behind everything Scout says (this
 Code: `src/scout/refs.py`, with the tier 0 phrasings in `local_intents.py`.
 
 **Refs on everything said.** Each thing Scout says carries the ids of the store records
-it was about (`task:15`, `granola:<note>`, `mail:<n>`, `note:3`, `slack:<channel>:<ts>`;
-a chunk such as `granola:<note>#3` counts as its record):
+it was about (`task:15`, `granola:<note>`, `mail:<n>`, `note:3`, `slack:<channel>:<ts>`,
+`github:<owner>/<repo>#<n>`; a chunk such as `granola:<note>#3` counts as its record, a
+GitHub item's `#<n>` doesn't):
 
 | what spoke | where its refs come from |
 |---|---|
@@ -54,6 +55,8 @@ likes oat milk") go to Claude, as with tasks.
   reminder titled "Link: <title>" goes into the Scout list with the URL (also in its
   notes). Scout's own list, so no spoken yes. The same link isn't added twice within an
   hour.
+- `github_items {query?, state?, waiting?, limit?}`: the GitHub items Scout has records
+  of (below), each with its ref; in strict mode a private repo's item without its title.
 
 **Tier 0** answers in plain code from the last spoken refs, when they name exactly one
 record:
@@ -85,7 +88,9 @@ Code: `src/scout/links.py` (the rules), `index.Index` (the table and the lookups
 **Records and links.** A record is anything in the store, by its id: `task:15`,
 `note:3`, `journal:<time>` (kind `turn`), `memory:<hash>` (a fact), `granola:<note>`
 (and its transcript parts `granola:<note>#<n>`), `mailmeeting:<n>` (a meeting summary
-that came by email), `mail:<n>`, `slack:<channel>:<ts>`. Links are rows of the `links`
+that came by email), `mail:<n>`, `slack:<channel>:<ts>`, and a GitHub item
+`github:<owner>/<repo>#<n>` or `github:<owner>/<repo>@<sha>` (below; its `#<n>` is its
+number, not a part). Links are rows of the `links`
 table in `state/memory.db`, `(src, dst, rel)`, read either way:
 
 | rel | from → to | made by |
@@ -96,6 +101,8 @@ table in `state/memory.db`, `(src, dst, rel)`, read either way:
 | `about` | a journal turn → the records the answer was about | the turn's `refs:` line |
 | `based_on` | a turn or answer → a record it used | `POST /v1/links/add` |
 | `told_in` | a fact → the journal turn it was told in | the turn's `refs:` line, or the upkeep's match (below) |
+| `mentions` | a record → a record its text names: a pasted link, a GitHub item, a meeting by its title | the cross-reference pass (below); a task's from its file |
+| `discusses` | a Slack message or email → the meeting it talks about; a meeting → a Slack thread in a channel its notes name | the cross-reference pass, by meaning (below) |
 
 The task files stay the truth for their own sources: the `found_in` and `merged_from`
 rows are re-derived from the file each time it's read, so an edit by hand moves them.
@@ -154,11 +161,83 @@ equally get no link: a missing link costs less than a wrong one. On the store as
 2026-10-15, none of the nine emailed summaries had a Granola note within that window
 (they're of other meetings), so there are no `same_as` links yet.
 
+**Cross-references** (`xref.py`, `Index.link_xrefs`, in the upkeep every minute). Each
+Slack message or thread, email, meeting and note of the last 30 days is read once (and
+again when its text changes), newest first, 300 a pass; the first passes backfill the
+30 days. A record's `mentions` and `discusses` links are made exactly what its text says
+now, so a pass is idempotent and an edit moves them. Plain code first:
+
+- **Pasted links.** A Granola note's page (matched to the note whose page it is), a
+  Slack permalink (the message, or the thread it's a reply in; a link Slack shows by a
+  label keeps its URL in the message's `urls`), Mail's `message://` link (the message
+  with that Message-ID). Any kind may hold them: a meeting's notes naming a thread, an
+  email naming a meeting, a Slack message naming an email.
+- **GitHub items.** `https://github.com/<owner>/<repo>/pull/<n>` (or `/issues/<n>`,
+  `/commit/<sha>`), `owner/repo#123`, and a bare `#123`, "PR 123" or "issue 123" when
+  the same text names exactly one repo and says PR, issue, review, merge or the like
+  ("Option #2" isn't one). `[github] orgs` / `repos` limit them when set.
+- **A meeting by its title** (Slack, mail and notes): a meeting from three days before
+  the text to a day after whose title's words all appear in order ("per the vendor
+  pricing review"; a one-word title with its own cue, "the vendor sync"), or "today's",
+  "yesterday's", "tomorrow's" with a cue word ("standup", "review", "1:1"...) when one
+  meeting that day has it in its title. Two that fit: the one from the day before the
+  text if only one is, else none.
+
+Then by meaning (`discusses`), only where code found no meeting: a Slack message or
+email with a meeting cue ("as discussed", "following up", "action items", "per the
+call"...) is compared with the meetings from three days before it to two hours after
+that someone in it attended (first names; you, `[tasks] me`, aside). The nearest by
+its vectors (the best pair of windows) is linked when the cosine is at least 0.76
+(`xref.DISCUSS_MIN`) and beats the next by 0.03. A meeting whose notes name a Slack
+channel ("posted in #voice-eng") is compared the same way with that channel's threads
+from a day before it to two days after. A record still waiting for its vectors is read
+again on a later pass. A meeting new to the store has the messages around it read again,
+since one may have named it before it was stored.
+
+Measured on a synthetic set (`scripts/bench_xref.py`: 16 meetings over ten days, 74
+Slack messages with links, titles, "today's standup", follow-ups, and hard negatives:
+meeting words about nothing that met, a meeting's words from someone who wasn't there,
+its topic ten days later, two meetings on one topic): every rule together made 44 links,
+all right (precision 1.00), and found 44 of 56 (recall 0.79). By meaning alone, the
+wrong best matches reached a cosine of 0.72; 0.76 keeps four hundredths clear of them
+and finds 14 of 23 follow-ups. On a copy of the live store (2026-10-15; counts only): the
+pass read 11,918 records in 50 s (the first, backfilling run) and made 40 GitHub
+mentions (40 items in 7 repos), 5 Slack-to-Slack links (permalinks) and 2 Slack-to-meeting
+links by meaning; no Slack message there pasted a Granola link or named a meeting by
+title.
+
+**GitHub** (`github.py`, in scout-memory every `[github] every_min`; `[github] enabled`
+turns it on). Each `github:` link target becomes a record of kind `github`: its title,
+state (`open`, `closed`, `merged`; a commit is `committed`), author, assignees, updated
+time, its `html_url` (where it opens), the first part of its description to search,
+and whether its repo is private. GET only: `/repos/<o>/<r>/issues/<n>` answers for an
+issue and a PR alike (a PR's merge is in its `pull_request` part), `/commits/<sha>`,
+`/repos/<o>/<r>` once a day for privacy, `/user` once for your login (so "your PR" and
+"assigned to you" are known). Every refresh sends the ETag it has (a 304 costs nothing
+against the rate limit); open items are checked every 30 minutes, closed or merged ones
+weekly, commits never again; at most 40 requests a pass; a rate-limit 403/429 pauses
+until GitHub's reset; an item GitHub won't give (gone, no access) is tried again a day
+later. The token is `[github] token` when set, else the one the `gh` CLI is logged in
+with (`gh auth token`, read when the sync starts and again after a 401). It works from
+scout-memory under launchd: `gh` keeps its token in the login keychain, which a launchd
+agent in your session can read (checked with a one-off launchd job, 2026-10-15), and
+`gh` is found at Homebrew's path when launchd's PATH lacks it. The token goes only to
+api.github.com and is never logged. A private repo's record is private (like mail:
+titles and text stay on the Mac outside open mode); a public one's isn't. On the live
+store (2026-10-15): 40 items, 14 open, 5 merged, 4 closed, 17 commits; 31 private.
+
+A GitHub record's `resolve` url is its page; `where_from` says what it is and the first
+record that named it ("It's PR 117 in api, Fix the jitter buffer. It was merged on
+October 14. It came up in a Slack message from Pat on October 14."). A task about one
+(docs/tasks-design.md, "GitHub follow-ups") opens the item, not the message it was
+found in.
+
 **The record page** (`/r/<id>` on the web UI, token-gated like the rest: the phone's
 browser keeps the cookie once the page is opened with `?token=`): the title, when and
 who, a task's fields, the text (Scout's own records in full, a few lines of a meeting,
-email or Slack message), an Open button to where it lives, and the linked records, each
-to its own page. No scripts; everything from the store is escaped. Links never carry
+email or Slack message; a GitHub item's repo, state, author and assignees), an Open
+button to where it lives, and the linked records, each to its own page ("Mentions",
+"Mentioned by", "Discusses", "Discussed in"). No scripts; everything from the store is escaped. Links never carry
 the token. The base the links use (`links.web_base`): `[web] public_url` when set, else
 the Tailscale Serve name that forwards to the web port (`scripts/tailscale.sh enable`,
 `https://<mac>.<tailnet>.ts.net`), else the tailnet address, the home-network address

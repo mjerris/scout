@@ -24,6 +24,7 @@ from typing import Any
 from . import (
     calendar_mac,
     freebusy,
+    github,
     index,
     mail_mac,
     maps,
@@ -409,6 +410,17 @@ SHARED = (
         refs.send_link,
     ),
     SharedTool(
+        "github_items",
+        "GitHub issues, pull requests and commits named in the user's Slack, mail, meetings, notes "
+        "or tasks, as Scout last fetched them: number, repo, title, state (open, closed, merged), "
+        "author, assignees, updated, link and ref. query: a number (117), a repo, or title words; "
+        "state: open, closed, merged or all (default); waiting: true for only the ones a "
+        "waiting-on task is about. limit 1-30 (default 10). Read-only. For 'what's the status of "
+        "PR 117' and 'what GitHub issues am I waiting on'; open_link and send_link take the ref.",
+        _obj({"query": _STR, "state": _STR, "waiting": _BOOL, "limit": _INT}),
+        github.items_text,
+    ),
+    SharedTool(
         "reference_search",
         "Search the offline reference on this Mac (Kiwix archives such as Wikipedia, WikiMed and "
         "iFixit; works with no internet) by words, best first: each article's title, archive, first "
@@ -441,7 +453,11 @@ async def _local_search(a: dict[str, Any]) -> str:
     hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()
     if pol.mode == "strict":  # a hit on mail would say its text holds the words: none at all
-        hits = [h for h in hits if h.kind not in _PRIVATE_KINDS]
+        hits = [
+            h
+            for h in hits
+            if h.kind not in _PRIVATE_KINDS and not (h.kind == "github" and h.meta.get("private"))
+        ]
     if pol.mode != "open":  # mail, meeting and Slack text, and answers built from them: titles only
         for h in hits:
             if h.meta.get("private") or h.kind in _PRIVATE_KINDS:

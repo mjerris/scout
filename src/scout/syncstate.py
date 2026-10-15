@@ -77,7 +77,8 @@ SOURCES: dict[str, Source] = {
         "item to index for search by meaning",
         "items to index for search by meaning",
     ),
-    "links": Source("Links", "Link upkeep"),
+    "links": Source("Links", "Link upkeep", "record to read for cross-references", "records to read for cross-references"),
+    "github": Source("GitHub", "GitHub sync", "GitHub item to fetch", "GitHub items to fetch"),
 }  # fmt: skip
 
 
@@ -93,6 +94,7 @@ def enabled(cfg: Config) -> dict[str, bool]:
         "reminders": cfg.tasks.farm and cfg.tasks.mirror,
         "vectors": cfg.index.semantic and cfg.index.background_embed,
         "links": True,
+        "github": cfg.github.enabled,
     }
 
 

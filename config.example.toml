@@ -158,3 +158,15 @@ enabled = true
 # announce = ["Luca"]                     # say out loud when they DM you (who, never what)
 # announce_dms = "listed"                 # "listed" (the people above), "all" (every DM), or "off"
 # announce_mentions = false               # also say an @-mention of you in a channel
+
+[github]
+# GitHub issues, PRs and commits named in Slack, mail, meetings, notes and tasks become
+# records with their state (docs/links.md, "GitHub"). Read-only. The token is the one the
+# gh CLI is logged in with (`gh auth login`) unless `token` is set (a secret: mode 600).
+# enabled = false
+# token = "<github token>"
+# orgs = ["signalwire"]                   # only these owners' repos ([] with no repos: all)
+# repos = ["someone/tool"]                # and/or these repos
+# every_min = 10                          # fetch new items, refresh the ones due
+# open_every_min = 30                     # an open item is checked this often (with its ETag)
+# closed_every_days = 7                   # a closed or merged one this rarely; commits never

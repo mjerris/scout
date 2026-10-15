@@ -110,6 +110,12 @@ async def _task_people() -> list[str]:
     return await asyncio.to_thread(tasks._people)
 
 
+async def _github_items() -> list[Any]:
+    from . import index
+
+    return await asyncio.to_thread(index.default().recent, ["github"], 5000)
+
+
 @dataclass
 class Context:
     """What tier 0 can reach: the app's timers, and the Mac and calendar tools."""
@@ -135,6 +141,7 @@ class Context:
     last_spoken: Callable[[], tuple[str, str] | None] = lambda: None  # (who, text)
     task_list: Callable[[], Awaitable[list[tasks.Task]]] = _load_tasks
     people: Callable[[], Awaitable[list[str]]] = _task_people
+    github_items: Callable[[], Awaitable[list[Any]]] = _github_items  # the store's GitHub records
     # The last answer used text from an email or meeting (a found task's title): spoken
     # here, but withheld from Claude in strict privacy mode like other private answers.
     private: bool = False
@@ -524,6 +531,49 @@ async def _task_owed_by(m: re.Match[str], c: Context) -> str | None:
         return None  # nothing from them on the list ("what is the team doing for me"): Claude
     text, c.private = got
     c.refs = _refs.task_refs(text, ts)
+    return text
+
+
+# GitHub items (github.py): "what's the status of PR 117", "is issue 42 closed", "what
+# GitHub issues am I waiting on". From the store's records; none found: Claude takes it.
+_GH_WHAT = r"(?:pr|p r|pull request|issue|ticket|bug)"
+
+
+@_rule(
+    r"(?:what(?:'s| is) the (?:status|state) (?:of|on) |what(?:'s| is) happening (?:with|on) |"
+    r"what happened (?:with|to) |(?:the )?status (?:of|on) |check (?:on )?)(?:the )?(?P<what>"
+    + _GH_WHAT
+    + r")"
+    r" (?:number )?#?(?P<n>\d+)|(?:is|has|did) (?:the )?(?P<what2>"
+    + _GH_WHAT
+    + r") (?:number )?#?(?P<n2>\d+)"
+    r" (?:been |get )?(?:merged|merge|closed|close|open|done|landed|land|fixed)(?: yet)?"
+)
+async def _github_status(m: re.Match[str], c: Context) -> str | None:
+    from . import github
+
+    what = (m.group("what") or m.group("what2") or "").replace(" ", "")
+    got = github.matching(await c.github_items(), int(m.group("n") or m.group("n2")), what)
+    if not got:
+        return None
+    c.refs = [h.id for h in got[:3]]
+    c.private = any(h.meta.get("private") for h in got[:3])
+    if len(got) == 1:
+        return github.say_status(got[0])
+    return f"There are {tasks.count_word(len(got))}: " + " ".join(github.say_status(h) for h in got[:3])
+
+
+@_rule(
+    r"(?:what (?:github )?(?:issues|prs|p rs|pull requests|items|things|stuff)(?: on github)? am i "
+    r"(?:still )?waiting (?:on|for)(?: on github)?|what am i (?:still )?waiting (?:on|for) (?:on|in|from) github)"
+)
+async def _github_waiting(m: re.Match[str], c: Context) -> str | None:
+    if "github" not in m.group(0) and not re.search(r"\b(?:prs|p rs|pull requests|issues)\b", m.group(0)):
+        return None
+    got = tasks.speak_github_waiting(await c.task_list(), await c.github_items())
+    if got is None:
+        return None
+    text, c.refs, c.private = got
     return text
 
 

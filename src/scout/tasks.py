@@ -468,6 +468,10 @@ def _fields(a: dict[str, Any]) -> dict[str, Any]:
         out["source"] = str(a["source"])[:200]
     if str(a.get("from") or "") in FROM:
         out["from"] = str(a["from"])
+    if re.fullmatch(r"[\w.-]+/[\w.-]+(?:#\d+|@[0-9a-f]{7,40})", str(a.get("github") or "")):
+        out["github"] = str(a["github"])  # the GitHub item it's about (the farm: xref.task_subject)
+        if str(a.get("link") or "").startswith("https://github.com/"):
+            out["link"] = str(a["link"])
     return out
 
 
@@ -791,3 +795,99 @@ def speak_waiting(tasks: Sequence[Task], today: dt.date, name: str = "") -> tupl
             f"you {count_word(rest)} thing{'s' * (rest != 1)}."
         )
     return " ".join(out), _private(said)
+
+
+# --- tasks about GitHub items (docs/tasks-design.md, "GitHub follow-ups") -----------------
+
+_ITEM_WORDS = re.compile(r"\b(?:prs?|pull requests?|issues?|bugs?|tickets?|fix|change|patch|commit)\b", re.I)
+_ACT_WORDS = re.compile(
+    r"\b(?:review|merge|look (?:at|into)|approve|land|fix|close|check|test|ship|finish)\b", re.I
+)
+
+
+def github_ref(t: Task) -> str | None:
+    """The record id of the one GitHub item a task is about (its `- github:` line)."""
+    g = str(t.fields.get("github") or "").split()
+    return f"github:{g[0]}" if len(g) == 1 else None
+
+
+def github_subject(t: Task, rec: index.Hit) -> bool:
+    """Whether the task's own title is about that item, not just from a message that named
+    it: it says its number ("Review PR 117", "#117"), shares most of its title's words, or
+    says what to do to "the PR" / "the issue". Only then does the item's state move it."""
+    from .links import title_overlap
+
+    n = rec.meta.get("number")
+    if n and re.search(rf"(?:#|\b(?:prs?|pull request|issue|bug|ticket)\s*#?){int(n)}\b", t.title, re.I):
+        return True
+    if rec.title and title_overlap(t.title, rec.title) >= 0.5:
+        return True
+    return bool(_ACT_WORDS.search(t.title) and _ITEM_WORDS.search(t.title))
+
+
+async def github_followups(store: index.Store | None = None) -> int:
+    """Your open tasks about a GitHub item that has since closed or merged are done (their
+    reminders too), with a line saying so. A waiting-on task is left for the pulse to
+    mention once (pulse.py). Returns how many were marked done."""
+    from .github import DONE_STATES, name
+
+    store = store or index.default()
+    n = 0
+    for t in await asyncio.to_thread(all_tasks, store):
+        ref = github_ref(t)
+        if t.status != "open" or not t.mine or ref is None:
+            continue
+        rec = await asyncio.to_thread(store.get, ref)
+        state = str(rec.meta.get("state") or "") if rec is not None else ""
+        if rec is None or state not in DONE_STATES or not github_subject(t, rec):
+            continue
+        note = f"GitHub: {name(rec)} was {state} ({_today_s()}), so this is done."
+        await asyncio.to_thread(store.task_update, t.n, {"status": "done", "done": _today_s()}, note)
+        await _mirror_done(t)
+        log.info("task %d done: its GitHub item was %s", t.n, state)
+        n += 1
+    return n
+
+
+def speak_github_waiting(
+    ts: Sequence[Task], items: Sequence[index.Hit], me: str = ""
+) -> tuple[str, list[str], bool] | None:
+    """ "On GitHub you're waiting on two: Luca, on PR 117 in api, Fix the jitter buffer;
+    and your PR 52 in web, Add retries, still open." From the open waiting-on tasks about
+    an open GitHub item, then your own open PRs. (text, refs, private), or None when no
+    GitHub item is stored at all (Claude takes it)."""
+    from .github import name
+
+    if not items:
+        return None
+    by_id = {h.id: h for h in items}
+    lines: list[str] = []
+    refs: list[str] = []
+    private = False
+    for t in sorted(ts, key=lambda t: t.n):
+        ref = github_ref(t)
+        rec = by_id.get(ref) if ref else None
+        if t.status != "open" or t.mine or rec is None or rec.meta.get("state") != "open":
+            continue
+        who = owner_name(t.owner) if owner_known(t.owner) else "someone"
+        lines.append(f"{who}, on {name(rec)}, {' '.join(rec.title.split()).rstrip('.')}")
+        refs += [f"task:{t.n}", rec.id]
+        private = private or bool(rec.meta.get("private")) or found_from(t.fields) is not None
+    for rec in sorted(items, key=lambda h: -h.ts):
+        if rec.id in refs or rec.meta.get("state") != "open" or rec.meta.get("type") != "pr":
+            continue
+        if not (rec.meta.get("by_me") or (me and str(rec.meta.get("author") or "").lower() == me.lower())):
+            continue
+        lines.append(f"your {name(rec)}, {' '.join(rec.title.split()).rstrip('.')}, still open")
+        refs.append(rec.id)
+        private = private or bool(rec.meta.get("private"))
+    if not lines:
+        return "Nothing on GitHub that I know of: no open item you're waiting on.", [], False
+    shown = lines[:4]
+    more = f"; and {count_word(len(lines) - 4)} more" if len(lines) > 4 else ""
+    head = (
+        f"On GitHub you're waiting on {count_word(len(lines))}: "
+        if len(lines) > 1
+        else "On GitHub you're waiting on "
+    )
+    return head + "; ".join(shown) + more + ".", refs, private

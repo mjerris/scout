@@ -421,6 +421,22 @@ class SlackConfig:
 
 
 @dataclass
+class GithubConfig:
+    # GitHub issues, pull requests and commits named in Slack, mail, meetings, notes and
+    # tasks become records of their own (src/scout/github.py, docs/links.md "GitHub"):
+    # title, state, author and assignees, kept fresh. Read-only. The token is `token`
+    # when set, else the one the Mac's `gh` CLI is logged in with (`gh auth token`);
+    # it's only ever sent to api.github.com, never logged.
+    enabled: bool = False
+    token: str = ""
+    orgs: list[str] = field(default_factory=list)  # only these owners' repos ([] and no repos: all)
+    repos: list[str] = field(default_factory=list)  # and/or these "owner/repo"
+    every_min: float = 10.0  # how often to fetch new items and refresh the ones due
+    open_every_min: float = 30.0  # an open item is checked again this often
+    closed_every_days: float = 7.0  # a closed or merged one this rarely (a commit never)
+
+
+@dataclass
 class MessagesConfig:
     # The messages_* tools read iMessage and SMS history through the scout-messages
     # helper (the only program given Full Disk Access). false = the tools refuse.
@@ -461,6 +477,7 @@ class Config:
     phone: PhoneConfig = field(default_factory=PhoneConfig)
     granola: GranolaConfig = field(default_factory=GranolaConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
+    github: GithubConfig = field(default_factory=GithubConfig)
     tasks: TasksConfig = field(default_factory=TasksConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)

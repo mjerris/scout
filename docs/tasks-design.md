@@ -129,6 +129,36 @@ A note Granola lists but won't give yet (not processed) is kept with when it was
 seen and asked for by id on later passes, so newer notes aren't downloaded again while
 it waits; after seven days it's left. A note deleted in Granola is removed from the store.
 
+## GitHub follow-ups
+
+When the farm reads a meeting, email or Slack conversation that names GitHub items
+(their URLs, `owner/repo#123`, or "#123" with one repo named; docs/links.md), a found task
+about one of them gets a `- github: owner/repo#123` line, in addition to its source:
+the item its title or quote names ("Review PR 117", "I'll review #117"), else the only
+item the source names, when the title or quote talks about a PR, an issue, a review or
+a merge ("can you look at the PR", "waiting on Luca to merge"). A task about two items,
+or one that isn't about the item ("send the budget", in a message that also links a
+PR), gets none. The task links `mentions` to the item's record, and its `- link:` (its
+reminder's URL) is the item's page: that's what to act on. A repeat folded into an open
+task brings its `github` line when the task had none.
+
+The item's state then moves the task, in plain code, only when the task's own title is
+about it (its number, most of its title's words, or "review / merge / fix ... the PR"):
+
+- your task (owner me): when the item is closed or merged, the farm's next pass marks it
+  done (and its reminder), with a line "GitHub: PR 117 in api was merged (2026-10-14),
+  so this is done.";
+- a waiting-on task: the pulse says it once, "PR 117 in api, Fix the jitter buffer, was
+  merged on October 14. You were waiting on Luca for it." (`- github_said: merged`
+  keeps it from being said again, across restarts), and it isn't offered as an overdue
+  follow-up after that. You close it ("mark task 12 done") when you agree.
+
+Asked out loud (tier 0, from the records): "what's the status of PR 117", "is issue 42
+closed", "has PR 117 been merged": "PR 117 in api, Fix the jitter buffer, was merged on
+October 14." (two repos with a 117: both); "what GitHub issues am I waiting on", "what
+PRs am I waiting on": the open items your waiting-on tasks are about, then your own open
+PRs. An item Scout has no record of goes to Claude. Claude has `github_items`.
+
 ## Order (plain code)
 
 `score` = importance (high 3, normal 2, low 1) × 10

@@ -17,7 +17,7 @@ from . import index, links
 CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
 KIND_NAMES = {
     "task": "Task", "note": "Note", "turn": "Conversation", "memory": "Fact", "meeting": "Meeting",
-    "mail": "Email", "slack": "Slack", "list": "List",
+    "mail": "Email", "slack": "Slack", "list": "List", "github": "GitHub",
 }  # fmt: skip
 REL_NAMES = {
     ("found_in", "out"): "Found in", ("found_in", "in"): "A task found here",
@@ -26,9 +26,14 @@ REL_NAMES = {
     ("based_on", "out"): "Used", ("based_on", "in"): "Used by",
     ("about", "out"): "About", ("about", "in"): "Mentioned in",
     ("told_in", "out"): "Told in", ("told_in", "in"): "A fact told here",
+    ("mentions", "out"): "Mentions", ("mentions", "in"): "Mentioned by",
+    ("discusses", "out"): "Discusses", ("discusses", "in"): "Discussed in",
 }  # fmt: skip
 # Fields shown for a task, in this order (the reminder's ids and titles aren't).
-TASK_FIELDS = ("status", "owner", "due", "importance", "urgency", "effort", "pin", "source", "found", "done")
+TASK_FIELDS = ("status", "owner", "due", "importance", "urgency", "effort", "pin", "source", "github", "found",
+               "done")  # fmt: skip
+# And for a GitHub item.
+GITHUB_FIELDS = ("repo", "number", "type", "state", "author", "assignees", "updated_at")
 OWN_TEXT = 6000  # characters of a Scout record's own text shown
 OTHER_TEXT = 600  # of a meeting, email or Slack message (open it for the rest)
 _SAFE_URL = re.compile(r"^(?:https?|message)://\S+$")
@@ -61,8 +66,11 @@ def render(rec: dict[str, Any], hit: index.Hit | None) -> str:
     if (url := safe_url(rec.get("url"))) and url != rec.get("page"):
         label = "Open in Mail" if url.startswith("message:") else "Open"
         parts.append(f'<p><a class="open" href="{e(url)}">{label}</a></p>')
-    if hit is not None and kind == "task":
-        rows = [(k, hit.meta[k]) for k in TASK_FIELDS if hit.meta.get(k)]
+    if hit is not None and kind in ("task", "github"):
+        shown = TASK_FIELDS if kind == "task" else GITHUB_FIELDS
+        rows = [
+            (k, ", ".join(v) if isinstance(v := hit.meta[k], list) else v) for k in shown if hit.meta.get(k)
+        ]
         if rows:
             parts.append(
                 "<table>"

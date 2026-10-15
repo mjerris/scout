@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import index, ledger, privacy, reminders_mac, syncstate, tasks
+from . import index, ledger, privacy, reminders_mac, syncstate, tasks, xref
 from .config import DATA, load
 from .mac import ToolError
 
@@ -372,11 +372,14 @@ async def add_found(
     store: index.Store,
     when: float | None = None,
     people: Sequence[str] = (),
+    items: Sequence[xref.GitHubRef] = (),
 ) -> tuple[int, int]:
     """Add found tasks, folding each into an open one it repeats. Returns (added, merged).
     `when` is the item's time (relative dates in titles are written out from it);
     `people` who was there (a meeting's attendees, an email's sender): an owner given as
-    "them" is the one other person among them, else "unknown"."""
+    "them" is the one other person among them, else "unknown". `items`: the GitHub
+    issues and PRs the source names; a task about one of them (xref.task_subject: "I'll
+    review #117") gets its `- github:` line, and the item's page as its link."""
     added = merged = 0
     kind = "meeting" if source.startswith("meeting:") else "slack" if source.startswith("slack:") else "mail"
     day = dt.date.fromtimestamp(when) if when is not None else None
@@ -397,6 +400,10 @@ async def add_found(
                 a[k] = str(t[k]).lower()
         if t.get("due") and re.fullmatch(r"\d{4}-\d\d-\d\d", str(t["due"])):
             a["due"] = str(t["due"])
+        if (sub := xref.task_subject(title, evidence, items)) is not None:
+            a["github"] = sub.id.removeprefix("github:")
+            rec = await asyncio.to_thread(store.get, sub.id)
+            a["link"] = str(rec.meta["url"]) if rec is not None and rec.meta.get("url") else sub.url
         same = await _same_open_task(store, title, owner)
         if same is not None:
             await asyncio.to_thread(store.task_update, same.n, _merged(same, a), context)
@@ -423,6 +430,8 @@ def _merged(t: tasks.Task, a: dict[str, Any]) -> dict[str, Any]:
         out["importance"] = a["importance"]
     if a.get("urgency") == "urgent" and t.fields.get("urgency") != "urgent":
         out["urgency"] = "urgent"
+    if a.get("github") and not t.fields.get("github"):
+        out["github"], out["link"] = a["github"], a.get("link")
     return out
 
 
@@ -460,6 +469,8 @@ async def farm_pass(
     me = ", ".join(cfg.me) or "the person this assistant works for"
     today = dt.date.fromtimestamp(now)
     strict = privacy.current().mode == "strict"
+    gh = load().github
+    allow = xref.Allow(gh.orgs, gh.repos)
     counts = {"read": 0, "added": 0, "merged": 0, "skipped": 0}
 
     def mark(key: str) -> None:
@@ -500,8 +511,9 @@ async def farm_pass(
         kept = [t for t in found if evidenced(t, text)]
         if len(kept) < len(found):
             log.info("tasks: %s: %d found tasks dropped (quote not in the text)", key, len(found) - len(kept))
+        items = xref.github_refs(text, allow)
         async with adding:
-            a, m = await add_found(kept[:MAX_FOUND], key, label, store, when, people)
+            a, m = await add_found(kept[:MAX_FOUND], key, label, store, when, people, items)
         counts["read"] += 1
         counts["added"] += a
         counts["merged"] += m
@@ -621,6 +633,7 @@ async def loop(
                     owners = await tasks.repair_owners(store())
                     p.added = await tasks.mirror_missing(store())
                     p.updated = done + owners + await tasks.link_reminders(store())
+                    p.updated += await tasks.github_followups(store())
                     p.backlog = await asyncio.to_thread(_unmirrored, store()) if load().tasks.mirror else None
         except Exception:
             log.exception("tasks: farm pass failed")

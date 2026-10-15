@@ -83,7 +83,7 @@ PHONE_TOOLS = {
 }
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
 # An answer built from these is private: mail and messages, and what's indexed from them.
-_PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_|^(?:local_search|task_why|tasks_list)$")
+_PRIVATE_TOOL = re.compile(r"^(?:mail|messages)_|^(?:local_search|task_why|tasks_list|github_items)$")
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 # A Claude turn says its progress line ("One moment.") no sooner than this after the turn
 # began, unless a tool call has started: a quick answer would otherwise wait behind it.

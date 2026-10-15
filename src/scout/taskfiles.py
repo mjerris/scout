@@ -31,7 +31,7 @@ from .notefiles import next_number, write_atomic
 
 FIELDS = (
     "status", "owner", "due", "importance", "urgency", "effort", "pin",
-    "source", "link", "found", "done", "reminder",
+    "source", "link", "github", "found", "done", "reminder",
 )  # fmt: skip
 STATUSES = ("open", "done", "dropped")
 _NAME = re.compile(r"^(\d+)-[^/]*\.md$")

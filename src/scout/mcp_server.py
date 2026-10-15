@@ -461,6 +461,14 @@ async def send_link(ref: str = "", about: str = "") -> str:
     return await _tool("send_link", {"ref": ref or None, "about": about or None})
 
 
+@mcp.tool(description=_doc("github_items"))
+async def github_items(query: str = "", state: str = "", waiting: bool = False, limit: int = 0) -> str:
+    return await _tool(
+        "github_items",
+        {"query": query or None, "state": state or None, "waiting": waiting, "limit": limit or None},
+    )
+
+
 @mcp.tool(description=_doc("reference_search"))
 async def reference_search(query: str, book: str = "", limit: int = 0) -> str:
     return await _tool("reference_search", {"query": query, "book": book or None, "limit": limit or None})
