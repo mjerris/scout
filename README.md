@@ -719,7 +719,9 @@ an entry and search follows within a minute. A phone call is written when it end
 mail and Granola meetings. A search ranks by meaning over everything of the kinds and
 dates asked for, with a local embedding model (bge-small-en-v1.5, CPU, a few hundred MB in
 memory), and full text (SQLite FTS5) adds a little for shared words and finds what has
-no vector yet. An idle pass embeds new items ahead of time. On a synthetic year of
+no vector yet. An idle pass embeds new items ahead of time. A long item is embedded in
+windows of about 1,000 characters; one with markdown headings (a meeting summary, a
+note) is cut at its headings, each window led by the title and the section's heading. On a synthetic year of
 20,000 conversations and 50 questions it finds the answer in the top 5 for about
 three in four, and in the top 20 for 84%. Claude gets the best 12 matches through the
 `local_search` tool. `scripts/eval_retrieval.py` measures search alone (recall@k, MRR,
