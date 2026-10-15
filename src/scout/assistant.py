@@ -1183,6 +1183,7 @@ class Assistant:
         if not name or not (self.cfg.claude.local_first or self.privacy.mode == "balanced"):
             return
         model = tier1.LocalModel(name, extra=self.cfg.claude.local_recall)
+        model.recall_floor = self.cfg.claude.recall_min_similarity
         try:
             await model.load()
         except Exception as exc:

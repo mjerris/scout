@@ -219,6 +219,10 @@ class ClaudeConfig:
     # oil"): searched locally, answered by the local model only from what it found and
     # checked against it in code; anything else goes to Claude (scripts/bench_recall.py).
     local_recall: bool = True
+    # How close (cosine, bge-small's scale) a record found by meaning must be for recall
+    # to read it; with none that close the model isn't asked and Claude answers.
+    # Measured with scripts/eval_retrieval.py --floor.
+    recall_min_similarity: float = 0.64
     # Prefix each request with context (date and time, running timers, recent local
     # answers) and, for calendar or mail questions, the data itself, so Claude can
     # answer in one pass instead of calling a tool first (each round trip is ~1.5-2.5 s).

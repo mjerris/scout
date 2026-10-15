@@ -9,7 +9,9 @@ asked for), and full text (SQLite FTS5, BM25) adds a small bonus for shared word
 finds what has no vector yet. Meaning decides because, measured on a synthetic year of
 20,000 conversations with 50 questions, comparing against every item found the answer
 in the top 5 for 78-82% of them; full text alone, or meaning over just the text hits
-and the newest items, found 34%.
+and the newest items, found 34%. scripts/eval_retrieval.py measures it (recall@k, MRR,
+nDCG) on that year, on long meeting summaries, and on pairs harvested from a copy of
+the real store (retrieval_eval.py).
 
 The vectors live in SQLite (table vecs) and, for searching, in one in-memory matrix
 (float32; 384 dimensions is ~1.5 KB a vector). An item has one vector per window of

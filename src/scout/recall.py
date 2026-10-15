@@ -42,7 +42,12 @@ log = logging.getLogger(__name__)
 PRIVATE_KINDS = ("mail", "meeting", "slack")  # as shared_tools: their text stays on the Mac
 MAX_HITS = 5  # records the model reads
 MAX_BODY = 700  # characters of each record it reads
-MIN_SIMILARITY = 0.62  # a record ranked by meaning needs at least this to be read
+# A record ranked by meaning needs at least this cosine to be read ([claude]
+# recall_min_similarity). Measured (scripts/eval_retrieval.py --floor), right hits kept
+# at 0.62 and 0.64: recall bench 95% and 95%, live 93% and 93%, synthetic year 97% and
+# 95%; questions with no answer kept from the model: 24% and 29% (recall bench), 10% and
+# 30% (synthetic). 0.65 loses live hits (79%).
+MIN_SIMILARITY = 0.64
 MAX_ANSWER_WORDS = 60
 MIN_GROUNDED = 0.8  # share of the answer's content words that must be in its record
 TIMEOUT_S = 10.0
@@ -270,14 +275,15 @@ def search(
     query: str = "",
     kinds: Sequence[str] | None = None,
     semantic: bool | None = True,
+    floor: float = MIN_SIMILARITY,
 ) -> list[index.Hit]:
     """The records worth reading, best first: found by the question as asked and by the
     model's few words (each misses some: "vendor meeting decisions" ranks other meetings
-    first), with matches by meaning below MIN_SIMILARITY left out."""
+    first), with matches by meaning below `floor` left out."""
     best: dict[str, index.Hit] = {}
     for q in dict.fromkeys(x for x in (question, query) if x.strip()):
         for h in store.search(q, kinds or None, None, MAX_HITS + 3, semantic):
-            if h.similarity is not None and h.similarity < MIN_SIMILARITY:
+            if h.similarity is not None and h.similarity < floor:
                 continue
             if h.id not in best or h.score > best[h.id].score:
                 best[h.id] = h
@@ -292,10 +298,12 @@ async def answer(
     now: dt.datetime,
     kinds: Sequence[str] | None = None,
     semantic: bool | None = True,
+    floor: float = MIN_SIMILARITY,
 ) -> Answer | None:
-    """A spoken answer from Scout's records, or None for Claude."""
+    """A spoken answer from Scout's records, or None for Claude (also when nothing is
+    as close as `floor`: then the model isn't asked at all)."""
     t0 = time.perf_counter()
-    hits = await asyncio.to_thread(search, store, question, query, kinds, semantic)
+    hits = await asyncio.to_thread(search, store, question, query, kinds, semantic, floor)
     # Mail or messages that address an AI or are lures never reach the model (as summary.py).
     hits = [h for h in hits if not suspicious({"subject": h.title, "body": h.body})][:MAX_HITS]
     t1 = time.perf_counter()
