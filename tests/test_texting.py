@@ -287,7 +287,7 @@ def test_call_names_the_number_and_starts_once_after_a_yes(
     assert dial.urls == []
     c = call_id(out)
     spoken, detail = brain.describe_tool("mcp__voice_app__call_start", {"call": c})
-    assert spoken == "Call Pat Doe at 5 5 5, 0 1 0, 2 0 0 0, mobile?"
+    assert spoken == "Call Pat Doe at five five five, oh one oh, two oh oh oh, mobile?"
     assert detail.endswith("tel:+15550102000")
     assert "Calling Pat Doe" in run(calls.start({"call": c}))
     assert dial.urls == ["tel:+15550102000"]
@@ -329,7 +329,9 @@ def test_call_start_asks_in_the_room_and_never_runs_from_the_phone(
 
     by_phone, room, asked = run(go())
     assert by_phone["status"] == "error" and "phone" in by_phone["error"]
-    assert room["status"] == "ok" and asked == ["From desk: Call Pat Doe at 5 5 5, 0 1 0, 2 0 0 0, mobile?"]
+    assert room["status"] == "ok" and asked == [
+        "From desk: Call Pat Doe at five five five, oh one oh, two oh oh oh, mobile?"
+    ]
     assert dial.urls == ["tel:+15550102000"]
 
 
