@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import claude_agent_sdk
 import pytest
 from test_routing import make
 
@@ -24,6 +25,8 @@ NOW = dt.datetime(2026, 10, 15, 8, 0, tzinfo=TZ)
 SYNC_TS = dt.datetime(2026, 10, 13, 14, 0, tzinfo=TZ).timestamp()
 GRANOLA_URL = "https://notes.granola.ai/d/n1"
 MAIL_URL = "message://%3Cq3@example.com%3E"
+FROM_MEETING: dict[str, Any] = {"from": "meeting"}
+FROM_MAIL: dict[str, Any] = {"from": "mail"}
 
 
 def _hit(id: str, kind: str, title: str, ts: float = SYNC_TS, who: str = "", **meta: Any) -> index.Hit:
@@ -36,16 +39,16 @@ class FakeStore:
     def __init__(self) -> None:
         self.hits = {
             "task:7": _hit(
-                "task:7", "task", "Send the revised vendor quote", owner="Pat Doe", **{"from": "meeting"}
+                "task:7", "task", "Send the revised vendor quote", owner="Pat Doe", **FROM_MEETING
             ),
             "task:8": _hit("task:8", "task", "Book flights"),
             "task:9": _hit(
-                "task:9", "task", "Renew the lease", reminder="R-9", reminder_url=MAIL_URL, **{"from": "mail"}
+                "task:9", "task", "Renew the lease", reminder="R-9", reminder_url=MAIL_URL, **FROM_MAIL
             ),
             "granola:n1": _hit("granola:n1", "meeting", "Vendor sync", who="Pat Doe"),
             "mail:41": _hit("mail:41", "mail", "Lease renewal", who="Sam Lee <sam@example.com>"),
         }
-        self.resolved = {
+        self.resolved: dict[str, dict[str, Any]] = {
             "task:7": {
                 "id": "task:7", "kind": "task", "title": "Send the revised vendor quote", "url": GRANOLA_URL,
                 "page": "http://scout.test/r/task%3A7", "private": True,
@@ -162,7 +165,7 @@ def test_where_did_that_come_from_and_say_that_again_keep_the_refs(
         assert await r.a._answer_locally("what meeting was that from")
         assert await r.a._answer_locally("send me that link")
         assert await r.a._answer_locally("send me that link")  # once is enough
-        return r.spk.said
+        return list(r.spk.said)
 
     spoken = asyncio.run(go())
     assert spoken[-4:] == [
@@ -179,7 +182,7 @@ def test_a_task_with_its_own_reminder_points_there(store: FakeStore, added: list
         r: Any = make()
         await r.a.announce(refs.Spoken("Due today: Renew the lease.", ["task:9"], True), "pulse")
         assert await r.a._answer_locally("give me a link to that")
-        return r.spk.said[-1]
+        return str(r.spk.said[-1])
 
     said = asyncio.run(go())
     assert (
@@ -202,7 +205,7 @@ def test_no_single_ref_goes_to_claude(store: FakeStore, added: list[dict[str, An
     async def go() -> bool:
         r: Any = make()
         await r.a.announce(first, "pulse")
-        return await r.a._answer_locally("give me a link to that")
+        return bool(await r.a._answer_locally("give me a link to that"))
 
     assert asyncio.run(go()) is False  # never invented: Claude, with the refs in its context
     assert added == []
@@ -214,7 +217,7 @@ def test_the_one_before_counts_when_the_last_had_none(store: FakeStore, added: l
         await r.a.announce(refs.Spoken("Pat Doe owes you the vendor quote.", ["task:7"], True), "pulse")
         await r.a.announce("Heads up: standup in 10 minutes.", "pulse")
         assert await r.a._answer_locally("where did that come from")
-        return r.spk.said[-1]
+        return str(r.spk.said[-1])
 
     assert asyncio.run(go()) == "It's from your meeting Vendor sync, on October 13."
 
@@ -251,7 +254,7 @@ def test_recall_answer_then_where_did_that_come_from(store: FakeStore) -> None:
             assert r.a.said.items[-1].refs == ("note:1",)
             r.a.tier1 = None
             assert await r.a._answer_locally("where did that come from")
-            return r.spk.said
+            return list(r.spk.said)
         finally:
             privacy.configure("balanced")
 
@@ -268,7 +271,7 @@ def test_claude_context_lists_refs_with_titles_per_privacy_mode(store: FakeStore
             await r.a.announce(
                 refs.Spoken("Pat Doe owes you Send the revised vendor quote.", ["task:7"], True), "pulse"
             )
-            return await r.a._with_context("send the link for that to my phone please")
+            return str(await r.a._with_context("send the link for that to my phone please"))
         finally:
             privacy.configure("balanced")
 
@@ -311,7 +314,7 @@ def test_claude_turn_refs_come_from_its_tools(store: FakeStore, monkeypatch: pyt
 
 def test_build_server_reports_each_tools_refs(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
-    real = tools.create_sdk_mcp_server
+    real = claude_agent_sdk.create_sdk_mcp_server
 
     def capture(name: str, tools: list[Any]) -> Any:
         captured.update({t.name: t for t in tools})
@@ -403,7 +406,11 @@ def test_local_search_results_carry_refs(monkeypatch: pytest.MonkeyPatch) -> Non
     ix = index.default()
     assert isinstance(ix, index.Index)
     ix.put("note:5", "note", "Propane tank", "Refilled the propane tank at the Luther station.")
-    out = asyncio.run(shared_tools.BY_NAME["local_search"].run({"query": "propane"}))
+
+    async def go() -> str:
+        return await shared_tools.BY_NAME["local_search"].run({"query": "propane"})
+
+    out = asyncio.run(go())
     assert out.endswith("(ref note:5)")
 
 
