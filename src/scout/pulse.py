@@ -160,7 +160,7 @@ class Pulse:
             if d is not None and self._once(f"task-owed:{t.n}:{today}"):
                 out.append(
                     refs.Spoken(
-                        f"{t.owner} owes you {tasks.spoken_title(t)}, {tasks.due_words(d, today)}; maybe follow up.",
+                        f"{tasks.owes_you(t, tasks.spoken_title(t))}, {tasks.due_words(d, today)}; maybe follow up.",
                         [f"task:{t.n}"],
                         tasks.found_from(t.fields) is not None,
                     )

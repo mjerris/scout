@@ -1546,6 +1546,7 @@ class Store(Protocol):
     def journal_add(
         self, ts: float, who: str, q: str, a: str,
         tools: Sequence[tuple[str, dict[str, Any]]] = (), private: bool = False,
+        refs: Sequence[str] = (),
     ) -> str: ...  # fmt: skip
     def note_add(self, title: str, body: str, ts: float | None = None) -> int: ...
     def note_delete(self, n: int) -> bool: ...

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import freebusy, refs, reminders_mac
+from . import freebusy, refs, reminders_mac, tasks
 from .freebusy import clock, join
 from .mac import ToolError
 
@@ -129,7 +129,7 @@ def tasks_part(rows: Sequence[Any], today: dt.date) -> str:
         if late:
             out.append(f"{len(late)} more {'is' if len(late) == 1 else 'are'} overdue.")
     out.extend(
-        f"{t.owner} owes you {t.title}, due {t.due():%A, %B} {t.due().day}; maybe follow up."
+        f"{tasks.owes_you(t, t.title)}, due {t.due():%A, %B} {t.due().day}; maybe follow up."
         for t in owed[:2]
     )
     said = [t for t, _ in mine[:3]] + owed[:2]
