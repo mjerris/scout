@@ -25,7 +25,8 @@ The app keeps the last 30 things said with their refs (`refs.Log`). "That" means
 last thing said with refs, or the one before when the last had none (an "okay" or the
 time in between), within ten minutes. "Say that again" repeats without replacing it,
 so its refs stay. The journal entry for each turn gets a `refs:` line (ids only, kept
-in every privacy mode) when the store's `journal_add` takes `refs`.
+in every privacy mode), which the store turns into `about` links from the turn to
+those records.
 
 **What Claude sees.** The request context lists the last few things said that had
 refs, each with its time, who said it (the pulse check-in, the briefing, or the answer
