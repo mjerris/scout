@@ -80,6 +80,8 @@ CREATE TABLE messages (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEG
     root_status INTEGER DEFAULT -1, flag_color INTEGER, is_urgent INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE labels (message_id INTEGER NOT NULL, mailbox_id INTEGER NOT NULL,
     PRIMARY KEY(message_id, mailbox_id));
+CREATE TABLE recipients (ROWID INTEGER PRIMARY KEY, message INTEGER NOT NULL, type INTEGER,
+    address INTEGER NOT NULL, position INTEGER);
 CREATE INDEX messages_mailbox_date_received_index ON messages(mailbox, date_received);
 CREATE INDEX messages_date_received_index ON messages(date_received);
 """
@@ -96,6 +98,8 @@ MAILBOXES = [
     (4, f"imap://{ICLOUD}/Sent%20Messages"),
     (5, f"ews://{EXCHANGE}/Inbox"),
     (6, f"imap://{GOOGLE}/Inbox%20Old"),  # not an inbox: the path doesn't end in /INBOX
+    (7, f"imap://{GOOGLE}/%5BGmail%5D/Sent%20Mail"),
+    (8, f"imap://{GOOGLE}/Sent%20Ideas"),  # not a sent folder: only its last part counts
 ]
 
 
@@ -126,6 +130,18 @@ FIXTURE = [
     Msg(9, 1, "billing@example.com", "", "Old invoice", 60 * D, read=1),
     Msg(10, 6, "pat@acme.com", "Pat Lee", "Not an inbox either", H / 4),
     Msg(11, 3, "Sam@Example.com", "sam@example.com", "Name is the address", 5 * H),
+    Msg(12, 2, "me@gmail.example", "Me", "Sent from Gmail", 2 * D, label=7),  # Sent by label
+    Msg(13, 8, "me@gmail.example", "Me", "Not really sent", 3 * D),
+    Msg(14, 4, "me@icloud.example", "Me", "Deleted send", 4 * D, deleted=1),
+]
+# Who the user's messages went to: (message, address, its name, type: 0 to, 1 cc, 2 bcc).
+RECIPIENTS = [
+    (4, "pat@acme.com", "", 0),  # iCloud Sent Messages
+    (4, "eva@gmail.example", "Eva", 1),
+    (12, "pat@acme.com", "Pat Lee", 0),  # Gmail, Sent by label; the sender row's address
+    (13, "nora@example.org", "", 0),  # "Sent Ideas" isn't a sent folder
+    (14, "del@example.org", "", 0),  # deleted
+    (1, "me@gmail.example", "Me", 0),  # to the user: inbox, not sent
 ]
 
 
@@ -164,6 +180,10 @@ def build_index(path: Path, now: dt.datetime, msgs: list[Msg], *, drop: str = ""
         )
         if m.label is not None:
             db.execute("INSERT INTO labels VALUES (?, ?)", (m.rowid, m.label))
+    for k, (msg, addr, name, kind) in enumerate(RECIPIENTS, 1):
+        if any(m.rowid == msg for m in msgs):
+            a = addresses.setdefault((addr, name), len(addresses) + 1)
+            db.execute("INSERT INTO recipients VALUES (?, ?, ?, ?, ?)", (k, msg, kind, a, 0))
     db.executemany("INSERT INTO addresses VALUES (?, ?, ?)", [(i, a, c) for (a, c), i in addresses.items()])
     db.executemany("INSERT INTO subjects VALUES (?, ?)", [(i, s) for s, i in subjects.items()])
     db.commit()
@@ -254,6 +274,38 @@ def _raw(h: Helper, req: dict[str, Any]) -> dict[str, Any]:
 
 
 # --- the helper ---------------------------------------------------------------------------------
+
+
+def test_sent_to_counts_mail_the_user_sent_to_an_address(running: Running) -> None:
+    pat = mail(running, "mail_sent_to", address="PAT@acme.com")
+    assert pat["sent"] == 2 and pat["last"]  # iCloud Sent and Gmail's Sent label, any case
+    assert mail(running, "mail_sent_to", address="eva@gmail.example")["sent"] == 1  # cc counts
+    for nobody in ("nora@example.org", "del@example.org", "me@gmail.example", "who@example.com"):
+        got = mail(running, "mail_sent_to", address=nobody)
+        assert (got["sent"], got["last"]) == (0, ""), nobody
+    for bad in ("not an address", "a@b.c, d@e.f"):
+        with pytest.raises(ToolError, match="bad_request"):
+            mail(running, "mail_sent_to", address=bad)
+    assert "acme" not in running.log.read_text()  # the address is never logged
+
+
+def test_sent_to_without_recipients_says_so(binary: Path) -> None:
+    d = _short_tmp() / "norecip"
+    d.mkdir(parents=True, exist_ok=True)
+    index = d / "Envelope Index"
+    index.unlink(missing_ok=True)
+    build_index(index, dt.datetime.now().astimezone(), FIXTURE)
+    db = sqlite3.connect(index)
+    db.execute("DROP TABLE recipients")
+    db.commit()
+    db.close()
+    r = _start(binary, "norecip-run", "--rate", "1000", index=index)
+    try:
+        assert mail(r, "mail_status")["usable"] is True  # the inbox lookups don't need it
+        with pytest.raises(ToolError, match="schema"):
+            mail(r, "mail_sent_to", address="pat@acme.com")
+    finally:
+        _stop(r)
 
 
 def test_status_checks_the_schema_and_counts_the_inbox(running: Running) -> None:

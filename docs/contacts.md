@@ -66,7 +66,8 @@ either one is enough for names in texts.)
   doesn't know the name.
 - **Mail**: a sender shown as a bare address gets its name. `mail_draft` takes names
   ("Pat") and uses that person's email address; `mail_send` doesn't (the spoken yes is
-  to an exact address): it answers with the address to send to.
+  to an exact address): it answers with the address to send to. By phone, `mail_send`
+  takes names: its read-back says the address, and the caller's yes is to that.
 
 Searching is fuzzy-ish: each word must match a word of the name, nickname or
 organization exactly, as a prefix ("Pat" finds Patricia), as a common nickname ("Bob"

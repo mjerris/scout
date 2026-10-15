@@ -26,6 +26,7 @@ from . import (
     ledger,
     local_intents,
     mail_mac,
+    mail_phone,
     mailindex,
     memory_client,
     memory,
@@ -71,8 +72,9 @@ ASK_DEADLINE_S = (
 )
 ASK_KEEP_S = 600.0  # a late answer waits this long for the phone to ask again
 ASK_STILL_WORKING = "I'm still working on that; ask me again in a moment."
-# Scout's own tools a phone request may use through Claude: the shared tools that never
-# ask (sending mail never by phone), recall and remember, and reading the timers.
+# Scout's own tools a phone request may use through Claude (ask_scout): the shared tools
+# that never ask, but not mail (the phone agent sends and drafts it itself, by
+# mail_phone's rules), recall and remember, and reading the timers.
 PHONE_TOOLS = {
     f"mcp__{SERVER}__{n}"
     for n in (
@@ -1577,10 +1579,13 @@ class Assistant:
         From the phone nobody in the room is asked: the phone agent confirms with the
         caller in two steps (phone_service.py). preview=True says what a tool would do
         without doing it; confirmed=True, only from the phone, runs one the caller said
-        yes to. Email is never sent or drafted from the phone."""
+        yes to. Email by phone has its own rules (mail_phone.py): drafts are saved with no
+        window, and a send is to known people, short, and read back first."""
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
+        if preview and agent == PHONE and name == "mail_send":  # the read-back, by its rules
+            return await mail_phone.preview(args)
         if preview:  # the read-back: exactly what would be done
             spoken, _ = describe_tool(name, args, full=True)
             try:
@@ -1604,7 +1609,7 @@ class Assistant:
                     return {"status": "error", "error": f"there's no note {nid}"}
                 spoken = f"Delete note {nid}, {h.title}?"
             return {"status": "ok", "text": spoken}
-        if agent == PHONE and (name in ("mail_send", "mail_draft") or (t.asks and not confirmed)):
+        if agent == PHONE and t.asks and not confirmed:
             # Nobody in the room should be asked about a call they can't hear.
             return {"status": "error", "error": f"{name} can't be used from the phone"}
         if confirmed and agent != PHONE:
@@ -1652,8 +1657,9 @@ class Assistant:
             if not answer:
                 return {"status": "declined", "error": "The user declined this by voice."}
         origin = sessions.ORIGIN.set(agent)  # session_ask: whose late reply it is
+        run = mail_phone.BY_PHONE.get(name, t.run) if agent == PHONE else t.run
         try:
-            return {"status": "ok", "text": await t.run(args)}
+            return {"status": "ok", "text": await run(args)}
         except ToolError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:  # report it to the caller; don't take the app down

@@ -226,7 +226,7 @@ def test_verified_call_gets_scout_tools(rig: Rig) -> None:
     want = {t.name for t in ps.PHONE_TOOLS} | {"ask_scout", "confirm_action"}
     actions = {"calendar_create_event", "reminder_add", "reminder_complete", "note_delete"}
     assert want <= names and actions <= names  # actions in two steps
-    assert "mail_send" not in names  # never by phone
+    assert "mail_send" in names and "mail_draft" in names  # email by phone (test_phone_mail.py)
     fns = {f["function"]: f for f in _ai(swml)["SWAIG"]["functions"]}
     [gate] = fns["confirm_action"]["gates"]
     assert gate["id"] == "caller_said_yes" and gate["threshold"] == 0.9
@@ -907,5 +907,6 @@ def test_phone_actions_preview_and_run_only_when_confirmed(monkeypatch: pytest.M
     assert preview["status"] == "ok" and "call Sam" in preview["text"]
     assert done == {"status": "ok", "text": "Added reminder: call Sam."} and ran == [{"title": "call Sam"}]
     assert not_phone["status"] == "error" and "only for the phone" in not_phone["error"]
-    assert mail["status"] == "error" and "phone" in mail["error"]  # never, confirmed or not
-    assert trust.default().log[-1]["how"] == "phone" and trust.default().log[-1]["tool"] == "reminder_add"
+    # mail_phone's send, not the room's: the yes was to a read-back with addresses
+    assert mail["status"] == "error" and "email address" in mail["error"]
+    assert {"how": "phone", "tool": "reminder_add"}.items() <= trust.default().log[-2].items()

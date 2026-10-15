@@ -361,6 +361,13 @@ prompt on the Mac's screen (System Settings → Privacy & Security → Automatio
   meant another message, Scout finds the right one by subject and date, logs
   `MAIL INDEX ID MISMATCH`, and goes back to scripting Mail for the session.
   `mail_mac.verify_index_ids()` compares the two directly (ids and counts only).
+- By phone (docs/phone-design.md, "Email by phone"): `mail_draft` saves the
+  message in Drafts with no window, and `mail_send` takes two steps (the exact
+  addresses, subject and a one-sentence summary are read back; it sends only
+  after your yes, once). To 1 to 3 people you named, each in Contacts or someone
+  you've emailed before (Mail's index: `mail_sent_to`, through the same helper);
+  no Cc, Bcc or attachments. A message over 400 characters or 4 sentences isn't
+  sent by phone: it's left in Drafts to look over.
 
 ## Weather
 
@@ -421,7 +428,9 @@ Actions (adding a reminder or calendar event, completing a reminder, deleting a 
 two steps: the tool says what it would do and gives a one-time code, the agent reads it
 back, and `confirm_action` does it only if a SignalWire semantic gate (a separate
 decision model reading the conversation) finds that you clearly said yes; a yes read out
-of an email or message doesn't count. Email is never sent from the phone.
+of an email or message doesn't count. Email works the same way, with tighter limits (see
+Mail): short messages to people you know, read back first; anything longer is left in
+your Drafts.
 
 Pairing the phone app, in three steps (nothing to type, and the web token stays on the Mac):
 
@@ -490,8 +499,9 @@ not to Scout's Python, Claude or a terminal:
   person, unread messages, one conversation, and a text search. At most 50
   messages and 365 days per answer, 60 lookups a minute, message text only (no
   attachments), no sending, no SQL from callers.
-- It also answers three questions about Mail's index (`mail_status`,
-  `mail_recent`, `mail_search`; see Mail above), under the same token, limits
+- It also answers four questions about Mail's index (`mail_status`,
+  `mail_recent`, `mail_search`, and `mail_sent_to`: whether you've sent mail to
+  one address, a count and a date; see Mail above), under the same token, limits
   and log. Rebuilding the helper for a source change needs the switch again for
   both.
 - Every lookup is logged to `logs/messages-access.log` (what kind, how many,
