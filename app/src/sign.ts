@@ -69,3 +69,14 @@ export function callVariables(
   const nonce = makeNonce();
   return { device: pairing.device, ts, nonce, sig: sign(pairing.secret, pairing.device, ts, nonce, pairing.address) };
 }
+
+/**
+ * What a paired phone signs, in place of the agent address, to ask Scout for a SignalWire
+ * token (phone_pairing.TOKEN_PURPOSE): never an agent address, so it can't pass as a call.
+ */
+export const TOKEN_PURPOSE = 'scout:phone-token';
+
+/** The body of a signed token request: {device, ts, nonce, sig}. */
+export function tokenRequest(pairing: { device: string; secret: string }, now: number = Date.now()): CallVariables {
+  return callVariables({ ...pairing, address: TOKEN_PURPOSE }, now);
+}
