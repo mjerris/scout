@@ -11,6 +11,7 @@ car: they don't know an RV's height or weight (the dash GPS does).
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 import time
@@ -21,12 +22,16 @@ import aiohttp
 from . import weather
 from .mac import ToolError
 
-# The public Overpass server is sometimes too busy (504): retry it once, then a mirror.
+log = logging.getLogger(__name__)
+
+# Public Overpass servers are sometimes busy or down (5xx, 429): each is tried once, the
+# next one at once, so a phone call waits at most a few seconds a server.
 OVERPASS = (
     "https://overpass-api.de/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
 )
-TRY = aiohttp.ClientTimeout(total=12)
+TRY = aiohttp.ClientTimeout(total=8)
 OSRM = "https://router.project-osrm.org"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 HEADERS = {"User-Agent": "Scout/1.0 (personal voice assistant; github.com/mjerris/scout)"}
@@ -115,14 +120,13 @@ async def _json(s: aiohttp.ClientSession, method: str, url: str, **kw: Any) -> A
 
 
 async def _overpass(s: aiohttp.ClientSession, query: str) -> Any:
-    for n, url in enumerate(OVERPASS):
+    for url in OVERPASS:
         try:
             return await _json(s, "POST", url, data={"data": query}, timeout=TRY)
         except _Refused:
             raise
-        except ToolError:
-            if n == 0:
-                await asyncio.sleep(2)
+        except ToolError as exc:
+            log.info("maps: %s: %s", url.split("/")[2], exc)
     raise ToolError("The map service is busy right now. Try again in a minute.")
 
 
