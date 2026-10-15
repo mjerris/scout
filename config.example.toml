@@ -106,6 +106,13 @@ enabled = true
 # quiet_hours = "22:00-08:00"     # only logged in these hours
 # ignore_alerts = ["is_heating"]
 
+[reference]
+# Offline reference (docs/reference.md): Kiwix .zim archives (Wikipedia, WikiMed, iFixit...),
+# searched in place. scripts/fetch-reference.sh downloads them (large: check the sizes first).
+# dir = "reference"                      # in Scout's data folder
+# archives = []                          # e.g. ["wikipedia_en_all_nopic", "ifixit_en_all"]; empty: all
+# local_answers = "offline"              # Scout answers from them itself: offline, always, never
+
 [phone]
 # Talk to Scout from the paired phone app through SignalWire (docs/phone-design.md).
 # Off unless turned on. api_token and signing_key are secrets: keep this file mode 600.

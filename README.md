@@ -80,6 +80,10 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   `mac.py`, and your words are passed in only as checked arguments, so these
   can't be used to run arbitrary scripts. Timers live in memory and are lost
   on restart.
+- **Offline reference:** Wikipedia, WikiMed, iFixit and other Kiwix archives on
+  the Mac, searched in place: `reference_search` and `reference_read` for Claude,
+  and with the internet down Scout answers "look up X" from them itself, with a
+  link to the article. [docs/reference.md](docs/reference.md).
 - **"Yes, always":** answer a prompt with "yes, always" (or "yes, don't ask me
   again", or tap **Always** on the web page) and it stops asking for that exact
   shell command, that site (for page fetches and URLs), or that tool (for MCP

@@ -11,7 +11,7 @@ ROOT="$(cd "${1:-$(dirname "$0")/..}" && pwd -P)"
 DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"
 OLD_LABEL=com.local.claude-voice
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-mkdir -p "$DATA/state" "$DATA/logs" "$DATA/bin"
+mkdir -p "$DATA/state" "$DATA/logs" "$DATA/bin" "$DATA/reference"  # reference: Kiwix .zim files (docs/reference.md)
 
 status() {  # status STATE MESSAGE
     printf '{"status": "%s", "message": "%s", "code": "%s", "at": "%s"}\n' \
