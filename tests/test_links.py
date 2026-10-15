@@ -332,7 +332,7 @@ def test_message_ids_are_kept_as_mail_is_indexed_and_backfilled(store: index.Ind
     assert asked == ["30,31"]  # partial rows wait for their text
     assert store.get("mail:41").meta["message_id"] == "new@x"  # type: ignore[union-attr]
     assert store.get("mail:30").meta["message_id"] == "old@x"  # type: ignore[union-attr]
-    assert store.get("mail:31").meta["message_id"] == ""  # type: ignore[union-attr]  (not asked again)
+    assert store.get("mail:31").meta["message_id"] == ""  # type: ignore[union-attr]  # not asked again
     asked.clear()
     asyncio.run(mailindex.sync_pass(store, run))
     assert asked == []
