@@ -168,3 +168,12 @@ def test_progress_is_not_what_say_that_again_repeats(monkeypatch: pytest.MonkeyP
         return r.a.last_spoken
 
     assert run(go()) == ("Scout", "Three emails.")
+
+
+def test_loading_a_tool_is_not_called_searching() -> None:
+    from scout import progress
+
+    # Claude loading one of Scout's tools (ToolSearch) isn't a search the user asked for:
+    # "Brian West is 5'9"" loaded remember first, and Scout said "Searching."
+    assert progress.progress_phrase("ToolSearch") == "One moment."
+    assert progress.progress_phrase("mcp__voice_app__local_search") == "Searching."
