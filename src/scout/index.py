@@ -59,13 +59,16 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import journal, links, notefiles, syncstate, taskfiles
+from . import journal, links, notefiles, syncstate, taskfiles, xref
 from .config import DATA
 
 log = logging.getLogger(__name__)
 
 MODELS = DATA / "models" / "fastembed"
 UPKEEP_EVERY_S = 60.0  # upkeep() runs about this often (the background pass, or serve's loop)
+XREF_KINDS = ("slack", "mail", "meeting", "note")  # whose text is read for cross-references
+XREF_DAYS = 30.0  # how far back (the first pass backfills this much)
+XREF_BATCH = 300  # items read per pass
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
@@ -120,6 +123,8 @@ CREATE TABLE IF NOT EXISTS links (
     PRIMARY KEY (src, dst, rel)
 );
 CREATE INDEX IF NOT EXISTS links_dst ON links(dst);
+-- Items the cross-reference pass (link_xrefs) has read, with the text it read (their sig).
+CREATE TABLE IF NOT EXISTS xref_seen (id TEXT PRIMARY KEY, sig TEXT NOT NULL, ts REAL NOT NULL);
 """
 
 
@@ -417,6 +422,8 @@ class Index:
     _fresh: bool = field(init=False, repr=False, default=False)  # new text since the background looked
     # Facts link_facts found no turn for, a day or more after they were added.
     _facts_tried: set[str] = field(init=False, repr=False, default_factory=set)
+    # The cosine a meeting matched by meaning needs (xref.DISCUSS_MIN is bge-small's).
+    discuss_min: float = xref.DISCUSS_MIN
     # Where the phone reaches Scout's web UI (links.web_base in the service): record pages.
     web_base: Callable[[], str] = lambda: ""
 
@@ -586,6 +593,7 @@ class Index:
             # Its own links go with it; links to it stay (a task still names the mail it came
             # from after the mail ages out: resolve() leaves out what's gone).
             self._conn.execute("DELETE FROM links WHERE src = ? OR (dst = ? AND rel = 'same_as')", (id, id))
+            self._conn.execute("DELETE FROM xref_seen WHERE id = ?", (id,))
             if row and self._counts is not None:
                 self._counts[row[0]] -= 1
             self._changed(id)
@@ -917,16 +925,19 @@ class Index:
 
     def _link_task(self, id: str, meta: dict[str, Any], body: str) -> None:
         """A task's found_in (its source) and merged_from (sources merged into it) links,
-        from its file: the file is the truth, so they're re-derived whenever it's read."""
+        and mentions of the GitHub items it's about (its `- github:` line, and any its
+        context names), from its file: the file is the truth, so they're re-derived
+        whenever it's read."""
         recs: list[str] = []
         for key in links.task_sources(meta, body):
             rec = self.source_record(key)
             if rec and rec != id and rec not in recs:
                 recs.append(rec)
-        self._set_links(
-            id, ("found_in", "merged_from"),
-            [(r, "found_in" if i == 0 else "merged_from") for i, r in enumerate(recs)],
-        )  # fmt: skip
+        pairs = [(r, "found_in" if i == 0 else "merged_from") for i, r in enumerate(recs)]
+        gh = [f"github:{g}" for g in str(meta.get("github") or "").split() if xref.parse_id(f"github:{g}")]
+        gh += [r.id for r in xref.github_refs(body, self._xref_allow())]
+        pairs += [(g, "mentions") for g in dict.fromkeys(gh)]
+        self._set_links(id, ("found_in", "merged_from", "mentions"), pairs)
 
     def _link_tasks_once(self) -> None:
         """Once: links for the tasks indexed before there were links (later, each task's
@@ -1031,6 +1042,262 @@ class Index:
             linked += g is not None
         return linked
 
+    # --- cross-references (xref.py): what a record's text points at -----------------------
+
+    def _xref_settings(self) -> tuple[list[str], xref.Allow]:
+        """The user's names (`[tasks] me`) and the `[github]` allow-list."""
+        from .config import load
+
+        try:
+            cfg = load()
+        except (OSError, ValueError) as exc:
+            log.info("index: config not read for cross-references (%s)", exc)
+            return [], xref.Allow()
+        return list(cfg.tasks.me), xref.Allow(cfg.github.orgs, cfg.github.repos)
+
+    def _xref_allow(self) -> xref.Allow:
+        return self._xref_settings()[1]
+
+    def _xref_due(self, since: float, limit: int) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT d.id FROM docs d LEFT JOIN xref_seen s ON s.id = d.id WHERE d.kind IN "  # noqa: S608 (placeholders only)
+                f"({','.join('?' * len(XREF_KINDS))}) AND d.ts >= ? AND (s.id IS NULL OR s.sig != d.sig) "
+                "ORDER BY d.ts DESC LIMIT ?",
+                (*XREF_KINDS, since, limit),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def xref_backlog(self, now: float | None = None) -> int:
+        """Records of the last XREF_DAYS still to be read for cross-references."""
+        since = (time.time() if now is None else now) - XREF_DAYS * 86400
+        return len(self._xref_due(since, 100_000))
+
+    def _parts(self, base: str) -> list[tuple[Hit, str]]:
+        """A record and its parts (a Granola note's transcript, a long Slack thread), each
+        with its sig, the record first."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_COLS}, sig FROM docs WHERE id = ? OR substr(id, 1, ?) = ?",  # noqa: S608 (columns only)
+                (base, len(base) + 1, base + "#"),
+            ).fetchall()
+        out = [(_hit(r[:7]), str(r[7])) for r in rows]
+        out.sort(key=lambda x: (x[0].id != base, int(x[0].meta.get("part") or 0)))
+        return out
+
+    def _xref_meetings(self, start: float, end: float) -> list[xref.Meeting]:
+        """The meetings (a Granola note, an emailed summary; no transcript parts) between."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, title, who FROM docs WHERE kind = 'meeting' AND ts BETWEEN ? AND ? "
+                "AND instr(id, '#') = 0 ORDER BY ts",
+                (start, end),
+            ).fetchall()
+        return [xref.Meeting(str(i), float(t), str(ti), str(w)) for i, t, ti, w in rows]
+
+    def _meeting_by_url(self, url: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM docs WHERE kind = 'meeting' AND instr(id, '#') = 0 "
+                "AND rtrim(json_extract(meta, '$.url'), '/') = ? LIMIT 1",
+                (url.rstrip("/"),),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def _slack_at(self, channel: str, ts: str) -> str | None:
+        """The Slack record holding a message: itself, or the thread it's in."""
+        if self.get(f"slack:{channel}:{ts}") is not None:
+            return f"slack:{channel}:{ts}"
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM docs WHERE kind = 'slack' AND id >= ? AND id < ? AND instr(id, '#') = 0 "
+                "AND CAST(json_extract(meta, '$.ts') AS REAL) <= ? "
+                "AND CAST(json_extract(meta, '$.last_ts') AS REAL) >= ? LIMIT 1",
+                (f"slack:{channel}:", f"slack:{channel};", float(ts) + 1e-6, float(ts) - 1e-6),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def _mail_by_message_id(self, mid: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM docs WHERE kind = 'mail' AND json_extract(meta, '$.message_id') IN (?, ?) LIMIT 1",
+                (mid, f"<{mid}>"),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def _vectors(self, ids: Sequence[str]) -> np.ndarray | None:
+        """The current vectors of these items (all their windows), or None while one of
+        them is still waiting for its vectors."""
+        if self.embedder is None or not ids:
+            return None
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            if self._conn.execute(
+                f"SELECT 1 FROM pending WHERE id IN ({marks}) LIMIT 1",  # noqa: S608 (placeholders only)
+                tuple(ids),
+            ).fetchone():
+                return None
+            rows = self._conn.execute(
+                f"SELECT v.vec FROM vecs v JOIN docs d ON d.id = v.id AND d.sig = v.sig "  # noqa: S608 (placeholders only)
+                f"WHERE v.id IN ({marks}) AND v.model = ?",
+                (*ids, self.embedder.model),
+            ).fetchall()
+        vs = [np.frombuffer(r[0], np.float32) for r in rows]
+        if len({len(v) for v in vs}) > 1:
+            return None
+        return np.stack(vs) if vs else np.zeros((0, 0), np.float32)
+
+    def _discussed(self, mine: np.ndarray, cands: Sequence[str], floor: float) -> str | None:
+        """Of these records, the one nearest in meaning to `mine` (best window pair), when
+        it's above `floor` and clear of the next (xref.nearest)."""
+        scored = []
+        for c in cands:
+            theirs = self._vectors([c])
+            if theirs is None or not len(theirs) or not len(mine) or theirs.shape[1] != mine.shape[1]:
+                continue
+            scored.append((c, float((mine @ theirs.T).max())))
+        return xref.nearest(scored, floor)
+
+    def _xrefs_of(
+        self, parts: Sequence[Hit], meetings: Sequence[xref.Meeting], me: Sequence[str], allow: xref.Allow
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """The cross-references of one record (its parts' text together), and whether it's
+        been read for all of them (False: its vectors aren't made yet; read it again)."""
+        head = parts[0]
+        base = head.id
+        text = head.title + "\n" + "\n".join(p.body for p in parts)
+        text += "".join(f"\n{u}" for p in parts for u in p.meta.get("urls") or [])  # Slack's labeled links
+        out: dict[str, str] = {}
+        for r in xref.github_refs(text, allow):
+            out[r.id] = "mentions"
+        for u in xref.granola_urls(text):
+            if g := self._meeting_by_url(u):
+                out[g] = "mentions"
+        for ch, ts in xref.slack_links(text):
+            if s := self._slack_at(ch, ts):
+                out[s] = "mentions"
+        for mid in xref.message_ids(text):
+            if m := self._mail_by_message_id(mid):
+                out[m] = "mentions"
+        others = [m for m in meetings if m.id != base]
+        if head.kind in ("slack", "mail", "note") and (named := xref.named_meeting(text, head.ts, others)):
+            out.setdefault(named, "mentions")
+        complete = True
+        if self.embedder is not None:
+            met = any(d.startswith(("granola:", "mailmeeting:")) for d in out)
+            if head.kind in ("slack", "mail") and not met and xref.MEETING_TALK.search(text):
+                people = xref.first_names(", ".join(p.who for p in parts), me)
+                cands = [
+                    m.id for m in others
+                    if head.ts - xref.DISCUSS_BEFORE_S <= m.start <= head.ts + xref.DISCUSS_AFTER_S
+                    and people & xref.first_names(m.who, me)
+                ]  # fmt: skip
+                if cands:
+                    mine = self._vectors([p.id for p in parts])
+                    if mine is None:
+                        complete = False
+                    elif got := self._discussed(mine, cands, self.discuss_min):
+                        out[got] = "discusses"
+            if head.kind == "meeting" and (chans := xref.channels_named(text)):
+                cands = self._channel_items(chans, head.ts)
+                if cands:
+                    mine = self._vectors([base])
+                    if mine is None:
+                        complete = False
+                    elif got := self._discussed(mine, cands, self.discuss_min):
+                        out.setdefault(got, "discusses")
+        own = {p.id for p in parts}
+        return [(d, rel) for d, rel in out.items() if d not in own], complete
+
+    def _channel_items(self, channels: Sequence[str], start: float) -> list[str]:
+        """Slack records in these channels from a day before a meeting to two days after."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM docs WHERE kind = 'slack' AND instr(id, '#') = 0 AND ts BETWEEN ? AND ? "  # noqa: S608 (placeholders only)
+                f"AND lower(json_extract(meta, '$.conversation')) IN ({','.join('?' * len(channels))})",
+                (start - 86400, start + 2 * 86400, *channels),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def link_xrefs(self, limit: int = XREF_BATCH, now: float | None = None) -> tuple[int, int]:
+        """Cross-references (xref.py) from the records of the last XREF_DAYS whose text is
+        new or changed since they were last read, newest first, at most `limit` items a
+        pass: GitHub items, pasted links (Granola, Slack, Mail), meetings named by title
+        (`mentions`) and meetings matched by meaning (`discusses`). A record's links of
+        those rels are made exactly what its text says now, so a pass is idempotent. A new
+        meeting has the messages around it read again (one may have named it before it
+        was stored). Returns (records read, links they have)."""
+        now = time.time() if now is None else now
+        since = now - XREF_DAYS * 86400
+        due = self._xref_due(since, limit)
+        if not due:
+            return 0, 0
+        me, allow = self._xref_settings()
+        meetings = self._xref_meetings(since - xref.NAMED_AFTER_S, now + xref.NAMED_AFTER_S)
+        read = made = 0
+        for base in dict.fromkeys(i.split("#", 1)[0] for i in due):
+            parts = self._parts(base)
+            if not parts or parts[0][0].id != base:
+                self._mark_xref(parts)  # parts whose record is gone: nothing to link from
+                continue
+            head = parts[0][0]
+            if head.kind == "mail" and self.get(f"mailmeeting:{base.split(':', 1)[1]}") is not None:
+                self._set_links(base, links.XREF_RELS, [])  # read as the meeting it carries
+                self._mark_xref(parts)
+                continue
+            pairs, complete = self._xrefs_of([h for h, _ in parts], meetings, me, allow)
+            self._set_links(base, links.XREF_RELS, pairs)
+            read += 1
+            made += len(pairs)
+            if head.kind == "meeting":
+                self._reread_around(head)
+            if complete:
+                self._mark_xref(parts)
+        return read, made
+
+    def _mark_xref(self, parts: Sequence[tuple[Hit, str]]) -> None:
+        now = time.time()
+        with self._tx():
+            for h, sig in parts:
+                self._conn.execute(
+                    "INSERT INTO xref_seen(id, sig, ts) VALUES (?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET sig = excluded.sig, ts = excluded.ts",
+                    (h.id, sig, now),
+                )
+
+    def _reread_around(self, meeting: Hit) -> None:
+        """A meeting new to this pass: messages and emails around it that were read before
+        it was stored are read again (one may name it, or talk about it)."""
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM xref_seen WHERE id = ?", (meeting.id,)).fetchone():
+                return
+            stored = float(meeting.meta.get("stored_at") or time.time())
+            self._conn.execute(
+                "DELETE FROM xref_seen WHERE ts < ? AND id IN (SELECT id FROM docs WHERE kind IN "
+                "('slack', 'mail', 'note') AND ts BETWEEN ? AND ?)",
+                (stored, meeting.ts - xref.NAMED_AFTER_S, meeting.ts + xref.NAMED_BEFORE_S),
+            )
+
+    def link_targets(self, prefix: str) -> list[str]:
+        """The records links point at whose ids start with `prefix` (github:...), newest
+        link first, whether or not the store has them yet."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT dst, max(ts) FROM links WHERE substr(dst, 1, ?) = ? GROUP BY dst ORDER BY 2 DESC",
+                (len(prefix), prefix),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def task_github_url(self, h: Hit) -> str | None:
+        """Where a task about a GitHub item (`- github: owner/repo#117`) opens: the item's
+        page (its record's, else the one its number makes)."""
+        g = str(h.meta.get("github") or "").split()
+        ref = xref.parse_id(f"github:{g[0]}") if len(g) == 1 else None
+        if ref is None:
+            return None
+        rec = self.get(ref.id)
+        return str(rec.meta["url"]) if rec is not None and rec.meta.get("url") else ref.url
+
     def missing(self, kind: str, key: str, limit: int = 20) -> list[Hit]:
         """The newest items of a kind whose meta has no `key` (partial items aside)."""
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
@@ -1063,6 +1330,8 @@ class Index:
             return str(m["permalink"]) if m.get("permalink") else None
         if h.kind == "mail":
             return links.message_url(str(m.get("message_id") or ""))
+        if h.kind == links.GITHUB_KIND:
+            return str(m["url"]) if m.get("url") else None
         if h.kind in links.OWN_KINDS:
             return links.page_url(self.web_base(), h.id)
         return None
@@ -1092,7 +1361,8 @@ class Index:
         url = self._url(h)
         if h.kind == "task":
             src = next((r["url"] for r in related if r["rel"] == "found_in" and r["url"]), None)
-            url = src or str(h.meta.get("link") or "") or page
+            # A task about a GitHub item ("review #117") opens the item: that's what to act on.
+            url = self.task_github_url(h) or src or str(h.meta.get("link") or "") or page
         elif h.kind == "memory":  # a fact: the turn it was told in, else its own page
             url = next(
                 (r["url"] for r in related if r["rel"] == "told_in" and r["dir"] == "out" and r["url"]), url
@@ -1107,14 +1377,18 @@ class Index:
 
     def upkeep(self) -> None:
         """The links that follow from what's stored: emailed meeting summaries to their
-        Granola notes, tasks' `- link:` lines, and facts to the turn they were told in.
-        Never fails the caller."""
+        Granola notes, tasks' `- link:` lines, cross-references (link_xrefs), and facts
+        to the turn they were told in. Never fails the caller."""
         try:
             with syncstate.track("links", UPKEEP_EVERY_S) as p:
                 self.link_meetings()
                 n = p.updated = self.link_tasks()
+                read, made = self.link_xrefs()
+                p.backlog = self.xref_backlog()
             if n:
                 log.info("index: %d tasks got their link", n)
+            if made:
+                log.info("index: %d cross-references from %d records", made, read)
             if n := self.link_facts():
                 log.info("index: %d facts linked to the turn they were told in", n)
         except Exception:

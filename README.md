@@ -621,8 +621,8 @@ once. Quiet hours (22:00-08:00) only log. `[pulse]` tunes or turns it off.
 ## Sync status: "is everything syncing?"
 
 Each sync records every pass in `state/sync_status.json`: Mail, meeting notes by
-email, Granola, Slack, the task farm, Reminders mirroring, the vectors for search by
-meaning, and link upkeep. It keeps when the pass ran, whether it worked, what it added
+email, Granola, Slack, GitHub, the task farm, Reminders mirroring, the vectors for
+search by meaning, and link upkeep (with the records still to read for cross-references). It keeps when the pass ran, whether it worked, what it added
 or updated, and what's still waiting where that's known. An error keeps only its type
 and a short message with quoted text, links and addresses taken out.
 
@@ -643,6 +643,16 @@ such as the Granola meeting a task was found in, into your Scout reminders list,
 "where did that come from" says which meeting or email it was. Claude gets the same
 ids in its request context and the `open_link` and `send_link` tools (the room, the
 phone and other sessions). Details and the privacy rules: [docs/links.md](docs/links.md).
+
+**Cross-references.** The store links what points at what, both ways: a Slack message
+or email that pastes a Granola link, a Slack permalink or a `message://` link, names a
+meeting by its title ("per the vendor sync", "in today's standup"), or follows up on one
+(matched by meaning, with someone in common, only when it's clear), and a meeting whose
+notes name a Slack thread. GitHub issues, PRs and commits named anywhere become records
+with their state (`[github] enabled = true`; the token is the `gh` CLI's): "what's the
+status of PR 117", "what GitHub issues am I waiting on", and a task like "review #117"
+opens the PR and is done when it merges. Rules and measurements:
+[docs/links.md](docs/links.md#store).
 
 ## Car stereo (Kenwood DNR1008RVS)
 

@@ -281,6 +281,10 @@ def documents(
         "bot": all(is_bot(m) for m in msgs),
         "permalink": permalink(team_url, channel, ts),
     }
+    # Links shown by a label lose their URL in the text: kept here for cross-references (xref.py).
+    labeled = [m.group(1) for x in msgs for m in _LINK.finditer(str(x.get("text") or "")) if m.group(2)]
+    if labeled:
+        meta["urls"] = list(dict.fromkeys(labeled))[:20]
     base = {"title": title, "who": ", ".join(people)[:300], "ts": float(ts)}
     lines = [line(m, names) for m in msgs]
     chunks: list[list[str]] = [[]]

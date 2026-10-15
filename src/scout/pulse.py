@@ -9,6 +9,8 @@ needs the user. No AI, nothing sent anywhere.
                                   maybe follow up." (once a day)
     a sync failing or stalled    "Mail sync has been failing since 9 this morning." (once a
                                   day per source, after an hour of failing; syncstate.py)
+    a GitHub item you waited on  "PR 117 in api, Fix the jitter buffer, was merged. You were
+                                  waiting on Luca for it." (once; the task notes it was said)
 
 Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
 when they end (the morning's overlaps and tasks, an event just after) is said then.
@@ -40,6 +42,20 @@ Events = Callable[[str, str], Awaitable[dict[str, Any]]]
 Reminders = Callable[[], Awaitable[dict[str, Any]]]
 Tasks = Callable[[], Awaitable[list[tasks.Task]]]
 Syncs = Callable[[], list[syncstate.Status]]
+Records = Callable[[str], Awaitable[Any]]  # a store record by id (a GitHub item), or None
+Note = Callable[[int, dict[str, Any]], Awaitable[Any]]  # change a task's fields
+
+
+async def _record(id: str) -> Any:
+    from . import index
+
+    return await asyncio.to_thread(index.default().get, id)
+
+
+async def _note(n: int, fields: dict[str, Any]) -> Any:
+    from . import index
+
+    return await asyncio.to_thread(index.default().task_update, n, fields)
 
 
 async def _events(start: str, end: str) -> dict[str, Any]:
@@ -65,6 +81,8 @@ class Pulse:
     reminders: Reminders = _reminders
     tasks: Tasks = _tasks
     sync: Syncs = syncstate.statuses
+    record: Records = _record
+    note: Note = _note
     _said: set[str] = field(default_factory=set)
     _conflicts_day: dt.date | None = None
     _tasks_day: dt.date | None = None
@@ -89,8 +107,44 @@ class Pulse:
             out += self._due((await self.reminders()).get("reminders", []), now)
         except ToolError as exc:
             log.debug("pulse: reminders skipped (%s)", exc)
+        out += await self._github(now)  # first: a waiting-on item said as merged isn't then a follow-up
         out += await self._task_day(now)
         out += self._syncs(now)
+        return out
+
+    async def _github(self, now: dt.datetime) -> list[str]:
+        """A waiting-on task about a GitHub item that has closed or merged: said once (the
+        task's `github_said` line remembers it), never in quiet hours. Your own such tasks
+        are marked done by the farm (tasks.github_followups) instead."""
+        from .github import DONE_STATES, say_status
+
+        try:
+            ts = [t for t in await self.tasks() if t.status == "open" and not t.mine and tasks.github_ref(t)]
+        except Exception as exc:
+            log.info("pulse: GitHub follow-ups skipped (%s)", exc)
+            return []
+        out: list[str] = []
+        for t in ts:
+            ref = tasks.github_ref(t)
+            if not ref or t.fields.get("github_said"):
+                continue
+            try:
+                rec = await self.record(ref)
+            except (ToolError, OSError) as exc:
+                log.info("pulse: GitHub item %s not read (%s)", ref, exc)
+                continue
+            state = str(getattr(rec, "meta", {}).get("state") or "")
+            if rec is None or state not in DONE_STATES or not tasks.github_subject(t, rec):
+                continue
+            if not self._once(f"github:{t.n}:{state}"):
+                continue
+            who = tasks.owner_name(t.owner) if tasks.owner_known(t.owner) else "someone"
+            out.append(refs.Spoken(f"{say_status(rec)} You were waiting on {who} for it.", [f"task:{t.n}", rec.id],
+                                   tasks.found_from(t.fields) is not None or bool(rec.meta.get("private"))))  # fmt: skip
+            try:
+                await self.note(t.n, {"github_said": state})
+            except (ToolError, OSError) as exc:  # said once this run all the same (_once)
+                log.info("pulse: task %d not noted (%s)", t.n, exc)
         return out
 
     def _syncs(self, now: dt.datetime) -> list[str]:
@@ -167,7 +221,9 @@ class Pulse:
                     any(tasks.found_from(t.fields) for t in due[:3]),
                 )
             )
-        late = sorted((t for t in ts if not t.mine and (d := t.due()) is not None and d < today),
+        # A waiting-on item whose GitHub item closed was said as that (_github): no follow-up.
+        late = sorted((t for t in ts if not t.mine and (d := t.due()) is not None and d < today
+                       and not t.fields.get("github_said")),
                       key=lambda t: (t.due(), t.n))  # fmt: skip
         for t in late[:3]:
             d = t.due()

@@ -43,6 +43,7 @@ def cfg(**over: Any) -> config.Config:
     c.granola.api_key = "g-test"
     c.slack.token = "xoxp-test"  # noqa: S105 (a made-up token)
     c.slack.app_token = "xapp-test"  # noqa: S105 (a made-up token)
+    c.github.enabled = True
     for k, v in over.items():
         section, field = k.split("__")
         setattr(getattr(c, section), field, v)
@@ -180,6 +181,7 @@ def test_what_is_off_follows_the_config() -> None:
     assert not syncstate.enabled(cfg(tasks__mirror=False))["reminders"]
     assert not syncstate.enabled(cfg(slack__app_token=""))["slack_events"]  # polling only
     assert not syncstate.enabled(cfg(slack__token=""))["slack_events"]
+    assert not syncstate.enabled(cfg(github__enabled=False))["github"]
 
 
 # --- saying it ------------------------------------------------------------------------
@@ -226,7 +228,8 @@ def test_speak_problems_first() -> None:
 
 
 def test_speak_nothing_set_up() -> None:
-    c = cfg(index__mail=False, tasks__farm=False, index__semantic=False, granola__api_key="", slack__token="")
+    c = cfg(index__mail=False, tasks__farm=False, index__semantic=False, granola__api_key="", slack__token="",
+            github__enabled=False)  # fmt: skip
     sts = [s for s in syncstate.statuses(cfg=c) if s.source != "links"]
     assert syncstate.speak(sts, NOON) == "No syncing is set up."
     assert syncstate.speak(syncstate.statuses(cfg=c), NOON) == "Nothing has synced yet."

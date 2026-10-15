@@ -15,6 +15,9 @@ rel); this module holds the plain-code rules around them:
 - whether an emailed meeting summary and a Granola note are the same meeting
   (`same_meeting`);
 - which journal turn a fact was told in (`says_remember`, `told_turn`).
+
+What a record's text points at (`mentions`, `discusses`: pasted links, GitHub items,
+meetings named or talked about) is xref.py's.
 """
 
 from __future__ import annotations
@@ -32,11 +35,15 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-RELS = ("found_in", "merged_from", "same_as", "based_on", "about", "told_in")
+RELS = ("found_in", "merged_from", "same_as", "based_on", "about", "told_in", "mentions", "discusses")
+# The cross-references (xref.py): made by the store's upkeep from what a record's text says.
+XREF_RELS = ("mentions", "discusses")
 # Kinds whose text came from someone else (mail, meetings, Slack): private outside open mode.
 PRIVATE_KINDS = frozenset({"mail", "meeting", "slack"})
 # Scout's own records: their link is their page on Scout's web UI.
 OWN_KINDS = frozenset({"task", "note", "turn", "memory"})
+# GitHub issues, pull requests and commits (github.py): private when their repo is.
+GITHUB_KIND = "github"
 
 # "From the meeting 'Budget' on Oct 9: "quote" (meeting:not_abc)": one paragraph per source.
 _SOURCE_PARA = re.compile(r"\(((?:meeting|mail|slack):[^()\s]+)\)\s*$")

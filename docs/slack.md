@@ -73,7 +73,8 @@ Every `every_min` minutes, scout-memory:
 
 Each message is one item of kind `slack` (`slack:<channel>:<ts>`), titled `#channel`,
 `DM with Pat Doe` or `Group DM with pat, sam`, with the senders' names and Slack's
-markup made plain (mentions become names, links their labels). A thread is one item,
+markup made plain (mentions become names, links their labels; a labeled link's URL is
+kept in the item's `urls`, for cross-references: docs/links.md). A thread is one item,
 the root then its replies, split into parts of about 1,000 characters when long. Each
 keeps its permalink. Names are looked up once (`users.info`) and remembered.
 

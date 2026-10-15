@@ -445,6 +445,10 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         asyncio.create_task(  # noqa: RUF006 (runs for the service's life)
             slack_loop(ix, sc, SLACK_STATE, st, lambda: socks[0].healthy_since if socks else None)
         )
+    if load().github.enabled:
+        from . import github
+
+        asyncio.create_task(github.loop(ix, load().github))  # noqa: RUF006 (runs for the service's life)
     if cfg.semantic and cfg.background_embed:
         await ix.background(lambda: True)  # embeds, and re-reads edited journal files
     else:
