@@ -416,6 +416,8 @@ class LocalModel:
             log.info("tier 1 took over %.0f s; asking Claude", self.timeout_s)
             return None
         decision = parse(out, now.date().isoformat(), self.extra)
+        if decision is not None:
+            decision = from_now(decision, request, now)
         if decision is not None and decision["tool"] == "recall":
             decision["args"]["question"] = request  # answered from the records, then checked against it
             if request != asked:
@@ -442,6 +444,27 @@ def _when(start: str, all_day: bool, now: dt.datetime) -> str:
     return f"{name} at {clock}"
 
 
+RECENT_MIN = 60  # "what's on today" includes what started this long ago (and what's still on)
+_PAST = re.compile(r"\b(did|had|was|were|missed?|earlier|so far|this morning)\b", re.I)
+
+
+def from_now(decision: dict[str, Any], request: str, now: dt.datetime) -> dict[str, Any]:
+    """ "What meetings do I have today": what's on, what's left and the last RECENT_MIN
+    minutes, not the whole day. A question about the past ("what did I have today") and
+    a search for an event keep the whole range."""
+    a = decision.get("args") or {}
+    if (
+        decision.get("tool") != "calendar_events"
+        or a.get("query")
+        or a.get("start") != now.date().isoformat()
+    ):
+        return decision
+    if _PAST.search(request):
+        return decision
+    since = (now - dt.timedelta(minutes=RECENT_MIN)).replace(second=0, microsecond=0)
+    return {**decision, "args": {**a, "start": since.isoformat()}}
+
+
 def speak_calendar(data: dict[str, Any], args: dict[str, Any], now: dt.datetime) -> str:
     events = data.get("events", [])
     if q := args.get("query"):
@@ -452,6 +475,8 @@ def speak_calendar(data: dict[str, Any], args: dict[str, Any], now: dt.datetime)
         e = events[0]
         return f"Your next {e.get('title') or q} is {_when(e['start'], bool(e.get('all_day')), now)}."
     if not events:
+        if "T" in str(args.get("start", "")) and str(args["start"])[:10] == now.date().isoformat():
+            return "Nothing else on your calendar today."
         return "Nothing on your calendar then."
     items = [
         f"{e.get('title') or 'an untitled event'} {_when(e['start'], bool(e.get('all_day')), now)}"

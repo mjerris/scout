@@ -281,3 +281,21 @@ def test_anything_from_someone_says_what_the_email_says(monkeypatch: pytest.Monk
     assert out is not None
     assert "Catherine will be home Tuesday" in out and "New message from Catherine (Wyatt)" not in out
     assert "Rover.com" not in out
+
+
+def test_today_means_what_is_left_and_the_last_hour() -> None:
+    now = dt.datetime(2026, 10, 15, 14, 30, tzinfo=dt.timezone(dt.timedelta(hours=-4)))
+    today = {"tool": "calendar_events", "args": {"start": "2026-10-15", "end": "2026-10-16"}}
+    got = tier1.from_now(today, "what meetings do I have today", now)
+    assert got["args"] == {"start": "2026-10-15T13:30:00-04:00", "end": "2026-10-16"}
+    for past in (
+        "what meetings did I have today",
+        "what did I miss today",
+        "what was on my calendar this morning",
+    ):
+        assert tier1.from_now(today, past, now) == today  # asked about the past: the whole day
+    other = {"tool": "calendar_events", "args": {"start": "2026-10-16", "end": "2026-10-17"}}
+    assert tier1.from_now(other, "what's on tomorrow", now) == other
+    found = {"tool": "calendar_events", "args": {"start": "2026-10-15", "query": "dentist"}}
+    assert tier1.from_now(found, "when is the dentist", now) == found  # a search keeps its range
+    assert tier1.speak_calendar({"events": []}, got["args"], now) == "Nothing else on your calendar today."
