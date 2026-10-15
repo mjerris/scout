@@ -22,7 +22,9 @@ type Fake = jest.Mocked<Pick<ScoutServer, 'pairWithCode' | 'requestPairing' | 'p
 function fakeServer(): Fake {
   return {
     pairWithCode: jest.fn(async (_code: string, _name: string) => PAIRED),
-    requestPairing: jest.fn(async (_name: string) => ({ request: 'rid', match: '47', expires_at: 0 })),
+    requestPairing: jest.fn(
+      async (_name: string): Promise<Awaited<ReturnType<ScoutServer['requestPairing']>>> => ({ request: 'rid', match: '47', expires_at: 0 }),
+    ),
     pairStatus: jest.fn(async (_request: string, _wait?: number): Promise<PairStatus> => ({ status: 'approved', ...PAIRED })),
   };
 }
@@ -155,4 +157,15 @@ test('nobody answering in time is said plainly', async () => {
   fireEvent.changeText(screen.getByTestId('server'), 'mac.tail1.ts.net');
   fireEvent.press(screen.getByTestId('ask'));
   expect(await screen.findByTestId('error')).toHaveTextContent(/Nobody said yes/);
+});
+
+test("the owner's own Tailscale login pairs at once, without a question", async () => {
+  const server = fakeServer();
+  server.requestPairing.mockResolvedValue({ status: 'approved', ...PAIRED });
+  const { onPaired } = setup({ makeServer: () => server });
+  fireEvent.changeText(screen.getByTestId('server'), 'mac.tail1.ts.net');
+  fireEvent.press(screen.getByTestId('ask'));
+  await waitFor(() => expect(onPaired).toHaveBeenCalled());
+  expect(server.pairStatus).not.toHaveBeenCalled();
+  expect(screen.queryByTestId('match')).toBeNull();
 });

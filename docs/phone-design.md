@@ -78,6 +78,14 @@ sent with each call in `userVariables` (the data `@signalwire/js` passes with `d
         `url=<https address>` and `host=<Mac name>`; the app shows "Found <Mac>" with a
         Pair button, then asks as below. The app still talks to the https address over
         Tailscale, never the LAN one.
+      - **Your own Tailscale login.** When the app asks (below) through Tailscale Serve,
+        Serve adds `Tailscale-User-Login` (it removes any copy the client sent, and adds
+        none for tagged devices or Funnel). Scout believes it only on a request Serve
+        proxied (from 127.0.0.1, `X-Forwarded-Proto: https`), never on the LAN or tailnet
+        listeners, and pairs at once only when it is this Mac's own login (`tailscale
+        status --json`: `Self.UserID` → `User[...].LoginName`) or one of `[phone] owners`:
+        the tailnet has other users. It still says "Paired <name>." in the room and logs
+        it. Anyone else is asked about as below.
       - **Approve by voice.** The app asks (`POST /api/phone/pair/request {name}`, from the
         tailnet or this Mac only). Scout picks a two-digit number, shows it on the phone,
         and asks the room "Mike's iPhone wants to pair with Scout, code 47. Should I allow
@@ -85,6 +93,11 @@ sent with each call in `userVariables` (the data `@signalwire/js` passes with `d
         minutes pairs it; the app long-polls `POST /api/phone/pair/status {request}` and
         gets the secret once. One request at a time, three per 10 minutes.
    3. Tap **Pair** in the app ("Pair with <host>?").
+
+   `[phone] pair_mode` picks which of these are on: `"tailnet"` (the default: the owner's
+   login pairs at once, others are asked about in the room or use a code), `"approve"`
+   (every request is asked about, the owner's too), `"code"` (codes only: requests are
+   refused and Bonjour is off). `scoutctl phone list` and `forget` review and revoke.
 
    `POST /api/phone/pair` takes `{code, name}` without the web token (or the web token,
    for the /phone page's own browser pairing). A wrong, used or expired code is refused

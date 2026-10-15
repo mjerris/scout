@@ -427,7 +427,8 @@ Pairing the phone app, in three steps (nothing to type, and the web token stays 
 1. Turn on Tailscale on the iPhone.
 2. Run `scripts/scoutctl.sh phone pair` (or **Pair the phone app** on the `/phone` page)
    and point the iPhone Camera at the QR code; tap the Scout banner. Or, at home, open the
-   app: it finds Scout on the network ("Found <your Mac>"), and Scout asks out loud "<phone>
+   app: it finds Scout on the network ("Found <your Mac>"). From your own Tailscale login
+   it pairs at once (Scout says "Paired <phone>."); anyone else, Scout asks out loud "<phone>
    wants to pair with Scout, code 47. Should I allow it?"; say yes if the phone shows 47.
 3. Tap **Pair** in the app.
 
@@ -441,6 +442,10 @@ The link is `scout://pair?server=<[web] public_url, else the Tailscale Serve nam
 A code works once; only its hash is stored, and wrong codes are rate-limited. Scout
 advertises itself as `_scout._tcp` over Bonjour (with its https address, never a token)
 for the app to find. The app's manual form takes the address and code, or a pasted link.
+`[phone] pair_mode` is `"tailnet"` (default), `"approve"` (always ask in the room) or
+`"code"` (QR codes only); `[phone] owners` adds Tailscale logins that count as you.
+Your login is believed only from Tailscale Serve (its `Tailscale-User-Login` header, on
+127.0.0.1), never from the LAN listeners.
 
 Each call carries `userVariables = {device, ts, nonce, sig}` with
 `sig = hex(HMAC-SHA256(secret, "device|ts|nonce|address"))` (the secret base64url-decoded
