@@ -1,7 +1,7 @@
 """Per-source sync status: whether each thing Scout keeps in sync is keeping up.
 
 Every sync loop reports each pass here: Mail, meeting notes by email, Granola, Slack,
-the task farm, Reminders mirroring, the vectors for search by meaning, and link upkeep.
+Slack's live events, the task farm, Reminders mirroring, the vectors for search by meaning, and link upkeep.
 A pass records when it ran, whether it worked, how many items it added or updated, and
 what's still waiting (the backlog) where that's known. A failure keeps only the
 exception's type and a scrubbed message (no quoted text, addresses or links), never
@@ -10,6 +10,8 @@ mail or meeting text.
 From that, each source is in one state:
 
     ok        the last pass worked, within its time
+    connected / reconnecting
+              a live connection (Slack's events): its state, in place of ok
     failing   the last pass failed (errors counts the failures in a row)
     stalled   no good pass for 3 times its interval (30 minutes at least)
     off       not set up in the config
@@ -46,6 +48,7 @@ log = logging.getLogger(__name__)
 
 PATH = DATA / "state" / "sync_status.json"
 
+GOOD = ("ok", "connected", "reconnecting")  # reconnecting that keeps failing is "failing"
 STALL_TIMES = 3  # no good pass in this many intervals: stalled
 STALL_FLOOR_S = 1800.0  # but never sooner than this (the vectors look every minute)
 SAY_AFTER_S = 3600.0  # the pulse speaks of a failure once it's lasted this long
@@ -65,6 +68,7 @@ SOURCES: dict[str, Source] = {
     "meetings_email": Source("Meeting notes by email", "Bringing in meeting notes from email"),
     "granola": Source("Granola", "Granola sync", "Granola note to fetch again", "Granola notes to fetch again"),
     "slack": Source("Slack", "Slack sync"),
+    "slack_events": Source("Slack live events", "Slack's live connection"),
     "tasks": Source("Task farm", "The task farm"),
     "reminders": Source("Reminders", "Reminders mirroring", "task to put in Reminders", "tasks to put in Reminders"),
     "vectors": Source(
@@ -84,6 +88,7 @@ def enabled(cfg: Config) -> dict[str, bool]:
         "meetings_email": cfg.index.mail,
         "granola": bool(cfg.granola.api_key),
         "slack": bool(cfg.slack.token),
+        "slack_events": bool(cfg.slack.token and cfg.slack.app_token),
         "tasks": cfg.tasks.farm,
         "reminders": cfg.tasks.farm and cfg.tasks.mirror,
         "vectors": cfg.index.semantic and cfg.index.background_embed,
@@ -133,9 +138,11 @@ def record(
     started: float | None = None,
     now: float | None = None,
     path: Path | None = None,
+    conn: str | None = None,
 ) -> None:
     """One pass of `source` (which runs every `every_s`): a success with its counts, or
-    `error`. Never fails the caller: a status that can't be written is logged."""
+    `error`. Never fails the caller: a status that can't be written is logged. `conn`:
+    a live connection's state (connected, reconnecting), shown in place of "ok"."""
     path = PATH if path is None else path
     now = time.time() if now is None else now
     started = now if started is None else started
@@ -147,6 +154,8 @@ def record(
             e: dict[str, Any] = data[source] if isinstance(data.get(source), dict) else {}
             e.setdefault("first_seen", started)
             e["last_attempt"], e["every_s"] = started, float(every_s)
+            if conn is not None:
+                e["conn"] = conn
             if error is not None:
                 e["errors"] = int(e.get("errors") or 0) + 1
                 e["failing_since"] = e.get("failing_since") or started
@@ -237,7 +246,7 @@ def statuses(now: float | None = None, path: Path | None = None, cfg: Config | N
         elif now - (good or first or now) > max(STALL_TIMES * every, STALL_FLOOR_S):
             state = "stalled"
         else:
-            state = "ok"
+            state = str(e.get("conn") or "ok")  # a live connection says which: connected...
         backlog = e.get("backlog")
         out.append(
             Status(
@@ -302,7 +311,7 @@ def speak(sts: list[Status], now: dt.datetime) -> str:
     if not on:
         return "No syncing is set up."
     bad = [s for s in on if s.state in ("failing", "stalled")]
-    good = [s for s in on if s.state == "ok"]
+    good = [s for s in on if s.state in GOOD]
     parts = [problem(s, now) for s in bad]
     if not bad:
         if not good:

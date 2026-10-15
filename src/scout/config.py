@@ -403,6 +403,16 @@ class SlackConfig:
     every_min: float = 15.0  # how often to look for new messages
     backfill_days: float = 14.0  # the first time, read each conversation this far back
     skip: list[str] = field(default_factory=list)  # channel names (or DM names) never read
+    # Live events over Socket Mode (src/scout/slack_events.py): the app's app-level token
+    # (xapp-..., scope connections:write). Empty: polling only. Also only sent to slack.com.
+    app_token: str = ""
+    # While live events are flowing, the poll (the backstop for a sleeping Mac or a
+    # dropped connection) runs this often instead of every_min.
+    live_every_min: float = 60.0
+    # People whose DMs (and group DMs) Scout says out loud, "Luca messaged you on Slack.":
+    # names as Slack shows them (a first name matches: "Luca" is "Luca Pradovera") or
+    # user ids. Needs app_token. Only who, never what they wrote.
+    announce: list[str] = field(default_factory=list)
 
 
 @dataclass

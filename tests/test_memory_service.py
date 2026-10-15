@@ -108,3 +108,12 @@ def test_the_old_app_store_moves_over_once(tmp_path: Path) -> None:
     assert new.get("turn:1") is not None
     tables = {r[0] for r in sqlite3.connect(old).execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "docs" not in tables and "notes" in tables
+
+
+def test_slack_alerts_are_taken_over_http(served: tuple[memory_client.Client, Any]) -> None:
+    c, svc = served
+    assert memory_client.slack_alerts(c) == []
+    svc.slack_alerts.add({"id": "slack:D1:1.0", "who": "Luca", "channel": "D1", "ts": "1.0", "group": False})
+    got = memory_client.slack_alerts(c)
+    assert [(a["id"], a["who"]) for a in got] == [("slack:D1:1.0", "Luca")]
+    assert memory_client.slack_alerts(c) == []  # each handed out once

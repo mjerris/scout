@@ -255,3 +255,8 @@ def memory() -> Any:
 def sync_status(c: Client | None = None) -> list[dict[str, Any]]:
     """Each sync's status from scout-memory (syncstate.Status as a dict), in order."""
     return list((c or client()).call("/v1/sync", None)["sources"])
+
+
+def slack_alerts(c: Client | None = None) -> list[dict[str, Any]]:
+    """DMs scout-memory queued to be said ([slack] announce), taken: each is returned once."""
+    return list((c or client()).call("/v1/slack/alerts", {})["alerts"])

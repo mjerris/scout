@@ -5,7 +5,7 @@
 
 The app always does the work, so macOS's calendar and Mail permissions belong
 to it alone (Messages: to its scout-messages helper). Tools with `asks=True` change something outside the Mac or under
-the user's name; the app confirms each call by voice whoever made it (room:
+the user's name (sending mail or a Slack message); the app confirms each call by voice whoever made it (room:
 brain.ALWAYS_ASK_TOOLS; other sessions: Assistant.run_shared_tool), and a
 "yes, always" never applies to them.
 
@@ -33,6 +33,7 @@ from . import (
     reference,
     refs,
     reminders_mac,
+    slack_send,
     starlink,
     tasks,
     weather,
@@ -189,6 +190,23 @@ SHARED: tuple[SharedTool, ...] = (
         "addresses. Prefer mail_draft unless the user clearly asked to send.",
         _COMPOSE,
         mail_mac.send,
+        asks=True,
+    ),
+    SharedTool(
+        "slack_draft",
+        "Prepare a Slack message from the user, to send with slack_send. Sends nothing. to is "
+        "a person (their name in Slack, or just a first name) for a DM, or a channel the user "
+        "is in ('#launch'); text is the message, in the user's words. Returns a draft id, or "
+        "the matching people when the name fits more than one: ask the user which.",
+        _obj({"to": _STR, "text": _STR}, ["to", "text"]),
+        slack_send.draft,
+    ),
+    SharedTool(
+        "slack_send",
+        "Send a Slack message drafted with slack_draft, as the user (the user confirms by "
+        "voice: the recipient and text are read back). draft is the id slack_draft gave.",
+        _obj({"draft": _STR}, ["draft"]),
+        slack_send.send,
         asks=True,
     ),
     SharedTool(

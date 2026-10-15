@@ -42,6 +42,7 @@ def cfg(**over: Any) -> config.Config:
     c = config.Config()
     c.granola.api_key = "g-test"
     c.slack.token = "xoxp-test"  # noqa: S105 (a made-up token)
+    c.slack.app_token = "xapp-test"  # noqa: S105 (a made-up token)
     for k, v in over.items():
         section, field = k.split("__")
         setattr(getattr(c, section), field, v)
@@ -177,6 +178,8 @@ def test_what_is_off_follows_the_config() -> None:
     assert not off["mail"] and not off["meetings_email"] and not off["tasks"] and not off["reminders"]
     assert not off["vectors"] and not off["granola"] and off["links"]
     assert not syncstate.enabled(cfg(tasks__mirror=False))["reminders"]
+    assert not syncstate.enabled(cfg(slack__app_token=""))["slack_events"]  # polling only
+    assert not syncstate.enabled(cfg(slack__token=""))["slack_events"]
 
 
 # --- saying it ------------------------------------------------------------------------
@@ -506,7 +509,7 @@ def test_the_granola_loop_reports(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 def test_the_slack_loop_reports_a_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from scout import slack
 
-    def boom(*a: Any) -> tuple[int, int]:
+    def boom(*a: Any, **kw: Any) -> tuple[int, int]:
         raise slack.SlackError("Slack said invalid_auth")
 
     monkeypatch.setattr(slack, "fetcher", lambda token: None)

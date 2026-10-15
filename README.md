@@ -797,4 +797,9 @@ group DMs; archived and muted ones left out, and any named in `[slack] skip`) ev
 thread is one item with its replies. The task farm reads a conversation's new
 messages together with the local model, so Slack text stays on the Mac; bot messages
 and messages without an action cue are skipped. Like mail, Slack text reaches Claude
-only in open privacy mode. Making the app and its token: [docs/slack.md](docs/slack.md).
+only in open privacy mode. With an app-level token (`xapp-...`) in `[slack] app_token`,
+messages also arrive live over Socket Mode (the poll then runs hourly as the backstop),
+a DM from someone in `[slack] announce` is said out loud ("Luca messaged you on
+Slack.", who and never what), and `slack_draft` / `slack_send` send a message as you
+after your spoken yes to the read-back. Making the app and its tokens:
+[docs/slack.md](docs/slack.md).
