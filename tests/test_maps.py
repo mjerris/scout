@@ -3,6 +3,7 @@ The map services are replaced by a fake session that answers by URL."""
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import pytest
@@ -113,6 +114,15 @@ def test_a_busy_map_server_is_retried_then_said_plainly() -> None:
     assert d["places"]
     with pytest.raises(ToolError, match="busy right now"):
         asyncio.run(maps.near("grocery", "Luther", session=FakeMaps(busy=3)))  # type: ignore[arg-type]
+
+
+def test_a_down_map_server_moves_on_to_a_mirror_at_once() -> None:
+    fake = FakeMaps(busy=len(maps.OVERPASS) - 1)
+    t0 = time.monotonic()
+    assert asyncio.run(maps.near("campground", "Luther", session=fake))["places"]  # type: ignore[arg-type]
+    assert time.monotonic() - t0 < 1.0  # a server that answers 5xx is left at once, not waited on
+    hosts = [u.split("/")[2] for u in fake.calls if "interpreter" in u]
+    assert len(set(hosts)) == len(hosts) == len(maps.OVERPASS)  # each server once, a different one each try
 
 
 def test_route_is_spoken_and_reported() -> None:
