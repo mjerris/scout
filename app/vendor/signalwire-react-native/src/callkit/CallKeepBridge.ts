@@ -86,13 +86,21 @@ export class CallKeepBridge {
   private releaseAudioGate: (() => void) | null = null;
   /** Entry awaiting a bridge dial; see {@link beginBridgeDial}. */
   private pendingBridgeUuid: string | null = null;
+  /**
+   * The media each outbound call was placed with. The audio session mode (and
+   * so the default route) follows the call, not the app: a voice call from an
+   * app that also makes video calls must start on the receiver, or on the
+   * Bluetooth headset or car, never on the loudspeaker. Calls not in here
+   * (inbound) fall back to `supportsVideo`.
+   */
+  private readonly callMedia = new WeakMap<Call, 'audio' | 'video'>();
 
   constructor(options: { fusionTimeoutMs?: number } = {}) {
     const host: CallRegistryHost = {
       displayIncomingCall: (uuid, handle, displayName) =>
         RNCallKeep.displayIncomingCall(uuid, handle, displayName, HANDLE_TYPE, this.supportsVideo),
-      startOutgoingCall: (uuid, handle, displayName) =>
-        RNCallKeep.startCall(uuid, handle, displayName, HANDLE_TYPE, this.supportsVideo),
+      startOutgoingCall: (uuid, handle, displayName, hasVideo) =>
+        RNCallKeep.startCall(uuid, handle, displayName, HANDLE_TYPE, hasVideo),
       reportOutgoingConnected: (uuid) => RNCallKeep.reportConnectedOutgoingCallWithUUID(uuid),
       reportCallEnded: (uuid, reason) =>
         RNCallKeep.reportEndCallWithUUID(uuid, this.endReasonFor(reason)),
@@ -317,8 +325,16 @@ export class CallKeepBridge {
     }
   }
 
-  /** Registers an outbound call with the native UI. Returns its UUID. */
-  trackCall(call: Call, handle: string, displayName: string): string {
+  /**
+   * Registers an outbound call with the native UI. Returns its UUID.
+   *
+   * `options.video` says whether the call sends video (default: a voice call),
+   * which decides the native call type and where audio starts: a voice call on
+   * the receiver (or a connected Bluetooth headset or car), a video call on the
+   * loudspeaker.
+   */
+  trackCall(call: Call, handle: string, displayName: string, options: { video?: boolean } = {}): string {
+    this.callMedia.set(call, options.video ? 'video' : 'audio');
     const claimed = this.pendingBridgeUuid;
     if (claimed !== null) {
       this.pendingBridgeUuid = null;
@@ -332,7 +348,7 @@ export class CallKeepBridge {
       logger.debug(`Entry ${claimed} vanished during the bridge dial`);
     }
 
-    const uuid = this.registry.attachOutgoingCall(call, handle, displayName);
+    const uuid = this.registry.attachOutgoingCall(call, handle, displayName, options.video === true);
     this.watchCallStatus(call);
     // Deliberate breadcrumb: RNCallKeep's own logs are NSLog-only, invisible in
     // Metro when launched outside Xcode, so without this line the entire
@@ -441,7 +457,7 @@ export class CallKeepBridge {
     // Applied synchronously — the registry buffers it when the SDK call has
     // not arrived yet. Only the audio start waits for the audio session.
     this.registry.applyIntent(callUUID, 'answer');
-    void this.startAudioWhenSessionReady();
+    void this.startAudioWhenSessionReady(this.mediaFor(this.registry.entryForUuid(callUUID)?.call));
   }
 
   private handleEndCall(callUUID: string): void {
@@ -523,7 +539,7 @@ export class CallKeepBridge {
    * silent call on iOS. Android has no such event, so this runs immediately.
    * The timeout prevents a permanently silent call if the event never fires.
    */
-  private async startAudioWhenSessionReady(): Promise<void> {
+  private async startAudioWhenSessionReady(media: 'audio' | 'video'): Promise<void> {
     if (Platform.OS === 'ios') {
       const gate = new Promise<void>((resolve) => {
         this.releaseAudioGate = resolve;
@@ -533,12 +549,17 @@ export class CallKeepBridge {
         new Promise<void>((resolve) => setTimeout(resolve, AUDIO_SESSION_TIMEOUT_MS))
       ]);
     }
-    this.startAudio();
+    this.startAudio(media);
   }
 
-  private startAudio(): void {
+  /** How a call's audio session starts: its own media when known, else the app's. */
+  private mediaFor(call: Call | null | undefined): 'audio' | 'video' {
+    return (call && this.callMedia.get(call)) ?? (this.supportsVideo ? 'video' : 'audio');
+  }
+
+  private startAudio(media: 'audio' | 'video'): void {
     try {
-      getAudioRouteController().start(this.supportsVideo ? 'video' : 'audio');
+      getAudioRouteController().start(media);
     } catch (error) {
       logger.warn('Audio routing unavailable:', error);
     }
@@ -567,7 +588,7 @@ export class CallKeepBridge {
         // the session in its default category — a connected but silent call.
         // `AudioRouteController.start` is idempotent, so an inbound call that
         // already started audio on answer is unaffected.
-        void this.startAudioWhenSessionReady();
+        void this.startAudioWhenSessionReady(this.mediaFor(call));
         return;
       }
       if (TERMINAL_STATUSES.has(status)) {

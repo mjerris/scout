@@ -45,7 +45,7 @@ export function useSignalWire(): UseSignalWireResult {
       const call = await client.dial(destination, options);
       // The core does not know what an observer does with this — on React
       // Native it registers the call with CallKit; on the web nobody listens.
-      observer?.onOutgoingCall?.(call, destination);
+      observer?.onOutgoingCall?.(call, destination, options);
       return call;
     },
     [client, observer]

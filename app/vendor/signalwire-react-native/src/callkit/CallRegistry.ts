@@ -239,7 +239,7 @@ export class CallRegistry {
   }
 
   /** Registers an outbound call and starts the native outgoing call UI. */
-  attachOutgoingCall(call: Call, handle: string, displayName: string): string {
+  attachOutgoingCall(call: Call, handle: string, displayName: string, hasVideo = false): string {
     const existing = this.uuidForCall(call);
     if (existing) {
       return existing;
@@ -257,7 +257,7 @@ export class CallRegistry {
       fuseDeadline: null
     });
 
-    this.host.startOutgoingCall(uuid, handle, displayName);
+    this.host.startOutgoingCall(uuid, handle, displayName, hasVideo);
     return uuid;
   }
 

@@ -1,0 +1,83 @@
+Upstream: github.com/lpradovera/signalwire-react-native-unofficial, local branch scout/voice-calls-start-on-receiver (c6fb20b); its tests are upstream, not vendored.
+
+diff --git a/signalwire-react-native/src/callkit.ts b/signalwire-react-native/src/callkit.ts
+index 5d6ca3f..9f7bcf2 100644
+--- a/signalwire-react-native/src/callkit.ts
++++ b/signalwire-react-native/src/callkit.ts
+@@ -16,6 +16,7 @@
+  * ```
+  */
+ export { CallKeepBridge, getCallKit, resetCallKitForTesting } from './callkit/CallKeepBridge';
++export type { CallKitObserverOptions } from './callkit/observer';
+ export type { CallKitSetupOptions } from './callkit/CallKeepBridge';
+ export { CallRegistry } from './callkit/CallRegistry';
+ export type {
+diff --git a/signalwire-react-native/src/callkit/observer.ts b/signalwire-react-native/src/callkit/observer.ts
+index 4e9ea8d..fcb7295 100644
+--- a/signalwire-react-native/src/callkit/observer.ts
++++ b/signalwire-react-native/src/callkit/observer.ts
+@@ -10,11 +10,22 @@ import type { CallObserver } from '@signalwire/react';
+  * bridge, callkeep itself — stays on this side of the boundary and never
+  * reaches a browser bundle.
+  */
+-export function createCallKitObserver(): CallObserver {
++export interface CallKitObserverOptions {
++  /**
++   * The name the native call UI and Recents show for an outbound call. Default:
++   * the destination itself, which for a Fabric address reads like
++   * `/private/support-agent`.
++   */
++  displayName?: (destination: string) => string;
++}
++
++export function createCallKitObserver(options: CallKitObserverOptions = {}): CallObserver {
+   return {
+     bindClient: (client) => getCallKit().bindClient(client),
+-    onOutgoingCall: (call, destination, options) =>
+-      void getCallKit().trackCall(call, destination, destination, { video: Boolean(options?.video) }),
++    onOutgoingCall: (call, destination, dialOptions) =>
++      void getCallKit().trackCall(call, destination, options.displayName?.(destination) ?? destination, {
++        video: Boolean(dialOptions?.video)
++      }),
+     onIncomingAnswer: (call) => getCallKit().answerIncomingFromApp(call),
+     onIncomingReject: (call) => getCallKit().rejectIncomingFromApp(call)
+   };
+diff --git a/signalwire-react-native/src/react/SignalWireProvider.tsx b/signalwire-react-native/src/react/SignalWireProvider.tsx
+index d925957..b6359cf 100644
+--- a/signalwire-react-native/src/react/SignalWireProvider.tsx
++++ b/signalwire-react-native/src/react/SignalWireProvider.tsx
+@@ -2,6 +2,7 @@ import { SignalWireProvider as CoreProvider } from '@signalwire/react';
+ import React, { useMemo } from 'react';
+ 
+ import { createCallKitObserver } from '../callkit/observer';
++import type { CallKitObserverOptions } from '../callkit/observer';
+ import { createReactNativePlatform } from '../platform/createReactNativePlatform';
+ 
+ import type { ReactNativePlatformOptions } from '../platform/createReactNativePlatform';
+@@ -21,9 +22,10 @@ export interface SignalWireProviderProps {
+   /**
+    * Route calls through the native call UI (CallKit / ConnectionService).
+    * Requires the optional peer `react-native-callkeep`, and
+-   * `getCallKit().setup(...)` to have been called from your app entry.
++   * `getCallKit().setup(...)` to have been called from your app entry. Pass
++   * options instead of `true` to name outbound calls in the native UI.
+    */
+-  callKit?: boolean;
++  callKit?: boolean | CallKitObserverOptions;
+   children: React.ReactNode;
+ }
+ 
+@@ -45,9 +47,11 @@ export function SignalWireProvider({
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+   const rnPlatform = useMemo<SignalWirePlatform>(() => createReactNativePlatform(platform), []);
+ 
++  // Built once, like the platform: an inline options object must not rebuild it.
+   const observer = useMemo<CallObserver | undefined>(
+-    () => (callKit ? createCallKitObserver() : undefined),
+-    [callKit]
++    () => (callKit ? createCallKitObserver(callKit === true ? {} : callKit) : undefined),
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [Boolean(callKit)]
+   );
+ 
+   return (

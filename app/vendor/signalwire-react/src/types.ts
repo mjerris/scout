@@ -1,4 +1,4 @@
-import type { Call, SignalWire, SignalWireOptions } from '@signalwire/js';
+import type { Call, DialOptions, SignalWire, SignalWireOptions } from '@signalwire/js';
 
 /**
  * A platform layer supplied by a host package.
@@ -24,8 +24,12 @@ export interface SignalWirePlatform {
 export interface CallObserver {
   /** Called once, immediately after the client is constructed. */
   bindClient?(client: SignalWire): void;
-  /** Called after a successful `dial()`, before the call is returned. */
-  onOutgoingCall?(call: Call, destination: string): void;
+  /**
+   * Called after a successful `dial()`, before the call is returned, with the
+   * options it was dialled with (so native call UI can tell a voice call from a
+   * video one).
+   */
+  onOutgoingCall?(call: Call, destination: string, options?: DialOptions): void;
   /**
    * Called when the app answers an inbound call from its own UI. Return `true`
    * to take over: the observer drives the answer through the native call UI so

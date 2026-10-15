@@ -2,6 +2,7 @@ import { SignalWireProvider as CoreProvider } from '@signalwire/react';
 import React, { useMemo } from 'react';
 
 import { createCallKitObserver } from '../callkit/observer';
+import type { CallKitObserverOptions } from '../callkit/observer';
 import { createReactNativePlatform } from '../platform/createReactNativePlatform';
 
 import type { ReactNativePlatformOptions } from '../platform/createReactNativePlatform';
@@ -21,9 +22,10 @@ export interface SignalWireProviderProps {
   /**
    * Route calls through the native call UI (CallKit / ConnectionService).
    * Requires the optional peer `react-native-callkeep`, and
-   * `getCallKit().setup(...)` to have been called from your app entry.
+   * `getCallKit().setup(...)` to have been called from your app entry. Pass
+   * options instead of `true` to name outbound calls in the native UI.
    */
-  callKit?: boolean;
+  callKit?: boolean | CallKitObserverOptions;
   children: React.ReactNode;
 }
 
@@ -45,9 +47,11 @@ export function SignalWireProvider({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const rnPlatform = useMemo<SignalWirePlatform>(() => createReactNativePlatform(platform), []);
 
+  // Built once, like the platform: an inline options object must not rebuild it.
   const observer = useMemo<CallObserver | undefined>(
-    () => (callKit ? createCallKitObserver() : undefined),
-    [callKit]
+    () => (callKit ? createCallKitObserver(callKit === true ? {} : callKit) : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [Boolean(callKit)]
   );
 
   return (

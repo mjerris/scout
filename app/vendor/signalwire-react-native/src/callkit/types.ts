@@ -42,7 +42,7 @@ export interface CallEntry {
 /** Everything the registry needs from the native layer. */
 export interface CallRegistryHost {
   displayIncomingCall(uuid: string, handle: string, displayName: string): void;
-  startOutgoingCall(uuid: string, handle: string, displayName: string): void;
+  startOutgoingCall(uuid: string, handle: string, displayName: string, hasVideo: boolean): void;
   reportOutgoingConnected(uuid: string): void;
   reportCallEnded(uuid: string, reason: 'missed' | 'remote' | 'local'): void;
   generateUuid(): string;
