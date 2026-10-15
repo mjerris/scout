@@ -136,6 +136,11 @@ class ClaudeConfig:
     cwd: str = "~"
     model: str = ""  # empty = Claude Code's default
     permission_mode: str = "default"
+    # The room's session starts fresh after this many quiet minutes, or once a turn carries
+    # this many tokens of context (Scout puts recent spoken items, memories and recall into
+    # each request itself). 0 = never.
+    session_idle_min: float = 20.0
+    session_max_tokens: int = 60000
     # Claude Code settings files the room assistant loads. Empty (the default) keeps it
     # lean: no ~/.claude CLAUDE.md, memory, skills or hooks in every request (about a
     # third fewer tokens a turn, scripts/bench_brain.py); what it needs from
