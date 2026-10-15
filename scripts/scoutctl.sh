@@ -34,6 +34,9 @@ status)
             "http://127.0.0.1:$port/api/status" | head -c 600 || echo "web: no answer"
         echo
     fi
+    echo "sync:"  # a line per source: ok, failing, stalled, off or waiting (syncstate.py)
+    UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$DATA/current" \
+        python -m scout.syncstate 2>/dev/null | sed 's/^/  /' || echo "  unknown (no install yet)"
     if launchctl print "$DOMAIN/$MESSAGES_LABEL" >/dev/null 2>&1; then
         launchctl print "$DOMAIN/$MESSAGES_LABEL" | grep -E '^\s+(state|pid) =' | sed 's/^\s*/messages helper: /'
     else

@@ -20,6 +20,7 @@ token (state/memory.token, readable by this user only):
     GET  /v1/resolve?id=<id>                             -> index.Index.resolve's dict, or {} (404)
     POST /v1/links/add {src, dst, rel} | /v1/links/list {id} -> {links} | /v1/links/url {id} -> {url}
     POST /v1/docs/missing {kind, key, limit}              -> {hits}
+    GET  /v1/sync                                         -> {sources}: each sync's status (syncstate.py)
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -49,7 +50,7 @@ from typing import Any
 
 from aiohttp import web
 
-from . import index, links
+from . import index, links, syncstate
 from .config import DATA, load
 from .memory import Memory
 
@@ -179,6 +180,7 @@ class Service:
         r = app.router
         r.add_get("/v1/health", self._health)
         r.add_get("/v1/resolve", self._resolve)
+        r.add_get("/v1/sync", self._sync)
         routes: dict[str, Callable[[dict[str, Any]], Any]] = {
             "/v1/docs/put": lambda a: {"changed": self.ix.put(
                 str(a["id"]), str(a["kind"]), str(a.get("title") or ""), str(a.get("body") or ""),
@@ -231,6 +233,10 @@ class Service:
             "model": getattr(emb, "model", None), "model_loaded": bool(getattr(emb, "loaded", False)),
         })  # fmt: skip
 
+    async def _sync(self, request: web.Request) -> web.Response:
+        sts = await asyncio.get_running_loop().run_in_executor(None, syncstate.statuses)
+        return web.json_response({"sources": syncstate.as_dicts(sts)})
+
     async def _resolve(self, request: web.Request) -> web.Response:
         id = request.query.get("id", "").strip()
         if not id:
@@ -272,11 +278,13 @@ async def granola_loop(ix: index.Index, cfg: Any, state: Path = GRANOLA_STATE) -
     loop = asyncio.get_running_loop()
     while True:
         try:
-            since = json.loads(state.read_text()).get("updated_after") if state.exists() else None
-            t0 = time.monotonic()
-            notes, changed, newest = await loop.run_in_executor(None, granola.sync_pass, ix, get, since)
-            if newest != since:
-                state.write_text(json.dumps({"updated_after": newest}))
+            with syncstate.track("granola", max(1.0, cfg.every_min) * 60) as p:
+                since = json.loads(state.read_text()).get("updated_after") if state.exists() else None
+                t0 = time.monotonic()
+                notes, changed, newest = await loop.run_in_executor(None, granola.sync_pass, ix, get, since)
+                if newest != since:
+                    state.write_text(json.dumps({"updated_after": newest}))
+                p.added, p.backlog = changed, len(granola._load_pending(granola.PENDING))
             if notes:
                 log.info("granola: %d notes (%d items) in %.0f s", notes, changed, time.monotonic() - t0)
         except granola.GranolaError as exc:
@@ -297,10 +305,12 @@ async def slack_loop(ix: index.Index, cfg: Any, state: Path = SLACK_STATE) -> No
     loop = asyncio.get_running_loop()
     while True:
         try:
-            t0 = time.monotonic()
-            msgs, changed = await loop.run_in_executor(
-                None, lambda: slack.sync_pass(ix, get, cfg.backfill_days, cfg.skip, state)
-            )
+            with syncstate.track("slack", max(1.0, cfg.every_min) * 60) as p:
+                t0 = time.monotonic()
+                msgs, changed = await loop.run_in_executor(
+                    None, lambda: slack.sync_pass(ix, get, cfg.backfill_days, cfg.skip, state)
+                )
+                p.added = changed
             if changed:
                 log.info(
                     "slack: %d messages (%d items changed) in %.0f s", msgs, changed, time.monotonic() - t0

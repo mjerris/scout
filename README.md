@@ -569,6 +569,22 @@ Every 15 minutes Scout checks, in plain code, for an event about to start, a tim
 reminder coming due, and (once each morning) today's overlapping events, and says each
 once. Quiet hours (22:00-08:00) only log. `[pulse]` tunes or turns it off.
 
+## Sync status: "is everything syncing?"
+
+Each sync records every pass in `state/sync_status.json`: Mail, meeting notes by
+email, Granola, Slack, the task farm, Reminders mirroring, the vectors for search by
+meaning, and link upkeep. It keeps when the pass ran, whether it worked, what it added
+or updated, and what's still waiting where that's known. An error keeps only its type
+and a short message with quoted text, links and addresses taken out.
+
+Each source is ok, failing (its last pass failed), stalled (no good pass in 3 times its
+interval, 30 minutes at least), off (not set up) or waiting (no pass yet).
+`scripts/scoutctl.sh status` prints a line for each, scout-memory serves them at
+`GET /v1/sync`, and "is everything syncing?" or "what's the sync status?" gets a spoken
+answer. The pulse says it once a day when a source has failed for an hour or stalled:
+"Mail sync has been failing since 9 this morning." Messages has no sync to report:
+Scout reads it live.
+
 ## Links: "give me a link to that"
 
 Everything Scout says keeps the ids of the records it was about: the tasks the pulse

@@ -15,7 +15,7 @@ import re
 import time
 from typing import Any
 
-from . import appdb, index, mail_mac
+from . import appdb, index, mail_mac, syncstate
 from .config import load
 from .mac import ToolError
 from .summary import essential
@@ -266,7 +266,7 @@ async def sync_pass(
     out = {
         "listed": len(listed), "how": how, "new": len(new), "filled": len(partial), "stored": stored,
         "list_s": round(t_list, 1), "read_s": round(t2 - t1, 1), "message_ids": ids_added,
-        "ids_s": round(t_ids, 1), "total": ix.count(KIND),
+        "ids_s": round(t_ids, 1), "total": ix.count(KIND), "left": len(left),
     }  # fmt: skip
     log.info("mail index: %s", out)
     return out
@@ -351,8 +351,11 @@ async def loop(idle: Any, every_s: float = 1200.0) -> None:
     while True:
         try:
             if idle():
-                await sync_pass(index.default())
-                await backfill_meetings(index.default(), days=load().tasks.backfill_days)
+                with syncstate.track("mail", every_s) as p:
+                    out = await sync_pass(index.default())
+                    p.added, p.updated, p.backlog = out["stored"], out["message_ids"], out["left"]
+                with syncstate.track("meetings_email", every_s) as p:
+                    p.added = await backfill_meetings(index.default(), days=load().tasks.backfill_days)
         except Exception as exc:
             log.warning("mail index pass failed: %s", exc)
         await asyncio.sleep(every_s)

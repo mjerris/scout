@@ -101,3 +101,11 @@ def _no_real_apps(monkeypatch: pytest.MonkeyPatch) -> None:
         return await real(*argv, timeout=timeout)
 
     monkeypatch.setattr(mac, "_run", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _own_sync_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each test has its own sync status file (syncstate.py)."""
+    import scout.syncstate as syncstate_mod
+
+    monkeypatch.setattr(syncstate_mod, "PATH", tmp_path / "sync_status.json")
