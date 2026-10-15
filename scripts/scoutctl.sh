@@ -42,6 +42,9 @@ status)
     UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$DATA/current" \
         python -c "from scout import reference; print(reference.status_line())" 2>/dev/null \
         || echo "reference: not read"
+    echo "mcp servers:"  # a line per server in tools.toml: up, failing, auth needed or off (extmcp.py)
+    UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$DATA/current" \
+        python -m scout.extmcp 2>/dev/null | sed 's/^/  /' || echo "  unknown (no install yet)"
     if launchctl print "$DOMAIN/$MESSAGES_LABEL" >/dev/null 2>&1; then
         launchctl print "$DOMAIN/$MESSAGES_LABEL" | grep -E '^\s+(state|pid) =' | sed 's/^\s*/messages helper: /'
     else

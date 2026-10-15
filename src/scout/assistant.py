@@ -24,6 +24,7 @@ from . import (
     behavior,
     briefing,
     corrections,
+    extmcp,
     gate,
     index,
     ledger,
@@ -219,7 +220,9 @@ class Assistant:
         self._phone_refs: list[str] = []  # ...and the phone's request's (asks run one at a time)
         self._turn_refs: list[str] = []  # records the room's Claude turn read about (its tools' results)
         server, names = build_server(self.timers, self.relay, self.memory, self._turn_refs.extend)
-        self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify)
+        # The user's own MCP servers (tools.toml): the room's session gets them by its rules.
+        self.external = extmcp.External(cfg.claude.cwd, lambda: self.privacy.mode)
+        self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify, self.external)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
         self.mic_muted = False
@@ -265,6 +268,9 @@ class Assistant:
         self._bg: set[asyncio.Task[Any]] = set()  # keeps fire-and-forget tasks alive until done
         # Requests from the phone (ask): one at a time, on their own Claude session.
         self._phone_brain: Brain | None = None
+        self._server_brains: dict[
+            str, PhoneBrain
+        ] = {}  # by server: the phone's asks to the user's MCP servers
         self._ask_lock = asyncio.Lock()
         self._ask_jobs: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._ask_ready: dict[str, tuple[float, str, dict[str, Any]]] = {}  # late answers, by request
@@ -364,7 +370,7 @@ class Assistant:
         """Keep the exchange in the journal (memory/journal/, indexed), so "what did I ask
         about X" can find it. The tools line says what was used, not what it returned; the
         refs line (`about`) the records the answer was about."""
-        private = private or any(_PRIVATE_TOOL.match(trust.base(n)) for n, _ in tools)
+        private = private or any(self._private_tool(n) for n, _ in tools)
         try:
             # The store may be the memory service: off the event loop.
             await asyncio.to_thread(
@@ -471,6 +477,8 @@ class Assistant:
     # --- main loop ---------------------------------------------------------------
 
     async def run(self) -> None:
+        if self.external.catalog.servers or self.external.catalog.problems:
+            self._spawn(self.external.watch())  # health, for scout status; reconnects failing ones
         if self.cfg.briefing.at:
             self._spawn(briefing.daily(self.cfg.briefing.at, self._announce_briefing))
         if self.cfg.behavior.nightly_at:  # rules from the day's corrections (corrections.py)
@@ -1671,7 +1679,7 @@ class Assistant:
             self._log_turn_timing()
             if replies:
                 about = list(refs.clean(self._turn_refs))
-                private = any(_PRIVATE_TOOL.match(trust.base(n)) for n, _ in used)
+                private = any(self._private_tool(n) for n, _ in used)
                 # last_spoken is already the reply; this is what it was about.
                 self.said.add(
                     refs.Said(time.time(), "Scout", " ".join(replies), tuple(about), private, "room", text)
@@ -1821,6 +1829,8 @@ class Assistant:
         yes to. Email by phone has its own rules (mail_phone.py): drafts are saved with no
         window, and a send is to known people, short, and read back first. A call is never
         started on the Mac from the phone (call_link puts the number on the phone)."""
+        if extmcp.split(name) and self.external.decision(name, "phone") is not None:
+            return await self._run_external(agent, name, args, preview, confirmed)
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
@@ -1918,6 +1928,32 @@ class Assistant:
         finally:
             sessions.ORIGIN.reset(origin)
 
+    async def _run_external(
+        self, agent: str, name: str, args: dict[str, Any], preview: bool, confirmed: bool
+    ) -> dict[str, Any]:
+        """A write on one of the user's MCP servers that the caller said yes to on the
+        phone (two steps: preview, then confirmed). Only the phone, only a tool its rules
+        offer there and that asks; it runs on the host session (Claude Code's sign-in)."""
+        d = self.external.decision(name, "phone", args)
+        if agent != PHONE or d is None or not d.allowed or not d.asks:
+            return {
+                "status": "error",
+                "error": d.why if d and not d.allowed else f"{name} can't be used here",
+            }
+        spoken, detail = self.external.describe(name, args, "phone")
+        if preview:
+            return {"status": "ok", "text": spoken}
+        if not confirmed:
+            return {"status": "error", "error": f"{name} can't be used from the phone without a yes"}
+        server, tool = extmcp.split(name) or ("", name)
+        log.info("confirmed on the phone: %s", name)
+        trust.default().record(f"{server}.{tool}", "phone", True, detail, by=agent)
+        try:
+            text = await self.external.call(name, args)
+        except ToolError as exc:
+            return {"status": "error", "error": str(exc)}
+        return {"status": "ok", "text": speech.to_speech(extmcp.spoken(text)) or "Done."}
+
     async def approve_pairing(self, name: str, match: str) -> bool | None:
         """Ask the room whether the phone `name` may pair (phone_pairing.PairRequests):
         spoken, and on the web UI with Approve and Deny. The phone shows the same `match`
@@ -1938,16 +1974,28 @@ class Assistant:
 
     # --- requests from the phone ---------------------------------------------------------
 
-    async def ask(self, agent: str, text: str, deadline: float = ASK_DEADLINE_S) -> dict[str, Any]:
+    def _private_tool(self, name: str) -> bool:
+        """An answer that used this tool came from private data (mail, texts, a private MCP server)."""
+        return bool(_PRIVATE_TOOL.match(trust.base(name))) or self.external.is_private(name)
+
+    async def ask(
+        self, agent: str, text: str, deadline: float = ASK_DEADLINE_S, via: str = ""
+    ) -> dict[str, Any]:
         """Answer `text` through Scout's tiers (local intents, memory, tier 1, Claude) and
         return the reply as text: nothing is spoken or chimed in the room, the floor is
         not taken, and a room turn in progress is left alone (Claude runs on a session of
         its own). Requests run one at a time. Past `deadline` the answer is kept, so asking
-        again returns it; an answer nobody collected comes with the next reply."""
+        again returns it; an answer nobody collected comes with the next reply.
+
+        via: one of the user's MCP servers (tools.toml): answered by a Claude session with
+        only that server's phone tools. A write it would make comes back as "action" (its
+        tool, arguments and read-back) for the phone's two steps, not done."""
         text = " ".join(text.split())
         if not text:
             return {"status": "error", "error": "nothing was asked"}
-        key = text.casefold()
+        if via and not any(s.name == via for s in self.external.phone_servers()):
+            return {"status": "error", "error": f"{via} isn't offered on the phone"}
+        key = f"{via}\n{text.casefold()}" if via else text.casefold()
         now = time.monotonic()
         for k in [k for k, (at, _, _) in self._ask_ready.items() if now - at > ASK_KEEP_S]:
             del self._ask_ready[k]
@@ -1955,7 +2003,7 @@ class Assistant:
         if key not in self._ask_ready:
             task = self._ask_jobs.get(key)
             if task is None:
-                task = self._spawn(self._ask_job(agent, text, key))
+                task = self._spawn(self._ask_job(agent, text, key, via))
                 self._ask_jobs[key] = task
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), deadline)
@@ -1973,10 +2021,12 @@ class Assistant:
             result = {**result, "text": f"{result['text']} {also}"}
         return result
 
-    async def _ask_job(self, agent: str, text: str, key: str) -> dict[str, Any]:
+    async def _ask_job(self, agent: str, text: str, key: str, via: str = "") -> dict[str, Any]:
         try:
             async with self._ask_lock:
-                result = await self._answer_text(agent, text)
+                result = await (
+                    self._answer_server(agent, via, text) if via else self._answer_text(agent, text)
+                )
         except Exception as exc:
             log.exception("phone ask failed")
             result = {"status": "error", "error": f"failed: {exc}"}
@@ -2029,10 +2079,43 @@ class Assistant:
         reply = speech.to_speech(" ".join(replies)) or "Done."
         self.emit("claude", text=reply, client=agent)
         about = list(refs.clean(self._phone_refs))
-        private = any(_PRIVATE_TOOL.match(trust.base(n)) for n in used)
+        private = any(self._private_tool(n) for n in used)
         self._spoke("Scout", reply, about, private, text, channel=agent)
         if agent != PHONE_AGENT:  # the phone service keeps the whole call
             self._spawn(self._record_turn(text, reply, agent, False, about=about))
+        return {"status": "ok", "text": reply, "tier": "claude"}
+
+    async def _answer_server(self, agent: str, server: str, text: str) -> dict[str, Any]:
+        """A phone request for one of the user's MCP servers: a Claude session of its own
+        with that server's phone tools only (no local tiers: they don't know the server)."""
+        t0 = time.monotonic()
+        self.emit("you", text=text, client=agent)
+        brain = self._server_brains.get(server)
+        if brain is None:
+            tools, names = build_server(self.timers, memory=self.memory)
+            brain = PhoneBrain(self.cfg.claude, tools, names, set(), self.rules, self.external, only=server)
+            self._server_brains[server] = brain
+        brain.prepared = None
+        replies: list[str] = []
+        try:
+            async for kind, data in brain.ask(text):
+                if kind in ("text", "spoken"):
+                    replies.append(data)
+                elif kind == "tool":
+                    self.emit("tool", name=data[0], input=_preview(data[1]), client=agent)
+                elif kind == "result":
+                    ledger.record("claude", time.monotonic() - t0, client=agent, **ledger.from_result(data))
+        except Exception as exc:
+            log.exception("phone: %s request failed", server)
+            self.emit("error", text=f"phone request to {server} failed: {exc}")
+            await brain.reset()
+            return {"status": "error", "error": f"{server} couldn't answer just now"}
+        if brain.prepared is not None:
+            name, args, said = brain.prepared
+            self.emit("claude", text=f"(prepared for the caller's yes) {said}", client=agent)
+            return {"status": "ok", "text": said, "action": {"name": name, "args": args, "said": said}}
+        reply = speech.to_speech(extmcp.spoken(" ".join(replies))) or "Done."
+        self.emit("claude", text=reply, client=agent)
         return {"status": "ok", "text": reply, "tier": "claude"}
 
     async def _local_text(self, text: str, agent: str = PHONE) -> tuple[str | None, str, bool]:
@@ -2138,6 +2221,9 @@ class Assistant:
         await self.brain.close()
         if self._phone_brain is not None:
             await self._phone_brain.close()
+        for b in self._server_brains.values():
+            await b.close()
+        await self.external.close()
         await sessions.close()
 
     def set_mic_muted(self, muted: bool) -> None:

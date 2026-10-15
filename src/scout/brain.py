@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 )
 
 from .config import DATA, ROOT, ClaudeConfig
-from . import behavior, trust
+from . import behavior, extmcp, trust
 from .rules import Rules
 import contextlib
 
@@ -483,9 +483,16 @@ class Brain:
         tool_names: list[str],
         rules: Rules,
         notify: Callable[[str, str], None],
+        external: extmcp.External | None = None,
     ) -> None:
         self.cfg = cfg
         self.confirm = confirm
+        # The user's own MCP servers (extmcp.py, tools.toml): which ones this session gets
+        # (channel; `only` narrows it to one), and the rules for their tools.
+        self.external = external
+        self.channel = getattr(self, "channel", "room")
+        self._only = getattr(self, "_only", "")
+        self._restart: asyncio.Task[None] | None = None
         self.tool_server = tool_server
         self.tool_names = tool_names  # pre-approved voice_app tools
         self.rules = rules
@@ -507,6 +514,9 @@ class Brain:
         self._rules_sig = behavior.signature()
         if rules := behavior.prompt_block():
             append += "\n" + rules + "\n"
+        ext = self.external
+        if ext is not None and (hints := ext.prompt(self.channel)):
+            append += "\n" + hints + "\n"
         strict = self.cfg.approval_policy == "strict"
         if self.cfg.approval_policy not in ("strict", "settings", "settings_no_hooks"):
             raise ValueError(f"unknown approval_policy {self.cfg.approval_policy!r}")
@@ -529,7 +539,15 @@ class Brain:
                 ],
                 # Ask beats allow, so these always reach the voice prompt even when
                 # ~/.claude settings allow them (verified against the CLI).
-                "ask": ["Bash", "WebFetch", *ASKING_TOOLS, *self.cfg.always_ask],
+                # The user's MCP servers too: every call reaches Scout's check (extmcp rules),
+                # even when the user's own settings allow those tools.
+                "ask": [
+                    "Bash",
+                    "WebFetch",
+                    *ASKING_TOOLS,
+                    *self.cfg.always_ask,
+                    *(ext.ask_rules(self.channel) if ext else []),
+                ],
             }
         }
         # Messages from other Claude sessions are held, never delivered: one would start a
@@ -547,14 +565,19 @@ class Brain:
         return ClaudeAgentOptions(
             cwd=str(Path(self.cfg.cwd).expanduser()),
             settings=json.dumps(overrides),
-            env={"SCOUT_ROOM": "1"},  # Scout's MCP server and plugin hook stand down inside the room agent
+            # Scout's MCP server and plugin hook stand down inside the room agent. The user's
+            # servers' secrets (header and env values) go in the environment, never argv.
+            env={"SCOUT_ROOM": "1", **(ext.env(self.channel, self._only) if ext else {})},
             plugins=room_plugins(self.cfg.plugins),
-            mcp_servers={"voice_app": self.tool_server},
+            mcp_servers={
+                "voice_app": self.tool_server,
+                **(ext.sdk_servers(self.channel, self._only) if ext else {}),
+            },
             extra_args={"remote-control": self.cfg.remote_control} if self.cfg.remote_control else {},
             model=self.cfg.model or None,
             permission_mode=_permission_mode(self.cfg.permission_mode),  # "" = settings' defaultMode
             setting_sources=sources,
-            disallowed_tools=list(PEER_TOOLS),
+            disallowed_tools=[*PEER_TOOLS, *(ext.denied(self.channel, self._only) if ext else [])],
             system_prompt={"type": "preset", "preset": "claude_code", "append": append},
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,  # stream words, so the first sentence is spoken early
@@ -602,7 +625,10 @@ class Brain:
         return Path(self.cfg.cwd).expanduser()
 
     def _auto_allowed(self, name: str, args: dict[str, Any]) -> bool:
-        """Runs without asking: the short list of harmless single commands."""
+        """Runs without asking: the short list of harmless single commands, and the tools of
+        the user's MCP servers that their rules let run unasked (extmcp.decide)."""
+        if self.external is not None and (d := self.external.decision(name, self.channel, args)):
+            return d.allowed and not d.asks
         return name == "Bash" and is_safe_bash(args.get("command", ""), self.cfg.auto_allow_commands)
 
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
@@ -610,6 +636,8 @@ class Brain:
         own_app = "This voice app is maintained by its owner session; use request_app_change instead of changing it."
         if name.startswith(tuple(f"{s}__" for s in DESK_SERVERS)):
             return "The voice tool is for other sessions; you already own the voice."
+        if self.external is not None and (d := self.external.decision(name, self.channel, args)):
+            return None if d.allowed else d.why
         path = str(args.get("file_path") or args.get("notebook_path") or args.get("path") or "")
         if name in _FILE_TOOLS and path and _under(path, [str(ROOT), str(DATA)], self._cwd):
             return own_app
@@ -629,6 +657,8 @@ class Brain:
         return None
 
     async def _ask(self, name: str, args: dict[str, Any]) -> bool | None:
+        if self.external is not None and self.external.decision(name, self.channel, args):
+            return await self._ask_external(name, args)
         # "Always ask" commands (git push, PR merge...) can't be skipped by a saved rule.
         always_ask = name in ALWAYS_ASK_TOOLS or (
             name == "Bash" and matches_always_ask(str(args.get("command", "")), self.cfg.always_ask)
@@ -657,6 +687,21 @@ class Brain:
             return True
         if offer:
             self.notify("rules", offer)
+        return None if answer is None else bool(answer)
+
+    async def _ask_external(self, name: str, args: dict[str, Any]) -> bool | None:
+        """A write on one of the user's MCP servers: their spoken yes to the rule's read-back,
+        every time (no saved rule or "always" skips it), kept in the trust log."""
+        if self.external is None:
+            return False
+        spoken, detail = self.external.describe(name, args)
+        server, tool = extmcp.split(name) or ("", name)
+        log.info("permission request: %s %s", name, _preview(args))
+        answer = await self.confirm(spoken, detail)
+        trust.default().record(f"{server}.{tool}", "asked", None if answer is None else bool(answer), detail)
+        if answer == "always":
+            self.notify("rules", "Okay, just this once. That kind of action always asks.")
+            return True
         return None if answer is None else bool(answer)
 
     async def _can_use_tool(
@@ -691,6 +736,10 @@ class Brain:
             with contextlib.suppress(Exception):
                 await self.client.disconnect()
             self.client, self.session_id, self._session_cost = None, None, 0.0
+            if self.external is not None and self.channel == "room":
+                # tools.toml as it is now, for the new session; the host reconnects behind it.
+                self.external.reload()
+                self._restart = asyncio.ensure_future(self.external.start())
             self._last_used, self._context = None, 0
         if self.client is None:
             self.client = ClaudeSDKClient(self._options())
@@ -811,6 +860,21 @@ PHONE_REFUSED = (
 )
 
 
+# A phone request to one of the user's MCP servers (the phone's tool for that server): only
+# that server's tools, as its rules allow on the phone.
+SERVER_PROMPT = """\
+# Phone, {server}
+This request is for the user's {server} tools ({hint}), from their phone. Use only the
+mcp__{server}__ tools; answer in a few short, plain sentences with the facts the user asked
+for. A tool that changes something isn't done from here: calling it records it for the
+caller's yes on the phone, and nothing more is needed from you."""
+
+PHONE_PREPARED = (
+    "Not done yet: it is kept for the caller's yes on the phone. Say in one short sentence "
+    "what you would do; don't call it again."
+)
+
+
 async def _no_confirm(spoken: str, detail: str) -> bool:
     return False  # nobody in the room is asked about a phone request
 
@@ -828,12 +892,22 @@ class PhoneBrain(Brain):
         tool_names: list[str],
         phone_tools: set[str],
         rules: Rules,
+        external: extmcp.External | None = None,
+        only: str = "",
     ) -> None:
+        """only: a session for one of the user's MCP servers, with none of Scout's own tools."""
         self._all_tools = list(tool_names)
-        extra = "\n".join(p for p in (cfg.extra_system_prompt, PHONE_PROMPT) if p)
+        self.channel, self._only = "phone", only
+        # A write on the user's MCP server, kept for the caller's yes: (tool, args, read-back).
+        self.prepared: tuple[str, dict[str, Any], str] | None = None
+        server = external.catalog.get(only) if external is not None and only else None
+        focus = SERVER_PROMPT.format(server=only, hint=server.hint or "the user's server") if server else ""
+        extra = "\n".join(p for p in (cfg.extra_system_prompt, PHONE_PROMPT, focus) if p)
         phone_cfg = dataclasses.replace(cfg, remote_control="", extra_system_prompt=extra)
-        allowed = [t for t in tool_names if t in phone_tools]
-        super().__init__(phone_cfg, _no_confirm, tool_server, allowed, rules, lambda kind, text: None)
+        allowed = [t for t in tool_names if t in phone_tools and not only]
+        super().__init__(
+            phone_cfg, _no_confirm, tool_server, allowed, rules, lambda kind, text: None, external
+        )
 
     def _options(self) -> ClaudeAgentOptions:
         opts = super()._options()
@@ -843,6 +917,12 @@ class PhoneBrain(Brain):
     def _forbidden(self, name: str, args: dict[str, Any]) -> str | None:
         if reason := super()._forbidden(name, args):
             return reason
+        ext = self.external
+        if ext is not None and (d := ext.decision(name, self.channel, args)) and d.asks:
+            # Two steps by phone: kept here; the phone reads it back and confirms it.
+            self.prepared = (name, dict(args), ext.describe(name, args, "phone")[0])
+            log.info("phone: prepared %s for the caller's yes", name)
+            return PHONE_PREPARED
         runs_unasked = self._auto_allowed(name, args) or (
             name not in ("Bash", "WebFetch", *ASKING_TOOLS)
             and (name in self.cfg.auto_allow_tools or name in self.tool_names)

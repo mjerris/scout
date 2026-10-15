@@ -122,7 +122,7 @@ class VoiceApp(Protocol):
         wait_for_floor: float = 0.0,
     ) -> dict[str, Any]: ...
 
-    async def ask(self, agent: str, text: str, deadline: float = ...) -> dict[str, Any]: ...
+    async def ask(self, agent: str, text: str, deadline: float = ..., via: str = ...) -> dict[str, Any]: ...
 
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None: ...
 
@@ -847,7 +847,9 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             b = await req.json()
             if not isinstance(b, dict):
                 raise TypeError("the body must be a JSON object")
-            text, agent = b.get("text"), b.get("agent")
+            text, agent, via = b.get("text"), b.get("agent"), b.get("via", "")
+            if not isinstance(via, str):
+                raise TypeError("via must be a string")
             if not isinstance(text, str) or not text.strip():
                 raise TypeError("text must be a non-empty string")
             if len(text) > 2000:
@@ -856,8 +858,10 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("agent must be a string")
         except (ValueError, TypeError) as exc:
             return web.json_response({"status": "error", "error": str(exc)}, status=400)
-        if agent == PHONE_AGENT and not phone_ok(req):
+        if (agent == PHONE_AGENT or via) and not phone_ok(req):
             raise web.HTTPForbidden(text="Only scout-phone may act for the phone.")
+        if via:  # the phone's tool for one of the user's MCP servers (extmcp.py)
+            return web.json_response(await assistant.ask(PHONE_AGENT, text, via=via))
         return web.json_response(await assistant.ask(agent or "session", text))
 
     async def api_status(req: web.Request) -> web.StreamResponse:

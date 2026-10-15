@@ -1,0 +1,52 @@
+# Scout's rules for your own MCP servers (docs/external-mcp.md). Copy to
+#   ~/Library/Application Support/Scout/tools.toml
+# and make it yours alone: chmod 600. The servers below are made up.
+
+# A server already added to Claude Code (claude mcp add --transport http acme https://...):
+# Scout uses it under the same name, with Claude Code's sign-in.
+[[server]]
+from_claude = "acme"
+channels = ["room", "phone"]
+private = true
+hint = "Acme's help desk: tickets, customers and orders."
+
+  # Never: whatever the server marks destructive.
+  [[server.tool]]
+  destructive = true
+  deny = true
+
+  # Writes ask, with a clear read-back.
+  [[server.tool]]
+  name = "ticket_create"
+  asks = true
+  readback = "File an Acme ticket for {customer|no customer} titled {title}?"
+
+  # This one refuses its first call and wants confirm=true: ask only for that one.
+  [[server.tool]]
+  name = "ticket_close"
+  asks = true
+  asks_when = "confirm"
+  readback = "Close Acme ticket {number}?"
+
+  # On the phone too: the lookups.
+  [[server.tool]]
+  pattern = "(ticket_show|ticket_search|order_status)"
+  phone = true
+
+# A server only Scout uses, run as a local command; its key is in widgets.env (mode 600):
+#   WIDGETS_KEY=...
+[[server]]
+name = "widgets"
+command = "uvx"
+args = ["widgets-mcp"]
+env_file = "widgets.env"
+env = { WIDGETS_KEY = "${WIDGETS_KEY}" }
+hint = "The workshop's widget inventory."
+
+# An HTTP server with a bearer token, off for now.
+[[server]]
+name = "wiki"
+url = "https://wiki.example.com/mcp"
+env_file = "wiki.env"
+headers = { Authorization = "Bearer ${WIKI_TOKEN}" }
+enabled = false

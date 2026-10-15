@@ -176,6 +176,15 @@ seconds so a back-and-forth isn't interrupted, and others queue in order. A
 "Hey Scout" request waits up to 15 s for a session to finish. "Scout, stop"
 always works. The web page shows who has the floor.
 
+## Your own MCP servers
+
+Scout can use MCP servers you already added to Claude Code (same name, same sign-in) or
+describe for it, in the room and on the phone, by rules in a local
+`tools.toml` in its data folder (mode 600): which servers, where, what is private, what
+asks for your yes, what is off. Nothing server-specific is in Scout's code. `scout status`
+says whether each one is up. Details: [docs/external-mcp.md](docs/external-mcp.md);
+example: `tools.example.toml`.
+
 ## Phone and other devices (Tailscale)
 
 ```sh
