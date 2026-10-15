@@ -83,10 +83,10 @@ def test_the_gate_checks_the_code_against_semantic_state() -> None:
     assert "`proposed_function`" in q and "pending_code" in q and "`semantic_state`" in q
 
 
-# --- 3: private tools make the rest of the call private ----------------------------------
+# --- 3: private tools, and their late answers, make an exchange private ---------------------
 
 
-def test_a_private_tool_makes_the_rest_of_the_call_private() -> None:
+def test_a_private_tools_late_answer_makes_the_exchange_it_lands_in_private() -> None:
     log: list[dict[str, Any]] = [
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [{"function": {"name": "weather", "arguments": "{}"}}]},
@@ -95,10 +95,17 @@ def test_a_private_tool_makes_the_rest_of_the_call_private() -> None:
         {"role": "assistant", "tool_calls": [{"function": {"name": "local_search", "arguments": "{}"}}]},
         {"role": "assistant", "content": "Looking."},
         {"role": "user", "content": "OK"},
+        {"role": "system", "content": ps.late_answer("local_search", "Pat owes you a call.")},
         {"role": "assistant", "content": "You said Pat owes you a call."},  # the late answer
+        {"role": "user", "content": "Brian is 5 foot 9."},  # the user's own words: findable later
+        {"role": "assistant", "content": "Got it."},
+        {"role": "user", "content": "And the forecast?"},
+        {"role": "system", "content": ps.late_answer("weather", "Rain at 5.")},  # not private
+        {"role": "assistant", "content": "Rain at 5."},
     ]
     xs = ps.call_exchanges(log)
-    assert [x["private"] for x in xs] == [False, True, True]
+    assert [x["private"] for x in xs] == [False, True, True, False, False]
+    assert all("late" not in x for x in xs)
     why = ps.call_exchanges([
         {"role": "user", "content": "Why is task 2 there?"},
         {"role": "assistant", "tool_calls": [{"function": {"name": "task_why", "arguments": "{}"}}]},

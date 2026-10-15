@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manage Scout's background app.
 #   scoutctl.sh status | restart | logs [N] | uninstall [--purge]
-#   scoutctl.sh phone pair | list | forget <device>   (pair: a one-time code + QR for the app)
+#   scoutctl.sh phone pair | list | forget <device> | calls   (pair: a one-time code + QR for the app; calls: active ones)
 # uninstall stops and removes the login item; --purge also deletes Scout's data
 # folder (config, saved rules, models, logs). Removing the plugin itself is
 # `claude plugin uninstall scout`.
@@ -78,7 +78,7 @@ uninstall)
     fi
     ;;
 *)
-    echo "usage: $0 status | restart | logs [N] | uninstall [--purge] | phone pair|list|forget <device>" >&2
+    echo "usage: $0 status | restart | logs [N] | uninstall [--purge] | phone pair|list|forget <device>|calls" >&2
     exit 2
     ;;
 esac

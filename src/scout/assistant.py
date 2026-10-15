@@ -33,6 +33,7 @@ from . import (
     pulse,
     reference,
     refs,
+    sessions,
     shared_tools,
     speech,
     starlink,
@@ -84,7 +85,7 @@ PHONE_TOOLS = {
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
 # An answer built from these is private: mail and messages, and what's indexed from them.
 _PRIVATE_TOOL = re.compile(
-    r"^(?:mail|messages|contacts?)_|^(?:local_search|task_why|tasks_list|github_items)$"
+    r"^(?:mail|messages|contacts?)_|^(?:local_search|task_why|tasks_list|github_items|session_ask|session_replies)$"
 )
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 # A Claude turn says its progress line ("One moment.") no sooner than this after the turn
@@ -179,6 +180,7 @@ class Assistant:
         self.floor = Floor(cfg.floor.hold_seconds)
         self.rules = Rules(DATA / "state" / "voice_allow.json")
         self.timers = Timers(self._timer_done)
+        sessions.configure(self._session_replied)  # a late reply to the room's ask is said here
         # What was said lately with the records it was about (refs.py): "give me a link to that".
         self.said = refs.use(refs.Log())
         self._local = local_intents.Context(
@@ -269,6 +271,15 @@ class Assistant:
     def _timer_done(self, label: str) -> None:
         self.emit("timer", text=f"{label} done")
         self._spawn(self._announce_timer(label))
+
+    def _session_replied(self, ask: sessions.Ask) -> None:
+        """A Claude session answered the room after session_ask stopped waiting: say it.
+        A phone's or a desk session's ask is theirs to collect (session_replies)."""
+        if ask.origin != ROOM:
+            return
+        text = speech.to_speech(f"{ask.to} replied: {ask.reply or ''}"[:600])
+        self.emit("session_reply", text=text)
+        self._spawn(self.announce(text, who="session"))
 
     async def _announce_timer(self, label: str) -> None:
         # Take the floor like any speaker, so it never talks over a session or a
@@ -1572,6 +1583,17 @@ class Assistant:
             return {"status": "error", "error": f"unknown tool {name!r}"}
         if preview:  # the read-back: exactly what would be done
             spoken, _ = describe_tool(name, args, full=True)
+            try:
+                if name == "session_ask":  # the session it will reach, by its name and folder
+                    spoken = await sessions.preview(args)
+                elif name == "forget":  # the facts it would drop, unless strict privacy hides them
+                    gone = await asyncio.to_thread(self.memory.matching, str(args.get("about") or ""))
+                    if not gone:
+                        return {"status": "error", "error": "nothing remembered matches that"}
+                    shown = "; ".join(gone[:5]) if self.privacy.shares_private_text else f"{len(gone)} facts"
+                    spoken = f"Forget {shown}?"
+            except ToolError as exc:
+                return {"status": "error", "error": str(exc)}
             if name == "note_delete":
                 try:
                     nid = int(args.get("id") or 0)
@@ -1629,6 +1651,7 @@ class Assistant:
                 }
             if not answer:
                 return {"status": "declined", "error": "The user declined this by voice."}
+        origin = sessions.ORIGIN.set(agent)  # session_ask: whose late reply it is
         try:
             return {"status": "ok", "text": await t.run(args)}
         except ToolError as exc:
@@ -1636,6 +1659,8 @@ class Assistant:
         except Exception as exc:  # report it to the caller; don't take the app down
             log.exception("shared tool %s failed", name)
             return {"status": "error", "error": f"failed: {exc}"}
+        finally:
+            sessions.ORIGIN.reset(origin)
 
     async def approve_pairing(self, name: str, match: str) -> bool | None:
         """Ask the room whether the phone `name` may pair (phone_pairing.PairRequests):
@@ -1849,6 +1874,7 @@ class Assistant:
         await self.brain.close()
         if self._phone_brain is not None:
             await self._phone_brain.close()
+        await sessions.close()
 
     def set_mic_muted(self, muted: bool) -> None:
         self.mic_muted = muted

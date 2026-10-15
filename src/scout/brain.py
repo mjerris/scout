@@ -190,6 +190,12 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
         return (_with(spoken, args, (("notes", "notes:", False),)) if add else spoken), detail
     if name in NOTE_WRITE_TOOLS or name == "note_delete":
         return f"Delete note {args.get('id')}?", f"delete note {args.get('id')}"
+    if name in SESSION_SEND_TOOLS or name == "session_ask":
+        who, text = (
+            str(args.get("session") or "a session")[:80],
+            " ".join(str(args.get("message") or "").split()),
+        )
+        return f"Ask {who}: {text[:300]}?", f"message to the Claude session {who}:\n{text}"
     if name.startswith("mcp__"):
         parts = name.split("__")
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
@@ -377,14 +383,21 @@ SLACK_SEND_TOOLS = ("mcp__voice_app__slack_send",)
 REMINDER_WRITE_TOOLS = ("mcp__voice_app__reminder_add", "mcp__voice_app__reminder_complete")
 # Deleting a note asks every time (adding one doesn't: it only adds).
 NOTE_WRITE_TOOLS = ("mcp__voice_app__note_delete",)
-# Every shared tool marked asks=True (shared_tools.SHARED) is in one of the lists above.
+# Asking one of the user's other Claude sessions asks every time (it goes to another agent).
+SESSION_SEND_TOOLS = ("mcp__voice_app__session_ask",)
+# Every shared tool the room offers marked asks=True (shared_tools.SHARED, NOT_DESK) is in
+# one of the lists above.
 ALWAYS_ASK_TOOLS = (
     *CALENDAR_WRITE_TOOLS,
     *MAIL_SEND_TOOLS,
     *SLACK_SEND_TOOLS,
     *REMINDER_WRITE_TOOLS,
     *NOTE_WRITE_TOOLS,
+    *SESSION_SEND_TOOLS,
 )
+# Claude Code's own cross-session tools: the room asks sessions through session_ask (the
+# relay, sessions.py), so a reply never starts a turn outside the room's turn loop.
+PEER_TOOLS = ("SendMessage", "ListAgents")
 ASKING_TOOLS = (*URL_TOOLS, *ALWAYS_ASK_TOOLS)
 
 
@@ -487,6 +500,9 @@ class Brain:
                 "ask": ["Bash", "WebFetch", *ASKING_TOOLS, *self.cfg.always_ask],
             }
         }
+        # Messages from other Claude sessions are held, never delivered: one would start a
+        # turn the room's turn loop isn't reading (sessions.py asks sessions instead).
+        overrides["crossSessionInbound"] = "hold"
         if self.cfg.approval_policy == "settings_no_hooks":
             overrides["disableAllHooks"] = True
         sources = _setting_sources(self.cfg.setting_sources)
@@ -506,6 +522,7 @@ class Brain:
             model=self.cfg.model or None,
             permission_mode=_permission_mode(self.cfg.permission_mode),  # "" = settings' defaultMode
             setting_sources=sources,
+            disallowed_tools=list(PEER_TOOLS),
             system_prompt={"type": "preset", "preset": "claude_code", "append": append},
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,  # stream words, so the first sentence is spoken early

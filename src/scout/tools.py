@@ -17,7 +17,7 @@ from claude_agent_sdk.types import McpSdkServerConfig
 from . import mac, privacy, refs
 from .config import DATA
 from .memory import Memory, fact_id
-from .shared_tools import SHARED
+from .shared_tools import NOT_DESK, SHARED
 
 log = logging.getLogger(__name__)
 
@@ -203,6 +203,11 @@ def build_server(
         tools += [tool(n, d, schema)(wrap(fn)) for n, d, schema, fn in memory_tools(memory)]
     # Mail and calendar: the same definitions the MCP server offers other sessions.
     tools += [tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in SHARED]
+    # The other sessions' tools too; not the phone's remember, forget and timer (the room's own above).
+    own = {"remember", "forget", "recall", "phone_timer"}
+    tools += [
+        tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in NOT_DESK if t.name not in own
+    ]
     return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
 
 
