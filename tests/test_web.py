@@ -126,8 +126,8 @@ class StubApp:
         )
         return {"status": "ok", "text": "No events in that range."}
 
-    async def ask(self, agent: str, text: str, deadline: float = 20.0) -> dict[str, Any]:
-        self.calls.append(("ask", agent, text))
+    async def ask(self, agent: str, text: str, deadline: float = 20.0, via: str = "") -> dict[str, Any]:
+        self.calls.append(("ask", agent, text) + ((via,) if via else ()))
         return {"status": "ok", "text": "It's sunny.", "tier": "1"}
 
     async def submit_text(self, text: str, speak: bool = True, client: str | None = None) -> str | None:
@@ -404,6 +404,25 @@ def test_ask_endpoint_needs_auth_and_validates_body(token_file: Path, phone_toke
             async with s.post(url, json={"agent": "phone", "text": "weather?"}, headers=phone) as r:
                 assert await r.json() == {"status": "ok", "text": "It's sunny.", "tier": "1"}
             assert srv.app.calls == [("ask", "phone", "weather?")]
+
+    run(main())
+
+
+def test_ask_via_a_users_server_is_only_for_scout_phone(token_file: Path, phone_token: Path) -> None:
+    """via (one of the user's MCP servers, extmcp.py) is the phone's: its credential only."""
+
+    async def main() -> None:
+        async with serve() as srv, aiohttp.ClientSession() as s:
+            url = srv.url + "/api/ask"
+            body = {"text": "open tickets?", "via": "acme"}
+            async with s.post(url, json=body, headers=srv.auth) as r:
+                assert r.status == 403
+            async with s.post(url, json={**body, "via": 5}, headers=srv.auth) as r:
+                assert r.status == 400
+            phone = {**srv.auth, web_mod.PHONE_HEADER: PHONE_TOKEN}
+            async with s.post(url, json={**body, "agent": "proj#1"}, headers=phone) as r:
+                assert r.status == 200
+            assert srv.app.calls == [("ask", "phone", "open tickets?", "acme")]
 
     run(main())
 
