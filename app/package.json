@@ -1,0 +1,52 @@
+{
+  "name": "scout-phone-app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "prebuild": "expo prebuild --platform ios --no-install",
+    "ios": "expo run:ios",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "check": "bash scripts/check.sh",
+    "android": "expo run:android"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/netinfo": "11.4.1",
+    "@signalwire/js": "4.0.0-rc.4",
+    "@signalwire/react": "file:vendor/signalwire-react",
+    "@signalwire/react-native": "file:vendor/signalwire-react-native",
+    "expo": "54.0.37",
+    "expo-linking": "~8.0.12",
+    "expo-secure-store": "~15.0.8",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-callkeep": "4.3.16",
+    "react-native-get-random-values": "~1.11.0",
+    "react-native-incall-manager": "4.2.2",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-url-polyfill": "2.0.0",
+    "react-native-webrtc": "124.0.8",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@testing-library/react-native": "13.3.3",
+    "@types/jest": "29.5.14",
+    "@types/react": "~19.1.10",
+    "eslint": "9.39.5",
+    "eslint-config-expo": "~10.0.0",
+    "jest": "~29.7.0",
+    "jest-expo": "~54.0.18",
+    "react-test-renderer": "19.1.0",
+    "typescript": "~5.9.3"
+  },
+  "overrides": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  }
+}
