@@ -413,6 +413,11 @@ class SlackConfig:
     # names as Slack shows them (a first name matches: "Luca" is "Luca Pradovera") or
     # user ids. Needs app_token. Only who, never what they wrote.
     announce: list[str] = field(default_factory=list)
+    # Which DMs are said: "listed" (from the people in announce), "all" (every DM and group
+    # DM), or "off". announce_mentions: also say an @-mention of you in a channel
+    # ("Luca mentioned you in #launch on Slack.").
+    announce_dms: str = "listed"
+    announce_mentions: bool = False
 
 
 @dataclass
@@ -539,6 +544,10 @@ def _check(cfg: Config) -> None:
                 name, section.quiet_hours, default,
             )  # fmt: skip
             section.quiet_hours = default
+    if cfg.slack.announce_dms not in ("listed", "all", "off"):
+        log.warning("config slack.announce_dms = %r is not listed, all or off; using 'listed'",
+                    cfg.slack.announce_dms)  # fmt: skip
+        cfg.slack.announce_dms = "listed"
     if cfg.reference.local_answers not in ("offline", "always", "never"):
         log.warning("config reference.local_answers = %r is not offline, always or never; using 'offline'",
                     cfg.reference.local_answers)  # fmt: skip

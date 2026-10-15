@@ -546,6 +546,8 @@ class Live:
     state: State
     skip: Sequence[str] = ()
     announce: Sequence[str] = ()
+    announce_dms: str = "listed"  # "listed", "all" or "off" ([slack] announce_dms)
+    announce_mentions: bool = False
     team_url: str = ""
     me: str = ""
     quiet: set[str] = field(default_factory=set)
@@ -640,23 +642,42 @@ def announced_as(entries: Sequence[str], uid: str, person: dict[str, str]) -> st
         if not e:
             continue
         if e.upper() == uid:
-            name = person.get("real") or person.get("display") or person.get("name") or "Someone"
-            return name.split()[0]
+            return _first_name(person)
         el = e.lower()
         if el in known or (" " not in el and any(n.split()[0] == el for n in known)):
             return e
     return None
 
 
+def announcing(cfg: Any) -> bool:
+    """Whether [slack] has anything to say out loud: live events, and DMs or mentions on."""
+    said = (
+        cfg.announce_mentions or cfg.announce_dms == "all" or (cfg.announce_dms == "listed" and cfg.announce)
+    )
+    return bool(cfg.token and cfg.app_token and said)
+
+
+def _first_name(person: dict[str, str]) -> str:
+    name = person.get("real") or person.get("display") or person.get("name") or "Someone"
+    return name.split()[0]
+
+
 def _alert(
     live: Live, conv: dict[str, Any], m: dict[str, Any], doc_id: str, names: Names, now: float | None
 ) -> dict[str, Any] | None:
-    if not live.announce or not (conv.get("is_im") or conv.get("is_mpim")):
-        return None
     uid = str(m.get("user") or "")
     if not uid or uid == live.me or is_bot(m) or m.get("subtype") not in EVENT_SUBTYPES:
         return None
-    who = announced_as(live.announce, uid, names.person(uid))
+    dm = bool(conv.get("is_im") or conv.get("is_mpim"))
+    who: str | None = None
+    mention = ""
+    if dm and live.announce_dms == "all":
+        who = announced_as(live.announce, uid, names.person(uid)) or _first_name(names.person(uid))
+    elif dm and live.announce_dms == "listed":
+        who = announced_as(live.announce, uid, names.person(uid))
+    elif not dm and live.announce_mentions and live.me and f"<@{live.me}>" in str(m.get("text") or ""):
+        who = announced_as(live.announce, uid, names.person(uid)) or _first_name(names.person(uid))
+        mention = f"#{conv.get('name')}" if conv.get("name") else "a channel"
     if who is None:
         return None
     now = time.time() if now is None else now
@@ -668,5 +689,8 @@ def _alert(
         if key in seen:
             return None
         seen[key] = now
-    return {"id": doc_id, "who": who, "channel": str(conv.get("id")), "ts": str(m["ts"]),
-            "group": bool(conv.get("is_mpim"))}  # fmt: skip
+    alert = {"id": doc_id, "who": who, "channel": str(conv.get("id")), "ts": str(m["ts"]),
+             "group": bool(conv.get("is_mpim"))}  # fmt: skip
+    if mention:
+        alert["mention"] = mention
+    return alert

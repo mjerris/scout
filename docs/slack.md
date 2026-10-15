@@ -155,6 +155,12 @@ say once:
   seconds pass with nothing new, at most a minute)
 - "Luca and Sam messaged you on Slack."
 
+`announce_dms` picks which DMs: `"listed"` (the default: only the people in
+`announce`), `"all"` (every DM and group DM), or `"off"`. `announce_mentions = true`
+also says an @-mention of you in a channel: "Luca mentioned you in #launch on Slack."
+(only a mention of you by name, not @here or @channel). A name in `announce` is said as
+written there; anyone else by their first name.
+
 Only who, never what they wrote, in every privacy mode. Your own messages, bots,
 edits, and messages in channels aren't announced; each message is announced at most
 once. It's said like the pulse: it waits for the floor, so it never talks over you

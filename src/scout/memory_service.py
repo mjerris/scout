@@ -375,7 +375,9 @@ async def slack_events_loop(
     would, and a DM from someone in [slack] announce queued for the app to say."""
     from . import slack, slack_events
 
-    live = slack.Live(slack.fetcher(cfg.token), st, cfg.skip, cfg.announce)
+    live = slack.Live(
+        slack.fetcher(cfg.token), st, cfg.skip, cfg.announce, cfg.announce_dms, cfg.announce_mentions
+    )
     loop = asyncio.get_running_loop()
 
     async def on_event(payload: dict[str, Any]) -> None:
