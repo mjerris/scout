@@ -337,7 +337,7 @@ class Assistant:
     ) -> None:
         ids = list(refs.clean(about))
         if ids and "refs" in inspect.signature(self.index.journal_add).parameters:
-            self.index.journal_add(ts, who, q, a, tools, private, refs=ids)  # type: ignore[call-arg]
+            self.index.journal_add(ts, who, q, a, tools, private, refs=ids)
         else:  # nothing to link, or a store from before refs
             self.index.journal_add(ts, who, q, a, tools, private)
 

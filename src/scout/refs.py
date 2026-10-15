@@ -394,7 +394,8 @@ async def send(r: dict[str, Any], store: Any = None) -> tuple[str, str]:
         raise ToolError("that record has no link")
     if str(r.get("id", "")).startswith("task:"):
         h = await _hit(str(r["id"]), _store() if store is None else store)
-        if h is not None and h.meta.get("reminder"):
+        # The task mirror set its reminder's URL to this link (reminder_url): nothing to add.
+        if h is not None and h.meta.get("reminder") and h.meta.get("reminder_url"):
             return "task", "It's in that task's reminder, on your phone."
     now = time.time()
     for u in [u for u, t in _sent.items() if now - t > SENT_KEEP_S]:
@@ -403,7 +404,7 @@ async def send(r: dict[str, Any], store: Any = None) -> tuple[str, str]:
         return "again", "The link is already in your Scout reminders."
     title = str((source_of(r) or r).get("title") or r.get("title") or "a record").strip()
     await reminders_mac.add_data(
-        {"title": f"Link: {title}"[:200], "list": LINK_LIST, "url": url, "notes": url}, mirror=True
+        {"title": f"Link: {title}"[:200], "list": LINK_LIST, "url": url}, mirror=True
     )
     _sent[url] = now
     return "reminder", "I put the link in your Scout reminders."

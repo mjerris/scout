@@ -39,7 +39,9 @@ class FakeStore:
                 "task:7", "task", "Send the revised vendor quote", owner="Pat Doe", **{"from": "meeting"}
             ),
             "task:8": _hit("task:8", "task", "Book flights"),
-            "task:9": _hit("task:9", "task", "Renew the lease", reminder="R-9", **{"from": "mail"}),
+            "task:9": _hit(
+                "task:9", "task", "Renew the lease", reminder="R-9", reminder_url=MAIL_URL, **{"from": "mail"}
+            ),
             "granola:n1": _hit("granola:n1", "meeting", "Vendor sync", who="Pat Doe"),
             "mail:41": _hit("mail:41", "mail", "Lease renewal", who="Sam Lee <sam@example.com>"),
         }
@@ -145,7 +147,6 @@ def test_pulse_task_then_link_to_that(store: FakeStore, added: list[dict[str, An
             "title": "Link: Vendor sync",
             "list": "Scout",
             "url": GRANOLA_URL,
-            "notes": GRANOLA_URL,
             "mirror": True,
         }
     ]
@@ -491,3 +492,18 @@ def test_phone_asks_for_the_link_to_what_the_room_heard(
     assert out["text"].endswith("I put the link in your Scout reminders.") and out["tier"] == "0"
     assert last.channel == "phone" and last.refs == ("task:7",)
     assert added and added[0]["url"] == GRANOLA_URL
+
+
+def test_pulse_never_says_them_owes_you() -> None:
+    async def none() -> dict[str, Any]:
+        return {"events": [], "reminders": []}
+
+    async def events(start: str, end: str) -> dict[str, Any]:
+        return {"events": []}
+
+    async def task_list() -> list[tasks.Task]:
+        return [_task(4, "Signed contract", owner="them", due="2026-10-09", **{"from": "meeting"})]
+
+    said = asyncio.run(pulse.Pulse(10, 15, events, none, task_list).check(NOW))
+    assert said == ["Someone owes you Signed contract, overdue since October 9; maybe follow up."]
+    assert refs.refs_of(said[0]) == ("task:4",)
