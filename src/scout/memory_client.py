@@ -199,6 +199,29 @@ class Store:
         out = self.c.call("/v1/docs/missing", {"kind": kind, "key": key, "limit": limit})
         return [_hit(h) for h in out["hits"]]
 
+    def people_candidates(self, limit: int = 400) -> list[str]:
+        return [str(e) for e in self.c.call("/v1/people/candidates", {"limit": limit})["emails"]]
+
+    def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]:
+        out = self.c.call(
+            "/v1/people/put", {"people": list(found), "complete": complete}, timeout=SLOW_TIMEOUT
+        )
+        return {k: int(v) for k, v in out.items()}
+
+    def person_search(
+        self,
+        person: str,
+        query: str,
+        kinds: Sequence[str] | None = None,
+        since: float | None = None,
+        limit: int = 8,
+        semantic: bool | None = True,
+    ) -> list[index.Hit]:
+        args = {"person": person, "query": query, "kinds": list(kinds or []), "since": since,
+                "limit": limit, "semantic": semantic}  # fmt: skip
+        timeout = None if semantic is False else SLOW_TIMEOUT
+        return [_hit(h) for h in self.c.call("/v1/people/search", args, timeout=timeout)["hits"]]
+
     def health(self) -> dict[str, Any]:
         return self.c.call("/v1/health", None, timeout=5)
 

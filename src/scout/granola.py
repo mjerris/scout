@@ -178,12 +178,20 @@ def documents(note: dict[str, Any]) -> list[dict[str, Any]]:
     who = ", ".join(p for p in people if p)[:300]
     ev = note.get("calendar_event") or {}
     start = _ts(ev.get("scheduled_start_time") or note.get("created_at"))
-    meta = {
+    meta: dict[str, Any] = {
         "source": "granola",
         "note": nid,
         "url": note.get("web_url"),
         "updated_at": note.get("updated_at"),
     }
+    # Who was there by address too: people.py links a contact to the meetings they were in.
+    listed = [
+        {"name": str(a.get("name") or ""), "email": str(a.get("email") or "").strip().lower()}
+        for a in note.get("attendees") or []
+        if isinstance(a, dict) and (a.get("name") or a.get("email"))
+    ]
+    if listed:
+        meta["attendees"] = listed[:50]
     summary = str(note.get("summary_markdown") or note.get("summary_text") or "")
     docs = [{"id": f"granola:{nid}", "title": title, "body": summary, "who": who, "ts": start, "meta": meta}]
     chunk: list[str] = []

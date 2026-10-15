@@ -16,6 +16,9 @@ rel); this module holds the plain-code rules around them:
   (`same_meeting`);
 - which journal turn a fact was told in (`says_remember`, `told_turn`).
 
+Which records are one person's (`same_person`, from a contact's person record) is
+people.py's.
+
 What a record's text points at (`mentions`, `discusses`: pasted links, GitHub items,
 meetings named or talked about) is xref.py's.
 """
@@ -35,11 +38,15 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-RELS = ("found_in", "merged_from", "same_as", "based_on", "about", "told_in", "mentions", "discusses")
+RELS = (
+    "found_in", "merged_from", "same_as", "based_on", "about", "told_in", "mentions", "discusses",
+    "same_person",
+)  # fmt: skip
 # The cross-references (xref.py): made by the store's upkeep from what a record's text says.
 XREF_RELS = ("mentions", "discusses")
 # Kinds whose text came from someone else (mail, meetings, Slack): private outside open mode.
-PRIVATE_KINDS = frozenset({"mail", "meeting", "slack"})
+# A person (people.py) is a contact's details: private too.
+PRIVATE_KINDS = frozenset({"mail", "meeting", "slack", "person"})
 # Scout's own records: their link is their page on Scout's web UI.
 OWN_KINDS = frozenset({"task", "note", "turn", "memory"})
 # GitHub issues, pull requests and commits (github.py): private when their repo is.

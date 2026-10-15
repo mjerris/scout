@@ -267,9 +267,10 @@ async def add_data(a: dict[str, Any], helper: Path | None = None, mirror: bool =
 
 
 def _url_arg(value: Any) -> str:
-    """A URL for a reminder (http(s) or message://), or "" for none; anything else is refused."""
+    """A URL for a reminder (http(s), message://, or a number to call: tel:+<digits>,
+    facetime-audio:<address>), or "" for none; anything else is refused."""
     url = text_arg(value, "url", 2000) if value else ""
-    if url and not re.match(r"^(?:https?|message)://\S+$", url):
+    if url and not re.match(r"^(?:(?:https?|message)://\S+|tel:\+?\d{3,20}|facetime-audio:[^\s/]+)$", url):
         raise ToolError("url must be an http(s) or message:// link")
     return url
 

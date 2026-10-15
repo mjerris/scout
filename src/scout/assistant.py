@@ -84,10 +84,13 @@ PHONE_TOOLS = {
         "list_timers",
     )
 }
+# Never from the phone: email (sending or drafting, which opens a window on the Mac) and
+# starting a call on the Mac (nobody is there to take it; call_link puts the number on the phone).
+NOT_BY_PHONE = ("call_start",)  # the phone puts the number in Reminders instead (call_link)
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
 # An answer built from these is private: mail and messages, and what's indexed from them.
 _PRIVATE_TOOL = re.compile(
-    r"^(?:mail|messages|contacts?)_|^(?:local_search|task_why|tasks_list|github_items|session_ask|session_replies)$"
+    r"^(?:mail|messages?|contacts?|call)_|^(?:local_search|task_why|tasks_list|github_items|session_ask|session_replies)$"
 )
 PREFETCH_DEADLINE_S = 4.0  # the context prefetch gives up after this; the fetch finishes in the background
 # A Claude turn says its progress line ("One moment.") no sooner than this after the turn
@@ -457,6 +460,10 @@ class Assistant:
             self._spawn(mailindex.loop(idle))
         if self.cfg.tasks.farm:
             self._spawn(taskfarm.loop(idle, lambda: self.tier1))
+        if self.cfg.contacts.enabled:  # one person across mail, meetings and Slack (people.py)
+            from . import people
+
+            self._spawn(people.loop())
         if self.cfg.starlink.enabled:
             self._spawn(starlink.watch(lambda text: self.announce(text, "starlink")))
         sc = self.cfg.slack
@@ -1580,7 +1587,8 @@ class Assistant:
         caller in two steps (phone_service.py). preview=True says what a tool would do
         without doing it; confirmed=True, only from the phone, runs one the caller said
         yes to. Email by phone has its own rules (mail_phone.py): drafts are saved with no
-        window, and a send is to known people, short, and read back first."""
+        window, and a send is to known people, short, and read back first. A call is never
+        started on the Mac from the phone (call_link puts the number on the phone)."""
         t = shared_tools.BY_NAME.get(name)
         if t is None:
             return {"status": "error", "error": f"unknown tool {name!r}"}
@@ -1609,7 +1617,7 @@ class Assistant:
                     return {"status": "error", "error": f"there's no note {nid}"}
                 spoken = f"Delete note {nid}, {h.title}?"
             return {"status": "ok", "text": spoken}
-        if agent == PHONE and t.asks and not confirmed:
+        if agent == PHONE and (name in NOT_BY_PHONE or (t.asks and not confirmed)):
             # Nobody in the room should be asked about a call they can't hear.
             return {"status": "error", "error": f"{name} can't be used from the phone"}
         if confirmed and agent != PHONE:

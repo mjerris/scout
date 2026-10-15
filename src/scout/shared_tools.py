@@ -5,7 +5,7 @@
 
 The app always does the work, so macOS's calendar and Mail permissions belong
 to it alone (Messages: to its scout-messages helper). Tools with `asks=True` change something outside the Mac or under
-the user's name (sending mail or a Slack message); the app confirms each call by voice whoever made it (room:
+the user's name (sending mail, a text or a Slack message, starting a call); the app confirms each call by voice whoever made it (room:
 brain.ALWAYS_ASK_TOOLS; other sessions: Assistant.run_shared_tool), and a
 "yes, always" never applies to them.
 
@@ -16,6 +16,7 @@ calendar notes) is decided by the privacy mode (privacy.py)."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import time
 from collections.abc import Awaitable, Callable
@@ -24,12 +25,14 @@ from typing import Any
 
 from . import (
     calendar_mac,
+    calls,
     freebusy,
     github,
     index,
     mail_mac,
     maps,
     messages_mac,
+    messages_send,
     notes,
     privacy,
     reference,
@@ -278,6 +281,48 @@ SHARED = (
         _obj({"id": _STR}, ["id"]),
         lambda a: privacy.current().contact_get(a.get("id")),
     ),
+    SharedTool(
+        "message_draft",
+        "Prepare a text (iMessage or SMS, from the Mac's Messages) to send with message_send. "
+        "Sends nothing. to is a name from Contacts ('Pat'), a phone number or an email address; "
+        "text is the message, in the user's words. Returns a draft id with who it goes to and "
+        "how, or the matching contacts when the name fits more than one: ask the user which.",
+        _obj({"to": _STR, "text": _STR}, ["to", "text"]),
+        messages_send.draft,
+    ),
+    SharedTool(
+        "message_send",
+        "Send a text drafted with message_draft (the user confirms by voice: the person and text "
+        "are read back). draft is the id message_draft gave.",
+        _obj({"draft": _STR}, ["draft"]),
+        messages_send.send,
+        asks=True,
+    ),
+    SharedTool(
+        "call_prepare",
+        "Get ready to call someone: to is a name from Contacts ('Pat') or a phone number. Starts "
+        "nothing. Returns a call id with the name and number (their iPhone or mobile first), or the "
+        "matching contacts when the name fits more than one: ask the user which.",
+        _obj({"to": _STR}, ["to"]),
+        calls.prepare,
+    ),
+    SharedTool(
+        "call_start",
+        "Start a call prepared with call_prepare on the Mac, through the user's iPhone (the user "
+        "confirms by voice first; then the Mac shows its call prompt). call is the id call_prepare "
+        "gave. Not from the phone: use call_link there.",
+        _obj({"call": _STR}, ["call"]),
+        calls.start,
+        asks=True,
+    ),
+    SharedTool(
+        "call_link",
+        "Put the number of a call prepared with call_prepare in the user's Scout reminders as a "
+        "link to tap on their iPhone (for when they're away from the Mac, as on the phone). call "
+        "is the id call_prepare gave.",
+        _obj({"call": _STR}, ["call"]),
+        calls.link,
+    ),
 )
 
 SHARED = (
@@ -297,9 +342,19 @@ SHARED = (
         "by meaning. Use it for 'what did I say about...', 'did we talk about...', 'where did I "
         "note...', 'what did we decide in the meeting about...'. kinds: any of memory, turn (past "
         "conversations), note, list, mail, meeting (Granola notes and transcripts), slack (Slack messages and threads) (empty = all); days: only the last N "
-        "days (0 = any time); limit 1-20 (default 12). Returns the best matches, best first: the right one is often not the first, so read them all.",
+        "days (0 = any time); limit 1-20 (default 12). person: only what one person said, sent or "
+        "was in (their Slack messages, their email, meetings they attended), a name from Contacts "
+        "('what did Pat say about the launch': query 'the launch', person 'Pat'; query may be empty "
+        "then for their newest). Returns the best matches, best first: the right one is often not the first, so read them all.",
         _obj(
-            {"query": _STR, "kinds": {"type": "array", "items": _STR}, "days": _INT, "limit": _INT}, ["query"]
+            {
+                "query": _STR,
+                "kinds": {"type": "array", "items": _STR},
+                "days": _INT,
+                "limit": _INT,
+                "person": _STR,
+            },
+            ["query"],
         ),
         lambda a: _local_search(a),
     ),
@@ -321,9 +376,11 @@ SHARED = (
         "tasks_list",
         "The user's open tasks, in priority order, each with its number, due date and why it's "
         "there. who: mine (what the user owes; default all), waiting (what others owe the user) "
-        "or all. query narrows by words and meaning. limit 1-50 (default 10). For 'what should I "
-        "work on', 'what's on my list', 'what am I waiting on'.",
-        _obj({"who": _STR, "query": _STR, "limit": _INT}),
+        "or all. owner: only what one person owes (a name: 'Pat' finds the tasks owed by Pat under "
+        "any name they go by in Contacts and Slack). query narrows by words and meaning. limit "
+        "1-50 (default 10). For 'what should I work on', 'what's on my list', 'what am I waiting "
+        "on', 'what does Pat owe me'.",
+        _obj({"who": _STR, "query": _STR, "limit": _INT, "owner": _STR}),
         lambda a: tasks.list_text(a),
     ),
     SharedTool(
@@ -467,13 +524,21 @@ SHARED = (
 
 async def _local_search(a: dict[str, Any]) -> str:
     query = str(a.get("query") or "").strip()
-    if not query or len(query) > 300:
+    who = " ".join(str(a.get("person") or "").split())
+    if (not query and not who) or len(query) > 300:
         raise ToolError("query must be 1-300 characters")
     kinds = [str(k) for k in a.get("kinds") or [] if str(k)] or None
     days = int(a.get("days") or 0)
     limit = max(1, min(int(a.get("limit") or 12), 20))
     since = time.time() - days * 86400 if days > 0 else None
-    hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
+    head = ""
+    if who:
+        found = await _person_hits(who, query, kinds, since, limit)
+        if isinstance(found, str):
+            return found
+        head, hits = found
+    else:
+        hits = await index.default().asearch(query, kinds=kinds, since=since, limit=limit)
     pol = privacy.current()
     if pol.mode == "strict":  # a hit on mail would say its text holds the words: none at all
         hits = [
@@ -488,12 +553,48 @@ async def _local_search(a: dict[str, Any]) -> str:
             elif h.kind == "task":  # a task found in mail or a meeting: what came from there
                 h.title, h.body = tasks.shown(h.meta, h.title, h.body, pol.mode)
     # Each with its record id, for open_link / send_link ("send me the link to that meeting").
-    return "\n".join(f"{index.format_hits([h])} (ref {refs.norm(h.id)})" for h in hits) or index.format_hits(
+    out = "\n".join(f"{index.format_hits([h])} (ref {refs.norm(h.id)})" for h in hits) or index.format_hits(
         []
     )
+    return head + out
 
 
-_PRIVATE_KINDS = ("mail", "meeting", "slack")  # their text stays on the Mac outside "open" privacy mode
+async def _person_hits(
+    who: str, query: str, kinds: list[str] | None, since: float | None, limit: int
+) -> tuple[str, list[index.Hit]] | str:
+    """local_search's `person`: their records (people.py's same_person links), or, when
+    Contacts or the store doesn't know them yet, the words with their name."""
+    from . import contacts_mac, people
+
+    store = index.default()
+    try:
+        p = await contacts_mac.one_person(who, "local_search")
+    except ToolError as exc:  # Contacts off, not allowed, or nobody by that name
+        p = None
+        note = f"({exc} Searching for the words and the name instead.)\n"
+    else:
+        if isinstance(p, str):
+            return p
+        note = ""
+    if p is not None:
+        pid = people.person_id(str(p.get("id")))
+        hits = await asyncio.to_thread(store.person_search, pid, query, kinds, since, limit)
+        if hits:
+            return f"(what {p.get('name')} said, sent or was in)\n", hits
+        note = (
+            f"(Nothing in Scout's store is linked to {p.get('name')} yet: the people pass links "
+            "them by email address. Searching for the words and the name instead.)\n"
+        )
+    name = str(p.get("name") if p is not None else who)
+    return note, await store.asearch(f"{query} {name}".strip(), kinds=kinds, since=since, limit=limit)
+
+
+_PRIVATE_KINDS = (
+    "mail",
+    "meeting",
+    "slack",
+    "person",
+)  # their text stays on the Mac outside "open" privacy mode
 
 
 async def _remember(a: dict[str, Any]) -> str:

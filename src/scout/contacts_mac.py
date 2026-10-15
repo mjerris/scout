@@ -288,6 +288,50 @@ async def handles_for(name: str, helper: Helper | None = None) -> tuple[str, lis
     ]
 
 
+_MOBILE = ("iphone", "mobile", "cell")
+_NOT_A_PHONE = ("fax", "pager")
+
+
+def phone_choices(p: dict[str, Any]) -> list[tuple[str, str]]:
+    """A person's phone numbers to call or text, as (number, label), iPhone and mobile
+    first; fax and pager numbers left out."""
+    phones = [
+        (str(x.get("value") or ""), str(x.get("label") or ""))
+        for x in p.get("phones") or []
+        if x.get("value") and not any(w in str(x.get("label") or "").lower() for w in _NOT_A_PHONE)
+    ]
+    return sorted(phones, key=lambda nl: not any(w in nl[1].lower() for w in _MOBILE))
+
+
+def dial_number(number: str) -> str:
+    """A phone number as Messages and the phone want it: +<digits> ("+1 (555) 010-2000"
+    -> "+15550102000"); a 10-digit number is taken as North American (+1)."""
+    digits = re.sub(r"\D", "", number)
+    if not digits:
+        raise ToolError(f"{number!r} isn't a phone number")
+    if number.strip().startswith("+"):
+        return "+" + digits
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return digits
+
+
+async def one_person(name: str, what: str, helper: Helper | None = None) -> dict[str, Any] | str:
+    """The one contact a spoken name means, or (a str) what to ask: the choices when it
+    fits several. ToolError when nobody in Contacts has it."""
+    people = await person_named(name, helper)
+    if not people:
+        raise Unclear(f"There's no {name} in Contacts: give a phone number or email address instead.")
+    if len(people) > 1:
+        return (
+            f"More than one contact matches {name}: {'; '.join(describe(p) for p in people)}. "
+            f"Ask the user which one, then call {what} again with that full name. Nothing was done."
+        )
+    return people[0]
+
+
 # --- saying it -------------------------------------------------------------------------
 
 

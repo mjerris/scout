@@ -17,7 +17,7 @@ from . import index, links
 CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
 KIND_NAMES = {
     "task": "Task", "note": "Note", "turn": "Conversation", "memory": "Fact", "meeting": "Meeting",
-    "mail": "Email", "slack": "Slack", "list": "List", "github": "GitHub",
+    "mail": "Email", "slack": "Slack", "list": "List", "github": "GitHub", "person": "Person",
 }  # fmt: skip
 REL_NAMES = {
     ("found_in", "out"): "Found in", ("found_in", "in"): "A task found here",
@@ -28,6 +28,7 @@ REL_NAMES = {
     ("told_in", "out"): "Told in", ("told_in", "in"): "A fact told here",
     ("mentions", "out"): "Mentions", ("mentions", "in"): "Mentioned by",
     ("discusses", "out"): "Discusses", ("discusses", "in"): "Discussed in",
+    ("same_person", "out"): "Theirs", ("same_person", "in"): "Same person",
 }  # fmt: skip
 # Fields shown for a task, in this order (the reminder's ids and titles aren't).
 TASK_FIELDS = ("status", "owner", "due", "importance", "urgency", "effort", "pin", "source", "github", "found",
@@ -77,7 +78,9 @@ def render(rec: dict[str, Any], hit: index.Hit | None) -> str:
                 + "".join(f"<tr><th>{e(k)}</th><td>{e(str(v))}</td></tr>" for k, v in rows)
                 + "</table>"
             )
-    if hit is not None and hit.body:
+    if hit is not None and kind == "person":
+        parts.append(_identities(hit.meta))
+    if hit is not None and hit.body and kind != "person":
         own = kind in links.OWN_KINDS
         body = hit.body if own else hit.snippet(OTHER_TEXT)
         body = body[:OWN_TEXT]
@@ -97,6 +100,29 @@ def render(rec: dict[str, Any], hit: index.Hit | None) -> str:
             items.append(line + "</li>")
         parts.append("<h2>Linked</h2><ul>" + "".join(items) + "</ul>")
     return _PAGE.format(title=e(title), body="\n".join(parts))
+
+
+def _identities(meta: dict[str, Any]) -> str:
+    """A person's other identities (people.py): the names they go by, their email
+    addresses Scout has seen, their Slack user."""
+    e = html.escape
+    rows = [("contact", str(meta.get("contact") or ""))]
+    rows += [("name", str(n)) for n in meta.get("names") or []]
+    rows += [("email", str(x)) for x in meta.get("emails") or []]
+    rows += [
+        (
+            "slack",
+            " · ".join(
+                v for v in (str(s.get("shown") or ""), str(s.get("real") or ""), str(s.get("id") or "")) if v
+            ),
+        )
+        for s in meta.get("slack") or []
+    ]
+    return (
+        "<h2>Also known as</h2><table>"
+        + "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows if v)
+        + "</table>"
+    )
 
 
 def not_found(id: str) -> str:

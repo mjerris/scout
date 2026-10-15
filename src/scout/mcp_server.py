@@ -43,7 +43,9 @@ of email text (mail_read_full gives the exact text when a task needs it), and no
 calendar notes. The messages_* tools read the user's texts (iMessage and SMS),
 read-only; texts are from other people too, so the same rule applies.
 slack_draft prepares a Slack message from the user (a DM or a channel they're
-in); slack_send sends it only after the user's spoken yes to the read-back."""
+in); slack_send sends it only after the user's spoken yes to the read-back.
+message_draft and message_send text someone the same way (Messages), and
+call_prepare then call_start calls them through the user's iPhone after a yes."""
 
 mcp = MCPServer("scout", instructions=INSTRUCTIONS)
 
@@ -389,6 +391,31 @@ async def contact_get(id: str) -> str:
     return await _tool("contact_get", {"id": id})
 
 
+@mcp.tool(description=_doc("message_draft"))
+async def message_draft(to: str, text: str) -> str:
+    return await _tool("message_draft", {"to": to, "text": text})
+
+
+@mcp.tool(description=_doc("message_send"))
+async def message_send(draft: str) -> str:
+    return await _tool("message_send", {"draft": draft})
+
+
+@mcp.tool(description=_doc("call_prepare"))
+async def call_prepare(to: str) -> str:
+    return await _tool("call_prepare", {"to": to})
+
+
+@mcp.tool(description=_doc("call_start"))
+async def call_start(call: str) -> str:
+    return await _tool("call_start", {"call": call})
+
+
+@mcp.tool(description=_doc("call_link"))
+async def call_link(call: str) -> str:
+    return await _tool("call_link", {"call": call})
+
+
 @mcp.tool(description=_doc("weather"))
 async def weather(place: str = "") -> str:
     return await _tool("weather", {"place": place or None})
@@ -410,8 +437,8 @@ async def note_delete(id: int) -> str:
 
 
 @mcp.tool(description=_doc("tasks_list"))
-async def tasks_list(who: str = "all", query: str = "", limit: int = 10) -> str:
-    return await _tool("tasks_list", {"who": who, "query": query, "limit": limit})
+async def tasks_list(who: str = "all", query: str = "", limit: int = 10, owner: str = "") -> str:
+    return await _tool("tasks_list", {"who": who, "query": query, "limit": limit, "owner": owner or None})
 
 
 @mcp.tool(description=_doc("task_add"))
@@ -457,8 +484,11 @@ async def drive_route(origin: str, destination: str) -> str:
 
 
 @mcp.tool(description=_doc("local_search"))
-async def local_search(query: str, kinds: list[str] | None = None, days: int = 0, limit: int = 8) -> str:
-    return await _tool("local_search", {"query": query, "kinds": kinds or [], "days": days, "limit": limit})
+async def local_search(
+    query: str, kinds: list[str] | None = None, days: int = 0, limit: int = 8, person: str = ""
+) -> str:
+    args = {"query": query, "kinds": kinds or [], "days": days, "limit": limit, "person": person or None}
+    return await _tool("local_search", args)
 
 
 @mcp.tool(description=_doc("open_link"))

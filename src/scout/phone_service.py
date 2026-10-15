@@ -84,16 +84,18 @@ ASK_TIMEOUT_S = 40.0  # Scout itself answers within 20 s ("still working" after 
 REFUSED = "This call isn't verified, so I can't do that."
 GOODBYE = "Sorry, this phone isn't paired with Scout. Goodbye."
 
+# Never by phone: starting a call on the Mac (call_link puts the number on the phone instead).
+NOT_BY_PHONE = ("call_start",)
 # Tools that never ask, in one step. Most only read; note_add, task_add, task_done,
 # task_update, remember and phone_timer change Scout's own notes, tasks, memory and Scout
 # reminder list (task_done also ticks off its reminder); mail_draft saves a message in
 # Mail's Drafts with no window (mail_phone.py), sending nothing.
 _ALL = (*shared_tools.SHARED, *shared_tools.NOT_DESK)
-PHONE_TOOLS = tuple(t for t in _ALL if not t.asks)
+PHONE_TOOLS = tuple(t for t in _ALL if not t.asks and t.name not in NOT_BY_PHONE)
 # Actions that change something: two steps by phone (prepare, then confirm_action after
 # the caller's yes, which a SignalWire semantic gate checks): reminders, events, deleting a
 # note, forgetting facts, Slack, email (mail_phone.py's rules), asking a Claude session.
-PHONE_ACTIONS = tuple(t for t in _ALL if t.asks)
+PHONE_ACTIONS = tuple(t for t in _ALL if t.asks and t.name not in NOT_BY_PHONE)
 # Email by phone: To only (at most 3), no Cc; reply_to replies to an inbox message.
 _PHONE_COMPOSE = {
     "type": "object",
@@ -193,7 +195,9 @@ steps: the tool says what it would do; read that back, and only after the user c
 says yes, call confirm_action with its code. Saving a note and adding, finishing or
 changing a task are done in one step (they're Scout's own lists): be sure what the user
 wants before calling them. A Slack message is slack_draft first, then slack_send, in the
-two steps like the others.
+two steps like the others; a text is message_draft, then message_send, the same way. You
+can't connect a call: for "call Pat", call_prepare, then offer to put the number in their
+Scout reminders (call_link).
 Email: mail_send takes the two steps: read back each address exactly, the subject and the
 message in one sentence, then confirm_action only after a clear yes. Only addresses the
 user said (at most three, no Cc), people in their Contacts or ones they've emailed before.
