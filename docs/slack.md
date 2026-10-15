@@ -98,12 +98,39 @@ outside open mode; in strict mode only "a task from a Slack message").
 ## Tasks
 
 The task farm (docs/tasks-design.md) reads Slack with the local model only, so the
-text never leaves the Mac. Before any AI: bot messages are skipped, and so are
-messages without an action cue ("can you", "please", "by Friday", "I'll", ...). A
-conversation's new messages are read together, in pieces of up to 3,000 characters,
-so a busy channel is a few reads, not one per message; the farm remembers the newest
-message read in each conversation (`state/tasks_farm.json`). A read that fails is tried
-again next pass before the rest of that conversation.
+text never leaves the Mac. It reads only what involves you, decided before any AI
+(`taskfarm.slack_involves`):
+
+- every DM and group DM you're in;
+- in a channel, a message or thread you wrote in, or one that @-mentions you or names
+  you ("Mike, can you ..."). Channel chatter between other people is skipped and never
+  reaches the model. Your Slack user id comes from `auth.test` (scout-memory keeps it in
+  `state/slack.json` as `me`); each stored item says who wrote each line and whom it
+  @-mentions by id (meta `lines`). Items stored before that go by the "Name:" labels
+  and @names, matched against your Slack names and `[tasks] me`. Until your id or a
+  name is known, only DMs are read. User-group mentions (`@eng`) don't count yet: they
+  would need the `usergroups:read` scope.
+
+Bot messages and messages without an action cue ("can you", "please", "by Friday",
+"I'll", ...) are skipped too. A conversation's new messages are read together, in pieces
+of up to 3,000 characters, so a busy channel is a few reads, not one per message; the
+farm remembers the newest message read in each conversation (`state/tasks_farm.json`),
+past skipped messages too. A read that fails is tried again next pass before the rest
+of that conversation.
+
+What it finds is kept only when it's your business (`taskfarm.slack_owner_ok`): in a
+DM, everything; a task for you needs you addressed (an @-mention or your name on the
+quoted line, or the same person's line just before it) or your own words, and in a
+group DM an unaddressed ask counts as to you; a task someone else owes ("waiting on
+Luca") needs you to have asked for it or been asked: the quoted line is yours or speaks
+to you, or it's that person answering a line that is. "Luca, can you follow up on
+ticket 61723?" "Sure" between two other people is no task of yours.
+
+Open tasks found in Slack before this rule were checked against it once, on the first
+farm pass after the update (`taskfarm.recheck_once`, state `slack_scope_checked`): one
+that fails is set `dropped` with the line "Dropped: from a channel conversation that
+didn't involve you" and its reminder completed, like `task_drop`. Set it open again to
+keep it. A task whose Slack messages are no longer stored is left open.
 
 ## Events
 

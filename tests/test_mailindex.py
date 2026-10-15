@@ -143,3 +143,18 @@ def test_meeting_notes_from_the_last_two_weeks_are_brought_in_once() -> None:
     assert ix.get("mailmeeting:77") is not None and ix.get("mailmeeting:40") is None
     queries.clear()
     assert asyncio.run(mailindex.backfill_meetings(ix, run, days=14)) == 0 and queries == []  # once
+
+
+def test_recipients_are_kept_for_the_task_farm() -> None:
+    """taskfarm.mail_to_me reads To: mail the user is only Cc'd on isn't theirs to act on."""
+    ix = index.default()
+    m = {"id": 81, "date": NOW.isoformat(), "sender": "Pat <pat@example.com>", "subject": "Plan", "read": True,
+         "to": ["Sam@Example.com"], "cc": ["mike@example.com"]}  # fmt: skip
+    mailindex._put(ix, m, "Sam, can you review the plan?")
+    h = ix.get("mail:81")
+    assert h is not None and h.meta["to"] == ["sam@example.com"] and h.meta["cc"] == ["mike@example.com"]
+    mailindex._put(
+        ix, {k: v for k, v in m.items() if k not in ("to", "cc")}, None
+    )  # listed again, no recipients
+    h = ix.get("mail:81")
+    assert h is not None and h.meta["to"] == ["sam@example.com"]

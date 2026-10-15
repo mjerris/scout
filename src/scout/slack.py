@@ -287,19 +287,25 @@ def documents(
         meta["urls"] = list(dict.fromkeys(labeled))[:20]
     base = {"title": title, "who": ", ".join(people)[:300], "ts": float(ts)}
     lines = [line(m, names) for m in msgs]
-    chunks: list[list[str]] = [[]]
+    # Who wrote each line and whom it @-mentions, by id: the task farm's scope (taskfarm.py).
+    by = [[str(m.get("user") or ""), list(dict.fromkeys(_MENTION.findall(str(m.get("text") or ""))))[:20]]
+          for m in msgs]  # fmt: skip
+    chunks: list[list[int]] = [[]]
     size = 0
-    for said in lines:
+    for i, said in enumerate(lines):
         if chunks[-1] and size + len(said) > CHUNK_CHARS:
             chunks.append([])
             size = 0
-        chunks[-1].append(said)
+        chunks[-1].append(i)
         size += len(said) + 1
     docs = []
     for n, chunk in enumerate(chunks, 1):
         doc_id = f"slack:{channel}:{ts}" + (f"#{n}" if n > 1 else "")
         part = {"part": n} if len(chunks) > 1 else {}
-        docs.append({**base, "id": doc_id, "body": "\n".join(chunk), "meta": {**meta, **part}})
+        text = "\n".join(lines[i] for i in chunk)
+        docs.append(
+            {**base, "id": doc_id, "body": text, "meta": {**meta, **part, "lines": [by[i] for i in chunk]}}
+        )
     return docs
 
 
@@ -490,11 +496,12 @@ def sync_pass(
     names = st_all.names(get)
     skipped = skip_set(skip)
     try:
-        team_url = str(get("auth.test", {}).get("url") or "")
+        who = get("auth.test", {})
+        team_url, me = str(who.get("url") or ""), str(who.get("user_id") or "")
     except SlackError as exc:
         if "invalid_auth" in str(exc) or "not_authed" in str(exc) or "token_revoked" in str(exc):
             raise
-        team_url = ""
+        team_url = me = ""
     quiet = muted(get)
     total = changed = 0
     try:
@@ -504,6 +511,8 @@ def sync_pass(
             st_all.data["muted"] = sorted(quiet)
             if team_url:
                 st_all.data["team_url"] = team_url
+            if me:  # the user's own id: the task farm reads what involves them (taskfarm.py)
+                st_all.data["me"] = me
         for conv in convs:
             cid = str(conv.get("id") or "")
             if left_out(conv, names, skipped, quiet):
@@ -565,6 +574,9 @@ class Live:
             return
         me = self.get("auth.test", {})
         self.team_url, self.me = str(me.get("url") or ""), str(me.get("user_id") or "")
+        if self.me:
+            with self.state.lock:
+                self.state.data["me"] = self.me
         self.quiet = muted(self.get)
         self.refreshed = now
 

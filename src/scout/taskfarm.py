@@ -5,9 +5,13 @@ last pass are read once:
 
 1. Filter, no AI: mail from no-reply senders, newsletters and notifications, mail
    without an action cue, and mail that is also stored as a meeting summary, is
-   skipped. Meetings go through once all their parts have been stored for a while.
-   Slack: bot messages and messages without an action cue are skipped, and a
-   conversation's new messages are read together (SLACK_CHARS at a time).
+   skipped, and so is mail sent to others that doesn't name the user (mail_to_me).
+   Meetings go through once all their parts have been stored for a while. Slack: only
+   what involves the user is read (slack_involves: DMs, group DMs, channel messages and
+   threads they wrote in or are mentioned in); bot messages and messages without an
+   action cue are skipped, and a conversation's new messages are read together
+   (SLACK_CHARS at a time). A task found in Slack is kept only when it's the user's
+   business (slack_owner_ok).
 2. Extract: meetings by Claude, email and Slack by the local model (it stays on the Mac), with one
    prompt; in strict privacy mode meeting summaries that came by email go to the local
    model too. The answer is JSON: title, owner ("me" or a name), due, importance,
@@ -38,7 +42,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import index, ledger, privacy, reminders_mac, syncstate, tasks, xref
+from . import index, ledger, privacy, reminders_mac, slack, syncstate, tasks, xref
 from .config import DATA, load
 from .mac import ToolError
 
@@ -195,7 +199,148 @@ def worth_reading(h: index.Hit) -> bool:
         return True
     if _NO_TASKS_FROM.search(h.who or "") or h.meta.get("bulk"):
         return False
-    return bool(_ACTION_CUE.search(f"{h.title}\n{h.body}"))
+    return bool(_ACTION_CUE.search(f"{h.title}\n{h.body}")) and mail_to_me(h)
+
+
+def _my_names() -> list[str]:
+    """The user's names from [tasks] me (addresses aside), full and first, lower case."""
+    out: list[str] = []
+    for m in load().tasks.me:
+        name = " ".join(re.sub(r"<[^>]*>", " ", m).split()).lower()
+        if not name or "@" in name:
+            continue
+        for n in (name, name.split()[0]):
+            if len(n) >= 3 and n not in out:
+                out.append(n)
+    return out
+
+
+def _names_in(text: str, names: Sequence[str]) -> bool:
+    """Whether one of the names is in the text as a word ("Mike, can you", "@Mike J")."""
+    low = text.lower()
+    return any(re.search(rf"(?<![\w.]){re.escape(n)}(?![\w@])", low) for n in names)
+
+
+def mail_to_me(h: index.Hit) -> bool:
+    """Mail is read for tasks when it was sent to the user (one of their [tasks] me
+    addresses is in To), or names them in its text ("Mike, can you ..."): a thread they're
+    only Cc'd on, or a list's mail, doesn't make tasks unless it speaks to them. Mail stored
+    before To was kept, or with no address of the user's known, is read as before."""
+    to = h.meta.get("to")
+    mine = {a.lower() for m in load().tasks.me if (a := tasks._address(m))}
+    if not isinstance(to, list) or not mine:
+        return True
+    if any(str(a).lower() in mine for a in to):
+        return True
+    return _names_in(h.body, _my_names())
+
+
+# --- Slack: what involves the user ------------------------------------------------------------
+
+
+class SlackMe(NamedTuple):
+    """The user in Slack: their user id (auth.test, kept in state/slack.json by
+    scout-memory) and the names they go by there and in [tasks] me, lower case."""
+
+    id: str
+    names: tuple[str, ...]
+
+
+def slack_me(path: Path | None = None) -> SlackMe:
+    st = slack.load_state(path or slack.STATE)
+    uid = str(st.get("me") or "")
+    names = list(_my_names())
+    if uid:
+        person = (st.get("people") or {}).get(uid) or {}
+        for n in (str((st.get("users") or {}).get(uid) or ""), *(str(v) for v in person.values())):
+            n = " ".join(n.split()).lower()
+            for x in (n, n.split()[0] if n else ""):
+                if len(x) >= 3 and x not in names:
+                    names.append(x)
+    return SlackMe(uid, tuple(names))
+
+
+class Line(NamedTuple):
+    text: str  # without its "Name: " label
+    by_me: bool  # the user wrote it
+    at_me: bool  # it @-mentions the user, or names them ("Mike, can you ...")
+    who: str = ""  # who wrote it, as labelled, lower case
+
+
+def conversation_kind(title: str) -> str:
+    """ "dm", "group" (a group DM) or "channel", from the title slack.title_of gives."""
+    if title.startswith("DM with "):
+        return "dm"
+    return "group" if title.startswith("Group DM with ") else "channel"
+
+
+def slack_lines(h: index.Hit, me: SlackMe) -> list[Line]:
+    """An item's lines: who wrote each and whether it speaks to the user. By id where the
+    item says (slack.documents' "lines"); items stored before that go by the "Name:" label
+    and @names."""
+    raw = h.body.split("\n")
+    ids = h.meta.get("lines")
+    by_id = isinstance(ids, list) and len(ids) == len(raw) and bool(me.id)
+    out = []
+    for i, ln in enumerate(raw):
+        m = _SPEAKER.match(ln)
+        who, text = (ln[: m.end() - 2].strip(), ln[m.end() :]) if m else ("", ln)
+        if by_id:
+            uid, at = ids[i][0], ids[i][1] if len(ids[i]) > 1 else []  # type: ignore[index]
+            by_me, at_me = uid == me.id, me.id in at
+        else:
+            by_me, at_me = bool(who) and who.lower() in me.names, False
+        at_me = at_me or (not by_me and _names_in(text, me.names))
+        out.append(Line(text, by_me, at_me, who.lower()))
+    return out
+
+
+def slack_involves(h: index.Hit, me: SlackMe) -> bool:
+    """Whether a Slack item is the user's to read for tasks: a DM or group DM they're in,
+    or a channel message or thread they wrote in or are @-mentioned or named in. Without
+    knowing who the user is (no id, no names), only DMs."""
+    if conversation_kind(str(h.meta.get("conversation") or h.title)) != "channel":
+        return True
+    if not me.id and not me.names:
+        return False
+    return any(x.by_me or x.at_me for x in slack_lines(h, me))
+
+
+def _evidence_line(lines: Sequence[Line], evidence: str) -> int | None:
+    """The line a found task's quote is from (its first piece; across a line break, the
+    line its first words are on)."""
+    parts = [_norm(p) for p in re.split(r"\.\.\.|…", evidence)]
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    norm = [f" {_norm(x.text)} " for x in lines]
+    for probe in (parts[0], " ".join(parts[0].split()[:4])):
+        for i, n in enumerate(norm):
+            if f" {probe} " in n:
+                return i
+    return None
+
+
+def slack_owner_ok(owner_me: bool, kind: str, lines: Sequence[Line], evidence: str, owner: str = "") -> bool:
+    """Whether a task found in Slack is the user's business. In a DM, all of it. A task
+    for the user needs them addressed (an @-mention or their name on the quoted line, or
+    on the line just before it from the same person) or their own words, except in a
+    group DM, where an unaddressed ask is to them too. A task someone else (`owner`) owes
+    is kept only when the user asked for it or was asked: the quoted line is the user's
+    or speaks to them, or it's the owner answering the line before, which is the user's
+    or speaks to them. Two other people agreeing something isn't the user's task."""
+    if kind == "dm":
+        return True
+    i = _evidence_line(lines, evidence)
+    if i is None:
+        return False
+    here, before = lines[i], lines[i - 1] if i > 0 else None
+    if owner_me:
+        same = bool(before and before.who and before.who == here.who)
+        return kind == "group" or here.by_me or here.at_me or bool(before and same and before.at_me)
+    first = _first(owner)
+    answers = bool(first and here.who and _first(here.who) == first)
+    return here.by_me or here.at_me or bool(before and answers and (before.by_me or before.at_me))
 
 
 def parse_found(answer: str) -> list[dict[str, Any]] | None:
@@ -259,41 +404,54 @@ class SlackRead(NamedTuple):
     text: str
     last: float  # the newest message ts in it: the conversation's checkpoint once read
     worth: bool  # whether anything in it passed the filter
+    kind: str = "channel"  # conversation_kind: "dm", "group" or "channel"
+    lines: tuple[Line, ...] = ()  # the lines read, for the owner rule (slack_owner_ok)
 
 
-def slack_since(store: index.Store, since: float, read_to: dict[str, float]) -> list[list[SlackRead]]:
+def slack_since(
+    store: index.Store, since: float, read_to: dict[str, float], me: SlackMe | None = None
+) -> list[list[SlackRead]]:
     """Each Slack conversation's messages newer than what was read of it (read_to: channel
-    -> the newest ts read), oldest first, in reads of up to SLACK_CHARS."""
+    -> the newest ts read), oldest first, in reads of up to SLACK_CHARS. Only items that
+    involve the user (slack_involves) are in a read's text; the rest move the checkpoint
+    without a read."""
+    me = me if me is not None else slack_me()
     by_chan: dict[str, list[index.Hit]] = {}
     for h in store.recent(["slack"], limit=20000, since=since):
         ch = str(h.meta.get("channel") or "")
         if ch and _slack_ts(h) > read_to.get(ch, 0.0):
             by_chan.setdefault(ch, []).append(h)
-    out = [_slack_reads(ch, hs) for ch, hs in by_chan.items()]
+    out = [_slack_reads(ch, hs, me) for ch, hs in by_chan.items()]
     out.sort(key=lambda rs: rs[0].when)
     return out
 
 
-def _slack_reads(ch: str, hs: list[index.Hit]) -> list[SlackRead]:
+def _slack_reads(ch: str, hs: list[index.Hit], me: SlackMe) -> list[SlackRead]:
     """One conversation's new items, oldest first, put into reads of up to SLACK_CHARS."""
     hs.sort(key=lambda h: (_slack_ts(h), h.ts, int(h.meta.get("part") or 0)))
     title = str(hs[0].meta.get("conversation") or hs[0].title)
+    kind = conversation_kind(title)
+    mine = {id(h) for h in hs if slack_involves(h, me)}
     groups: list[list[index.Hit]] = [[]]
     size = 0
     for h in hs:
-        n = min(len(h.body), SLACK_CHARS)
+        n = min(len(h.body), SLACK_CHARS) if id(h) in mine else 0
         if groups[-1] and size + n > SLACK_CHARS:
             groups.append([])
             size = 0
         groups[-1].append(h)
-        size += n + 2
+        size += n + 2 if n else 0
     reads = []
     for group in groups:
         last = _slack_ts(group[-1])
-        body = "\n\n".join(h.body[:SLACK_CHARS] for h in group)
+        read = [h for h in group if id(h) in mine]
+        body = "\n\n".join(h.body[:SLACK_CHARS] for h in read)
         text = f"Slack conversation: {title}\n\n{body}"[: SLACK_CHARS + 200]
-        worth = any(worth_reading(h) for h in group)
-        reads.append(SlackRead(f"slack:{ch}@{last:.6f}", ch, title, group[0].ts, text, last, worth))
+        worth = any(worth_reading(h) for h in read)
+        lines = tuple(x for h in read for x in slack_lines(h, me))
+        reads.append(
+            SlackRead(f"slack:{ch}@{last:.6f}", ch, title, group[0].ts, text, last, worth, kind, lines)
+        )
     return reads
 
 
@@ -494,6 +652,7 @@ async def farm_pass(
     async def read(
         key: str, label: str, what: str, text: str, extract: Extract,
         when: float | None = None, people: Sequence[str] = (),
+        keep: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:  # fmt: skip
         if extract in down:
             return
@@ -511,6 +670,11 @@ async def farm_pass(
         kept = [t for t in found if evidenced(t, text)]
         if len(kept) < len(found):
             log.info("tasks: %s: %d found tasks dropped (quote not in the text)", key, len(found) - len(kept))
+        if keep is not None and len(mine := [t for t in kept if keep(t)]) < len(kept):
+            log.info(
+                "tasks: %s: %d found tasks dropped (not the user's business)", key, len(kept) - len(mine)
+            )
+            kept = mine
         items = xref.github_refs(text, allow)
         async with adding:
             a, m = await add_found(kept[:MAX_FOUND], key, label, store, when, people, items)
@@ -556,9 +720,10 @@ async def farm_pass(
                 functools.partial(read, h.id, label, "an email", text, mail_extract, h.ts, [h.who])
             )
         read_to: dict[str, float] = state.setdefault("slack", {})
+        me_slack = slack_me()
         local_reads += [
-            functools.partial(read_slack, reads, read, read_to, seen, counts, mail_extract)
-            for reads in await asyncio.to_thread(slack_since, store, start, read_to)
+            functools.partial(read_slack, reads, read, read_to, seen, counts, mail_extract, me_slack)
+            for reads in await asyncio.to_thread(slack_since, store, start, read_to, me_slack)
         ]
 
     async def in_turn() -> None:
@@ -583,19 +748,113 @@ async def read_slack(
     seen: set[str],
     counts: dict[str, int],
     extract: Extract,
+    me: SlackMe | None = None,
 ) -> None:
     """A conversation's new messages, read by read in order; its checkpoint moves past each
-    one read (or skipped by the filter), and stops at one that wasn't (next pass)."""
+    one read (or skipped by the filter), and stops at one that wasn't (next pass). A found
+    task is kept only when it's the user's business (slack_owner_ok)."""
+    me = me if me is not None else slack_me()
     for r in reads:
         if r.worth and r.key not in seen:
             day = dt.date.fromtimestamp(r.when)
+
+            def keep(t: dict[str, Any], r: SlackRead = r) -> bool:
+                return slack_owner_ok(_owner_is_me(t, me), r.kind, r.lines, str(t.get("evidence") or ""),
+                                      str(t.get("owner") or ""))  # fmt: skip
+
             await read(r.key, f"the Slack conversation {r.title[:LABEL_CHARS]!r} on {day:%b} {day.day}",
-                       "a Slack conversation", r.text, extract, r.when)  # fmt: skip
+                       "a Slack conversation", r.text, extract, r.when, keep=keep)  # fmt: skip
             if r.key not in seen:
                 return
         elif not r.worth:
             counts["skipped"] += 1
         read_to[r.channel] = max(read_to.get(r.channel, 0.0), r.last)
+
+
+# --- open Slack tasks found before the scope rule (once) -------------------------------------
+
+DROPPED_NOTE = "Dropped: from a channel conversation that didn't involve you"
+_SLACK_PARA = re.compile(
+    r'^From the Slack conversation .*?: "(?P<ev>.*)" \((?P<ch>slack:[^@)\s]+)@(?P<ts>[\d.]+)\)\s*$'
+)
+_OTHER_PARA = re.compile(r"^From the (?:email|meeting) ")
+
+
+def _slack_verdict(
+    by_chan: dict[str, list[index.Hit]], ch: str, last: float, evidence: str, owner: str, me: SlackMe
+) -> bool | None:
+    """Whether one Slack source of a task passes the rule now: True, False, or None when
+    its messages aren't in the store any more (it can't be told)."""
+    for h in sorted(by_chan.get(ch, []), key=_slack_ts, reverse=True):
+        if _slack_ts(h) > last + 1e-6:
+            continue
+        lines = slack_lines(h, me)
+        if _evidence_line(lines, evidence) is None:
+            continue
+        owner_me = tasks.is_me(owner) or owner.lower() in me.names
+        kind = conversation_kind(str(h.meta.get("conversation") or h.title))
+        return slack_involves(h, me) and slack_owner_ok(owner_me, kind, lines, evidence, owner)
+    return None
+
+
+async def recheck_slack_tasks(store: index.Store, me: SlackMe, dry_run: bool = False) -> dict[str, int]:
+    """Open tasks the farm found in Slack, checked against what it reads now
+    (slack_involves, slack_owner_ok). One that fails every Slack source it came from (and
+    came from nothing else) is dropped, with the line DROPPED_NOTE, and its reminder
+    completed, as task_drop does; set it open again to keep it. A source whose messages
+    are gone is left open. Returns counts only (checked, dropped, kept, unknown)."""
+    counts = {"checked": 0, "dropped": 0, "kept": 0, "unknown": 0}
+    found = [t for t in await asyncio.to_thread(tasks.all_tasks, store)
+             if t.status == "open" and t.fields.get("from") == "slack"]  # fmt: skip
+    if not found:
+        return counts
+    by_chan: dict[str, list[index.Hit]] = {}
+    for h in await asyncio.to_thread(store.recent, ["slack"], 100000):
+        by_chan.setdefault(str(h.meta.get("channel") or ""), []).append(h)
+    today = dt.date.today().isoformat()
+    for t in found:
+        counts["checked"] += 1
+        verdicts: list[bool | None] = []
+        for para in t.context.splitlines():
+            if _OTHER_PARA.match(para):
+                verdicts.append(True)
+            elif m := _SLACK_PARA.match(para):
+                ch = m["ch"].removeprefix("slack:")
+                verdicts.append(_slack_verdict(by_chan, ch, float(m["ts"]), m["ev"], t.owner, me))
+        if not verdicts or any(v is True for v in verdicts):
+            counts["kept"] += 1
+        elif any(v is None for v in verdicts):
+            counts["unknown"] += 1
+        else:
+            counts["dropped"] += 1
+            if not dry_run:
+                await asyncio.to_thread(
+                    store.task_update, t.n, {"status": "dropped", "done": today}, DROPPED_NOTE
+                )
+                await tasks._mirror_done(t)
+                log.info("task %d dropped: from a Slack conversation that didn't involve the user", t.n)
+    return counts
+
+
+async def recheck_once(store: index.Store, me: SlackMe, state_path: Path = STATE) -> dict[str, int] | None:
+    """recheck_slack_tasks, once (state "slack_scope_checked"), once the user's Slack id
+    is known (scout-memory keeps it from auth.test). None when it isn't run."""
+    if not me.id:
+        return None
+    state = load_state(state_path)
+    if state.get("slack_scope_checked"):
+        return None
+    counts = await recheck_slack_tasks(store, me)
+    state = load_state(state_path)
+    state["slack_scope_checked"] = dt.date.today().isoformat()
+    save_state(state, state_path)
+    log.info("tasks: open Slack tasks checked against what involves you: %s", counts)
+    return counts
+
+
+def _owner_is_me(t: dict[str, Any], me: SlackMe) -> bool:
+    owner = " ".join(str(t.get("owner") or "me").split())
+    return tasks.is_me(owner) or owner.lower() in me.names
 
 
 def _unmirrored(store: index.Store) -> int:
@@ -618,6 +877,7 @@ async def loop(
                 with syncstate.track("tasks", every) as p:
                     c = await farm_pass(store(), claude_extract, local_extract(local()))
                     p.added, p.updated = c["added"], c["merged"]
+                    await recheck_once(store(), slack_me())
                 if c["read"]:
                     log.info(
                         "tasks: farm read %d (%d added, %d merged, %d skipped)",

@@ -106,6 +106,11 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   "config dot toml") and common mishearings ("Claud" → "Claude"). Built-in
   defaults are in `src/scout/pronounce_default.txt`; add your own in
   `pronounce.txt` in the project root (`TTS|STT  pattern  replacement`).
+  Ticket, issue, PR, case, order and similar numbers, and bare integers of five or
+  more digits, are said digit by digit ("ticket 61723" → "ticket 6 1 7 2 3", "#117" →
+  "number 1 1 7"); money, quantities ("61,000", "12000 steps"), years, times and short
+  numbers ("PR 6", "Highway 61") stay numbers (`speech.speak_ids`). On the phone the
+  agent is told the same, and answers Scout pushes into a call are put that way.
 - **Changing the app by voice:** the voice agent can't edit this project. When
   you ask it to change how it listens, talks or asks, it calls its
   `request_app_change` tool, which appends to `state/change-requests.jsonl`
@@ -858,8 +863,9 @@ in the messages of every conversation you're in (channels, private channels, DMs
 group DMs; archived and muted ones left out, and any named in `[slack] skip`) every
 15 minutes, each from where it left off (the last two weeks, the first time). A
 thread is one item with its replies. The task farm reads a conversation's new
-messages together with the local model, so Slack text stays on the Mac; bot messages
-and messages without an action cue are skipped. Like mail, Slack text reaches Claude
+messages together with the local model, so Slack text stays on the Mac; it reads only
+DMs, group DMs and channel messages or threads you wrote in or are mentioned in, and
+bot messages and messages without an action cue are skipped. Like mail, Slack text reaches Claude
 only in open privacy mode. With an app-level token (`xapp-...`) in `[slack] app_token`,
 messages also arrive live over Socket Mode (the poll then runs hourly as the backstop),
 a DM from someone in `[slack] announce` is said out loud ("Luca messaged you on

@@ -3,6 +3,7 @@
     uv run python scripts/bench_taskfarm.py run [--configs A,B,C] [--days 30] [--budget 15]
     uv run python scripts/bench_taskfarm.py judge
     uv run python scripts/bench_taskfarm.py report
+    uv run python scripts/bench_taskfarm.py slack    (synthetic Slack set, local model)
 
 Reads the meetings stored in the last --days from the live memory store, READ-ONLY
 (memory.db opened with mode=ro; nothing in Scout's state, task list or Reminders is
@@ -574,12 +575,223 @@ def report() -> None:
             print(ln)
 
 
+# --- Slack, synthetic: what the farm reads and keeps ------------------------------------
+
+# Conversations made up for the bench (never the user's): (channel, title, lines, the tasks
+# that belong on the user's list as (owner, words one of which is in the title)). A line is
+# (uid, name, text, mentioned uids). The user is "Mike J" (UME).
+_P, _L, _S, _D, _M = ("U1", "Pat Doe"), ("U2", "Luca"), ("U3", "Sam"), ("U4", "Dana"), ("UME", "Mike J")
+SLACK_ME = taskfarm.SlackMe("UME", ("mike j", "mike"))
+SLACK_SET: list[
+    tuple[str, str, list[tuple[tuple[str, str], str, list[str]]], list[tuple[str, tuple[str, ...]]]]
+] = [
+    (
+        "D1",
+        "DM with Pat Doe",
+        [(_P, "Hey, can you send me the deck for the board meeting by Friday?", [])],
+        [("me", ("deck",))],
+    ),
+    (
+        "D2",
+        "DM with Luca",
+        [
+            (_M, "did you get anywhere with the crash?", []),
+            (_L, "Yes, I'll send you the logs from the crash tomorrow morning", []),
+        ],
+        [("luca", ("log",))],
+    ),
+    (
+        "C1",
+        "#support",
+        [
+            (_P, "Luca, can you follow up with the customer on ticket 61723?", []),
+            (_L, "Sure, I'll follow up with them after lunch", []),
+        ],
+        [],
+    ),
+    (
+        "C2",
+        "#eng",
+        [
+            (_S, "Dana, could you review my PR for the parser before the release?", []),
+            (_D, "Yep, I'll review it this afternoon", []),
+        ],
+        [],
+    ),
+    (
+        "C3",
+        "#finance",
+        [(_P, "@Mike J can you approve the Q4 travel budget by Wednesday?", ["UME"])],
+        [("me", ("budget", "approve"))],
+    ),
+    (
+        "C4",
+        "#ops",
+        [
+            (_M, "Luca, can you update the on-call runbook with the new escalation steps?", []),
+            (_L, "Will do, I'll update the runbook today", []),
+        ],
+        [("luca", ("runbook",))],
+    ),
+    (
+        "C5",
+        "#release",
+        [
+            (_M, "I'll send out the release notes this evening", []),
+            (_P, "Luca, can you rotate the staging API keys?", []),
+            (_L, "On it, I'll rotate them tonight", []),
+        ],
+        [("me", ("release notes", "notes"))],
+    ),
+    (
+        "G1",
+        "Group DM with pat, luca, mike",
+        [(_P, "Can you book the big conference room for Tuesday's review?", [])],
+        [("me", ("room", "book"))],
+    ),
+    (
+        "G2",
+        "Group DM with pat, luca, mike",
+        [
+            (_P, "Luca, can you fix the nightly build before standup?", []),
+            (_L, "Yes, I'll fix the build first thing", []),
+        ],
+        [],
+    ),
+    ("C6", "#general", [(_S, "Reminder: please fill out the benefits survey by Friday", [])], []),
+    ("C7", "#deploys", [(_D, "I'll deploy the hotfix for the login bug tonight after 9", [])], []),
+    (
+        "C8",
+        "#legal",
+        [(_P, "Mike, can you review the vendor contract before Thursday's call?", [])],
+        [("me", ("contract",))],
+    ),
+    (
+        "C9",
+        "#data",
+        [
+            (_S, "We'll need to migrate the analytics database next week", []),
+            (_D, "I can write the migration plan by Monday", []),
+        ],
+        [],
+    ),
+    (
+        "D3",
+        "DM with Pat Doe",
+        [
+            (_P, "how are the Q3 numbers looking?", []),
+            (_M, "I'll get you the final Q3 numbers by Monday", []),
+        ],
+        [("me", ("numbers",))],
+    ),
+    (
+        "C10",
+        "#finance",
+        [
+            (_S, "@Luca can you send the October invoice to finance?", ["U2"]),
+            (_L, "Sure, I'll send it today", []),
+        ],
+        [],
+    ),
+    (
+        "C11",
+        "#legal",
+        [(_P, "@Mike J and @Luca, please both sign the updated NDA by Friday", ["UME", "U2"])],
+        [("me", ("nda", "sign"))],
+    ),
+]
+
+
+def slack_hits(now: float) -> list[index.Hit]:
+    """The set as stored items (slack.documents' shape: "Name: text" lines, "lines" ids)."""
+    out = []
+    for i, (ch, title, lines, _) in enumerate(SLACK_SET):
+        t = f"{now - 3600 + i:.6f}"
+        body = "\n".join(f"{who[1]}: {text}" for who, text, _ in lines)
+        meta = {"source": "slack", "channel": ch, "conversation": title, "ts": t, "last_ts": t, "bot": False,
+                "lines": [[who[0], at] for who, _, at in lines]}  # fmt: skip
+        out.append(index.Hit(f"slack:{ch}:{t}", "slack", title, body, lines[0][0][1], float(t), meta))
+    return out
+
+
+def slack_score(found: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """Each found task (channel, task) against the labels: right when its conversation
+    expects a task with that owner (me, or the first name) and a title word."""
+    expected = {(ch, k): e for ch, _, _, es in SLACK_SET for k, e in enumerate(es)}
+    hit: set[tuple[str, int]] = set()
+    right = 0
+    for ch, t in found:
+        owner = (
+            "me"
+            if tasks.is_me(str(t.get("owner") or "me")) or str(t.get("owner") or "").lower() in SLACK_ME.names
+            else str(t.get("owner") or "").lower().split(" ")[0]
+        )
+        title = str(t.get("title") or "").lower()
+        match = next((key for key, (o, words) in expected.items() if key[0] == ch and key not in hit
+                      and o == owner and any(w in title for w in words)), None)  # fmt: skip
+        if match is not None:
+            hit.add(match)
+            right += 1
+    n = len(found)
+    return {"found": n, "right": right, "precision": round(right / n, 3) if n else None,
+            "recall": round(len(hit) / len(expected), 3), "expected": len(expected)}  # fmt: skip
+
+
+async def slack_bench(model_name: str) -> None:
+    """The farm's Slack path over SLACK_SET with the local model, before (every
+    conversation read, every quoted task kept) and after (taskfarm.slack_involves and
+    slack_owner_ok). Prints counts and rates; the set is synthetic."""
+    from scout.tier1 import LocalModel
+
+    now = time.time()
+    m = LocalModel(model_name)
+    await m.load()
+    extract = taskfarm.local_extract(m)
+    assert extract is not None
+    me = "Mike J"
+    system = taskfarm.system_prompt(
+        "a Slack conversation", me, dt.date.fromtimestamp(now), dt.date.fromtimestamp(now)
+    )
+    results: dict[str, Any] = {}
+    for mode in ("before", "after"):
+        found: list[tuple[str, dict[str, Any]]] = []
+        calls = 0
+        t0 = time.monotonic()
+        for h in slack_hits(now):
+            ch = str(h.meta["channel"])
+            if mode == "before":
+                reads = taskfarm._slack_reads(ch, [h], SLACK_ME)
+                reads = [r._replace(text=f"Slack conversation: {h.title}\n\n{h.body}",
+                                    worth=taskfarm.worth_reading(h)) for r in reads]  # fmt: skip
+            else:
+                reads = taskfarm._slack_reads(ch, [h], SLACK_ME)
+            for r in reads:
+                if not r.worth:
+                    continue
+                calls += 1
+                got = taskfarm.parse_found(await extract(system, r.text)) or []
+                got = [t for t in got if taskfarm.evidenced(t, r.text)]
+                if mode == "after":
+                    got = [t for t in got if taskfarm.slack_owner_ok(taskfarm._owner_is_me(t, SLACK_ME), r.kind, r.lines,
+                                                                     str(t.get("evidence") or ""), str(t.get("owner") or ""))]  # fmt: skip
+                found += [(ch, t) for t in got[: taskfarm.MAX_FOUND]]
+        results[mode] = {
+            **slack_score(found),
+            "model_calls": calls,
+            "seconds": round(time.monotonic() - t0, 1),
+        }
+        print(mode, json.dumps(results[mode]), flush=True)
+        results[mode]["tasks"] = [{"channel": ch, **t} for ch, t in found]  # synthetic: fine to keep
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "slack.json").write_text(json.dumps(results, indent=1))
+
+
 # --- main ----------------------------------------------------------------------------
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["inputs", "run", "judge", "report"])
+    ap.add_argument("cmd", choices=["inputs", "run", "judge", "report", "slack"])
     ap.add_argument("--configs", default="A,B,C,D,D2,E,E2,F,F2")
     ap.add_argument("--days", type=float, default=30.0)
     ap.add_argument("--budget", type=float, default=15.0)
@@ -589,6 +801,9 @@ def main() -> None:
     now = time.time()
     if a.cmd == "report":
         report()
+        return
+    if a.cmd == "slack":
+        asyncio.run(slack_bench(load().claude.local_model))
         return
     if a.cmd == "judge":
         asyncio.run(judge(a.budget, a.days, now))
