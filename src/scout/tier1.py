@@ -286,6 +286,7 @@ class LocalModel:
         self.name, self.timeout_s = name, timeout_s
         self.extra = extra  # also the weather, tasks and recall routes (claude.local_recall)
         self.store: Any = None  # recall's store: index.default() unless set (the bench's own)
+        self.recall_floor: float | None = None  # recall's relevance floor (claude.recall_min_similarity)
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tier1")
         self._model: Any = None
         self._tok: Any = None
@@ -584,10 +585,12 @@ async def _run_extra(
     if model is None or not model.ready:
         return None
     question = str(args.get("question") or args.get("query") or "")
+    floor = getattr(model, "recall_floor", None)
     try:
         found = await recall.answer(
-            question, str(args.get("query") or ""), model, store or index.default(), now
-        )
+            question, str(args.get("query") or ""), model, store or index.default(), now,
+            floor=recall.MIN_SIMILARITY if floor is None else float(floor),
+        )  # fmt: skip
     except (ToolError, OSError, TimeoutError) as exc:  # the memory service is down, or the model slow
         log.info("recall unavailable (%s); asking Claude", exc)
         return None

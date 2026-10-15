@@ -518,7 +518,10 @@ budget", "when did I last change the generator oil", "what was decided in the ve
 meeting", "what's my wifi password". A recall searches the local store (below) by the
 question and by the model's few words, shows the model the best five records, and takes
 its answer only if it names one record, quotes it word for word, and passes checks in
-plain code: the record has the question's topic words (a note about the truck's tires
+plain code. A record found by meaning is shown only if it's close enough
+(`claude.recall_min_similarity`, 0.64); with none that close the model isn't asked and
+Claude answers. The answer's refs (what "send me a link to that" opens) are the one
+record it quoted, never the others it was shown. The checks: the record has the question's topic words (a note about the truck's tires
 doesn't answer "when did I rotate the RV tires"), every number in the answer is in the
 record, and nearly every other word too. Anything else, including "not found", goes to
 Claude, which still has the request's context. Emails that address an AI or are lures
@@ -719,7 +722,12 @@ memory), and full text (SQLite FTS5) adds a little for shared words and finds wh
 no vector yet. An idle pass embeds new items ahead of time. On a synthetic year of
 20,000 conversations and 50 questions it finds the answer in the top 5 for about
 three in four, and in the top 20 for 84%. Claude gets the best 12 matches through the
-`local_search` tool.
+`local_search` tool. `scripts/eval_retrieval.py` measures search alone (recall@k, MRR,
+nDCG@10, numbers only) on that year, on long meeting summaries, on the recall bench's
+store, and on pairs taken from a copy of your own store: a task's title should find the
+meeting or mail it came from, and a journal turn's question the records its refs line
+names. `--floor` shows how close right and wrong records get, which is what
+`claude.recall_min_similarity` is set from.
 The inbox is indexed too, lazily: while Scout is idle, a pass every 20 minutes reads
 mail that arrived since the newest indexed message (Mail.app, the access Scout already
 has). Older mail joins the index only when Scout touches it for a task: a Mail search

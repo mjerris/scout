@@ -74,6 +74,7 @@ auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "Too
 auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
 extra_system_prompt = ""
 local_recall = true           # tier 1 also answers the weather, tasks and "what did Pat say about..." from Scout's records
+recall_min_similarity = 0.64  # a record found by meaning must be this close to be read; else Claude answers
 
 [web]
 enabled = true
