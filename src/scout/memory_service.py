@@ -357,10 +357,12 @@ async def slack_loop(
                     ),
                 )
                 p.added = changed
-            if changed:
-                log.info(
-                    "slack: %d messages (%d items changed) in %.0f s", msgs, changed, time.monotonic() - t0
-                )
+            with st.lock:
+                lp = dict(st.data.get("last_pass") or {})
+            # Every pass, counts only: how long it took and how many conversations it read.
+            log.info("slack: %d messages (%d items changed) in %.0f s; %d conversations read, %d unchanged%s",
+                     msgs, changed, time.monotonic() - t0, int(lp.get("read") or 0), int(lp.get("unchanged") or 0),
+                     " (the full sweep)" if lp.get("sweep") else "")  # fmt: skip
         except slack.SlackError as exc:
             log.warning("slack: sync failed: %s", exc)
         except Exception:
@@ -491,15 +493,17 @@ async def people_backfill(
         st = await loop.run_in_executor(None, ix.backfill_people, 0)
         if st.get("done"):
             return st
-        log.info("people: backfill starting (%d of %d records done)", st["records"], st["total"])
+        log.info("people: backfill starting (pass %d: %d of %d records done)", st["pass"], st["records"],
+                 st["total"])  # fmt: skip
         while True:
             st = await loop.run_in_executor(None, ix.backfill_people, batch)
             step += 1
             if st["done"]:
                 break
             if step % PEOPLE_LOG_EVERY == 0:
-                log.info("people: backfill %d of %d records, %d links, %d people", st["records"], st["total"],
-                         st["links"], st["people"])  # fmt: skip
+                # Each pass counts from 0 again (people.py: the second finds people by name).
+                log.info("people: backfill pass %d: %d of %d records, %d links, %d people", st["pass"],
+                         st["records"], st["total"], st["links"], st["people"])  # fmt: skip
             await asyncio.sleep(gap_s)
         log.info("people: backfill done: %d records, %d links, %d people in %.0f s", st["records"], st["links"],
                  st["people"], time.monotonic() - t0)  # fmt: skip
