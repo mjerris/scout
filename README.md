@@ -194,7 +194,16 @@ describe for it, in the room and on the phone, by rules in a local
 `tools.toml` in its data folder (mode 600): which servers, where, what is private, what
 asks for your yes, what is off. Nothing server-specific is in Scout's code. `scout status`
 says whether each one is up. Details: [docs/external-mcp.md](docs/external-mcp.md);
-example: `tools.example.toml`.
+example: `tools.example.toml`. A server added to Claude Code later is offered once, by
+voice, at a quiet moment.
+
+## Setting up by voice
+
+On a new install Scout walks you through what it can do (your name, the phone, where
+lists live, mail, calendar, Contacts, Slack, GitHub, Granola, references, your MCP
+servers), one yes, no or later at a time, and writes `config.toml` (keeping a copy of it
+first). Say "set me up" to start or pick up where you left off. Tokens are never asked for
+aloud: Scout says where they go. Details: [docs/setup.md](docs/setup.md).
 
 ## Phone and other devices (Tailscale)
 

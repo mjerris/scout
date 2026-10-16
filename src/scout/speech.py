@@ -316,6 +316,22 @@ def _decide(r: _Reply) -> bool | None:
     return None
 
 
+_LATER_ANSWER = re.compile(
+    r"\b(?:later|not now|not yet|another time|next time|some other time|(?:skip|leave) (?:it|that|this) for now|"
+    r"ask me (?:again )?(?:later|another time|tomorrow)|in a (?:bit|while|minute))\b"
+)
+
+
+def says_later(text: str) -> bool:
+    """A "later" for a question that takes one (setup: "later", "not now", "ask me
+    tomorrow"); a clear yes or no with it ("no, not now") stays that answer's."""
+    w = " ".join(words(normalize(text)))
+    if not _LATER_ANSWER.search(w):
+        return False
+    rest = _LATER_ANSWER.sub(" ", w)
+    return not re.search(r"\b(?:no|nope|never|yes|yeah|sure)\b", rest)
+
+
 def parse_yes_no(text: str) -> bool | None:
     """True for a clear yes, False for a clear no, None when unclear (the caller
     asks again). Only short replies count; a question, a pause ("okay, hold

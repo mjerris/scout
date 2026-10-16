@@ -34,6 +34,7 @@ from . import (
     mailindex,
     memory_client,
     memory,
+    onboarding,
     privacy,
     pulse,
     reference,
@@ -51,6 +52,7 @@ from .asr import Transcriber
 from .audio import Utterance, analyze
 from .brain import Brain, PhoneBrain, describe_tool, split_question
 from .config import DATA, Config
+from .config import load as load_config
 from .floor import Floor
 from .mac import ToolError
 from .progress import STILL_WORKING, progress_phrase
@@ -254,6 +256,7 @@ class Assistant:
         self._confirm_id = 0  # id of the pending question (web answers must name it)
         self._confirm_audience: dict[str, Any] = {"mini": True, "client": None}  # who was asked
         self._confirm_waiting = 0  # questions queued behind the one being asked
+        self._confirm_later = False  # the pending question takes "later" as an answer (setup)
         self._stop_event = asyncio.Event()  # set (and replaced) by every stop()
         self._listen: _Listen | None = None
         self._discuss_stop: asyncio.Event | None = None  # set by stop() during a discuss call
@@ -501,6 +504,7 @@ class Assistant:
             self._spawn(mailindex.loop(idle))
         if self.cfg.tasks.farm:
             self._spawn(taskfarm.loop(idle, lambda: self.tier1))
+        self._spawn(self._setup_watch(idle))  # a new install's walkthrough, new MCP servers (onboarding.py)
         if self.cfg.contacts.enabled:  # one person across mail, meetings and Slack (people.py)
             from . import people
 
@@ -752,6 +756,8 @@ class Assistant:
                 return ignore("said before the question")
             self.emit("heard", text=text, **via)
             answer = speech.parse_answer(cmd if cmd else text)
+            if self._confirm_later and speech.says_later(cmd if cmd else text):
+                answer = onboarding.LATER  # setup's third answer: ask again another time
             if answer is None:
                 # Nothing counts as an answer until the re-ask (which says "yes"
                 # and "no" itself) has finished playing.
@@ -1240,17 +1246,21 @@ class Assistant:
         """Tier 0: answer in plain code when the request clearly fits. True if handled.
         `fetch_context`: while tier 1 decides, start fetching Claude's request context
         (self._context), so a request tier 1 passes on doesn't wait for it afterwards."""
-        if not self.cfg.claude.local_first:
+        setup = onboarding.is_request(text)  # "set me up": plain code, local_first or not
+        if not self.cfg.claude.local_first and not setup:
             return False
         tier: int | None = 0  # set before the lookups: a ToolError below is still said
         private = False
         about: list[str] = []  # the records the answer is about (refs.py)
         try:
-            said = await local_intents.answer(text, self._local)
-            # Worked out from private data: a memory, an email's text, the title of a task
-            # found in mail, a meeting or Slack (local_intents sets ctx.private).
-            private, about = self._local.private, list(self._local.refs)
-            if said is not None and local_intents.is_repeat(text):
+            if setup:
+                said: str | None = await self._walkthrough(None, over=onboarding.from_the_start(text))
+            else:
+                said = await local_intents.answer(text, self._local)
+                # Worked out from private data: a memory, an email's text, the title of a
+                # task found in mail, a meeting or Slack (local_intents sets ctx.private).
+                private, about = self._local.private, list(self._local.refs)
+            if said is not None and not setup and local_intents.is_repeat(text):
                 tier = None  # repeating isn't a new answer
                 private = self.last_private  # ...and is as private as what it repeats
             if said is None and (said := await self._rule_request(text)) is not None:
@@ -1445,6 +1455,130 @@ class Assistant:
             return
         day = briefing.local_now().date() - timedelta(days=1)
         await corrections.nightly(self.tier1, day, behavior.default().path.parent, list(self.barge_ins))
+
+    # --- setup by voice (onboarding.py) ----------------------------------------------------
+
+    def _setup_room(self, out: dict[str, Any] | None) -> onboarding.Walkthrough:
+        """The walkthrough's questions and words: in the current turn (`out` None: "stop"
+        ends it like any turn), or for the room alone (`out`: at a quiet moment)."""
+
+        async def ask_yes(spoken: str, detail: str) -> bool | str | None:
+            gen = self._confirm_gen
+            got = await self._confirm(spoken, detail, out, later=True)
+            return None if gen != self._confirm_gen else got  # "stop": not a no, stop here
+
+        async def say(text: str) -> None:
+            where = out or self._out
+            if where.get("mini"):
+                self.speaker.speak(text)
+            if where.get("client"):
+                self.emit("say", text=text, to=where["client"])
+            await self.speaker.wait_idle()
+
+        async def access(what: str) -> str:
+            from . import calendar_mac, contacts_mac
+
+            try:
+                if what == "contacts":
+                    await contacts_mac.ensure_access()
+                else:
+                    await calendar_mac.ensure_access(reminders=what == "reminders")
+            except ToolError as exc:
+                return str(exc)
+            return ""
+
+        return onboarding.Walkthrough(
+            load_config(onboarding.CONFIG), ask_yes, lambda q: self._ask_text(q, out), say, access,
+            config_path=onboarding.CONFIG, tools_path=extmcp.PATH, state_path=onboarding.STATE,
+            claude_json=extmcp.CLAUDE_JSON,
+        )  # fmt: skip
+
+    async def _walkthrough(self, out: dict[str, Any] | None, over: bool = False) -> str:
+        w = self._setup_room(out)
+        said = await w.run(over)
+        log.info("setup: walkthrough %s; %d changes", "finished" if said.startswith("That's") else "paused",
+                 len(w.changed))  # fmt: skip
+        return said
+
+    async def _ask_text(self, question: str, out: dict[str, Any] | None, timeout: float = 20.0) -> str | None:
+        """Ask and hear a spoken answer in the user's words (setup's "what should I call
+        you"): None for no answer or "stop"."""
+        where = out or self._out
+        if where.get("mini"):
+            self.speaker.speak(question)
+        if where.get("client"):
+            self.emit("say", text=question, to=where["client"])
+        await self.speaker.wait_idle()
+        fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._listen = _Listen("setup", fut, time.monotonic(), [])
+        if where.get("mini"):
+            self.speaker.chime("wake")
+        try:
+            text = str(await asyncio.wait_for(fut, timeout))
+        except TimeoutError:
+            return None
+        finally:
+            self._listen = None
+        return None if not text or speech.is_stop(text) else text
+
+    def _quiet_moment(self, idle: Callable[[], bool]) -> bool:
+        """Nobody talking, nothing going on, not quiet hours: a moment to ask something."""
+        return (
+            idle()
+            and self.floor.owner() is None
+            and not self.mic_muted
+            and not self.speaker.busy
+            and not starlink.in_quiet_hours(self.cfg.pulse.quiet_hours, datetime.now())
+        )
+
+    async def _setup_watch(
+        self, idle: Callable[[], bool], first_s: float = 120.0, every_s: float = 600.0
+    ) -> None:
+        """A new install's walkthrough, at the first quiet moment; then, every `every_s`,
+        a new MCP server in Claude Code asked about once (onboarding.new_servers)."""
+        await asyncio.sleep(first_s)
+        try:
+            st = await asyncio.to_thread(
+                onboarding.startup_state, load_config(onboarding.CONFIG), onboarding.CONFIG, onboarding.STATE,
+                extmcp.CLAUDE_JSON,
+            )  # fmt: skip
+        except Exception:
+            log.exception("setup: no state; the setup watch is off")
+            return
+        room = {"mini": True, "client": None}
+        while True:
+            try:
+                if self._quiet_moment(idle) and await self.floor.acquire("setup", wait=0):
+                    try:
+                        st = onboarding.read_state(onboarding.STATE) or st
+                        if st.get("auto"):
+                            st["auto"] = False
+                            onboarding.save_state(st, onboarding.STATE)
+                            said = await self._walkthrough(room)
+                            await self._setup_room(room).say(said)
+                        else:
+                            await self._offer_new_servers(room, st)
+                    finally:
+                        self.floor.release("setup")
+            except Exception:
+                log.exception("setup: the watch failed this time")
+            await asyncio.sleep(every_s)
+
+    async def _offer_new_servers(self, out: dict[str, Any], st: dict[str, Any]) -> None:
+        cfg = load_config(onboarding.CONFIG)
+        names = await asyncio.to_thread(
+            onboarding.new_servers, cfg, extmcp.PATH, st, time.time(), extmcp.CLAUDE_JSON
+        )
+        if not names:
+            return
+        w = self._setup_room(out)
+        for n in names[:1]:  # one question a quiet moment
+            st.setdefault("mcp_asked", {})[n] = time.time()
+            got = await w.offer_server(n)
+            if got != onboarding.LATER:
+                st.setdefault("mcp", {})[n] = got
+            onboarding.save_state(st, onboarding.STATE)
+            log.info("setup: a new MCP server in Claude Code: %s", got)
 
     def relay(self, session: str, text: str) -> str:
         """The room passes the user's words to a Claude session that spoke to them."""
@@ -1784,10 +1918,12 @@ class Assistant:
         description: str,
         out: dict[str, Any] | None = None,
         timeout: float | None = None,
+        later: bool = False,
     ) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered.
         `out`: where to ask (default: where the current turn's replies go); `timeout`:
-        how long to wait for the answer (default [claude] confirm_timeout_s)."""
+        how long to wait for the answer (default [claude] confirm_timeout_s); `later`:
+        "later" is an answer too (onboarding.LATER; setup's questions only)."""
         gen = self._confirm_gen
         if self._confirm_waiting >= 5:  # a runaway fan-out of tool calls: don't queue forever
             return False
@@ -1796,7 +1932,11 @@ class Assistant:
             async with self._confirm_lock:
                 if gen != self._confirm_gen:
                     return False  # the user said stop while this one was waiting its turn
-                return await self._confirm_one(spoken, description, out, timeout)
+                self._confirm_later = later
+                try:
+                    return await self._confirm_one(spoken, description, out, timeout)
+                finally:
+                    self._confirm_later = False
         finally:
             self._confirm_waiting -= 1
 
