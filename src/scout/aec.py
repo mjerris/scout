@@ -2,7 +2,8 @@
 
 - `EchoCanceller` wraps livekit's WebRTC AudioProcessingModule (AEC3, noise
   suppression, high-pass filter, optional gain control) for 10 ms int16 mono
-  frames, and keeps a rough running estimate of how much echo it removes.
+  frames, delays the reference for a long echo path (a TV), and keeps a rough
+  running estimate of how much echo it removes.
 - `Resampler` is a streaming polyphase FIR resampler (Kaiser-windowed sinc)
   for any rational rate change: 48k -> 16k for the microphone path (with a
   proper anti-aliasing filter, unlike linear interpolation), and 24k (or any
@@ -23,6 +24,13 @@ _REF_ACTIVE_POWER = (32768.0 * 10 ** (-60 / 20)) ** 2
 
 
 MAX_DELAY_HINT_MS = 500  # set_stream_delay_ms fails above this
+# AEC3 only finds an echo up to about 500 ms behind the reference it was given, and the
+# delay hint doesn't move that window (measured offline: 550 ms with a 500 ms hint, 600 ms
+# with a 0 ms one, both under 2 dB removed; tests/test_audio_backends.py). For a longer
+# path (a TV: ~780 ms) the reference is delayed here first, leaving this much of the
+# expected delay for AEC3 to find: room for the real delay to be shorter than expected,
+# and up to ~300 ms longer.
+REF_LEAD_MS = 200
 
 
 class EchoCanceller:
@@ -64,7 +72,11 @@ class EchoCanceller:
         self._mic_frame = rtc.AudioFrame(self._mic_buf, sample_rate, 1, self.block)
         self._ref_frame = rtc.AudioFrame(self._ref_buf, sample_rate, 1, self.block)
         self._scratch = np.zeros(self.block, np.float32)
-        self.delay_ms = 0
+        self.delay_ms = 0  # the whole expected delay
+        self.hint_ms = 0  # what AEC3 is told: the part left after the reference delay
+        self.ref_delay_ms = 0  # how long the reference is held back before AEC3 sees it
+        self._ring = np.zeros((1, self.block), np.int16)  # reference blocks, oldest first
+        self._ring_pos = 0
         self.frames = 0
         # Exponential averages of echo (mic before processing) and residual
         # (after) power, over blocks where the reference is playing.
@@ -73,11 +85,23 @@ class EchoCanceller:
         self._erle_blocks = 0
 
     def set_delay_ms(self, delay_ms: float) -> None:
-        """Delay between a reference sample being processed and its echo being captured.
-        Only a hint: AEC3 finds the real delay itself (it found a TV's ~750 ms from an
-        80 ms hint). The processor rejects hints over 500 ms ("Failed to set stream
-        delay" on every block, so no mic audio at all), so the hint is capped there."""
-        self.delay_ms = min(MAX_DELAY_HINT_MS, max(0, round(delay_ms)))
+        """Expected delay between a reference sample being processed and its echo being
+        captured. AEC3 finds the exact delay itself, but only within ~500 ms of the
+        reference: past REF_LEAD_MS the reference is held back by the rest (whole
+        blocks), and AEC3 gets the remainder as its hint. (The processor also rejects
+        hints over 500 ms: "Failed to set stream delay" on every block, no mic audio.)"""
+        total = max(0, round(delay_ms))
+        blocks = max(0, total - REF_LEAD_MS) // 10
+        self.delay_ms = total
+        self.ref_delay_ms = blocks * 10
+        self.hint_ms = min(MAX_DELAY_HINT_MS, total - self.ref_delay_ms)
+        if self._ring.shape[0] != blocks + 1:
+            # Another echo path (the TV, then the Mac's speakers): AEC3 adapts again, so
+            # the running estimate starts over rather than vouch for the old path.
+            self._ring = np.zeros((blocks + 1, self.block), np.int16)
+            self._ring_pos = 0
+            self._echo_pow = self._res_pow = 0.0
+            self._erle_blocks = 0
 
     def _power(self, x: np.ndarray) -> float:
         np.multiply(x, x, out=self._scratch, dtype=np.float32)
@@ -89,13 +113,18 @@ class EchoCanceller:
             mic = np.clip(mic * 32767.0, -32768, 32767)
         if ref.dtype != np.int16:
             ref = np.clip(ref * 32767.0, -32768, 32767)
-        self._ref[:] = ref
+        # A ring of blocks + 1 slots: write this block, read the one `blocks` ago.
+        ring, pos = self._ring, self._ring_pos
+        ring[pos] = ref
+        pos = (pos + 1) % ring.shape[0]
+        self._ring_pos = pos
+        self._ref[:] = ring[pos]
         self._mic[:] = mic
         ref_pow = self._power(self._ref)
         echo_pow = self._power(self._mic) if ref_pow > _REF_ACTIVE_POWER else 0.0
         self._apm.process_reverse_stream(self._ref_frame)
         if self.echo_cancellation:
-            self._apm.set_stream_delay_ms(self.delay_ms)
+            self._apm.set_stream_delay_ms(self.hint_ms)
         self._apm.process_stream(self._mic_frame)
         self.frames += 1
         if echo_pow:

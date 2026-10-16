@@ -74,8 +74,9 @@ class AudioConfig:
     # like the user talking over it and cut its messages short. Backends that
     # don't report it (apple) skip the check.
     # Extra delay the speaker adds that the computer can't see, in ms: a TV's sound
-    # processing (a Samsung over HDMI measured ~750 ms). Helps the echo canceller
-    # start out right and tells Scout when its voice has really finished playing.
+    # processing (a Samsung over HDMI measured ~750 ms). The echo canceller needs it
+    # past ~300 ms (webrtc: AEC3 finds an echo only up to ~500 ms behind; the reference
+    # is held back by the rest) and it tells Scout when its voice has really finished.
     output_delay_ms: float = 0.0
     barge_in_min_learned_s: float = 3.0
     barge_in_min_erle_db: float = 12.0
