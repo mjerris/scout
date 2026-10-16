@@ -6,7 +6,9 @@ A person is a record of kind `person`, one per real person, found by stable ids 
   party), with the names Slack has shown for them over time;
 - their email addresses (mail senders and recipients, meeting attendees, their Slack
   profile's email);
-- their contact (Contacts' id, found by one of their addresses);
+- their contact (Contacts' id, found by one of their addresses), and every email address
+  and phone number on that card (phones as E.164 where the country can be told), so
+  mail from any of them links the moment it's stored;
 - their GitHub login (an item's author and assignees).
 
 Every mail, meeting, Slack message and GitHub item is linked to the people in it as it's
@@ -78,6 +80,18 @@ def person_id(contact_id: str) -> str:
 
 def norm_email(s: str) -> str:
     return s.strip().strip("<>").lower()
+
+
+def norm_phone(s: str) -> str:
+    """A phone number as a key: +<digits> when the country can be told ("+44 20 7946
+    0958", or a North American 10 digits), else its digits; "" when it has none."""
+    from .contacts_mac import dial_number
+    from .mac import ToolError
+
+    try:
+        return dial_number(str(s or ""))
+    except ToolError:
+        return ""
 
 
 def _fold(s: str) -> str:
@@ -336,7 +350,7 @@ def participants(kind: str, id: str, title: str, who: str, meta: dict[str, Any],
 
 
 def blank() -> dict[str, Any]:
-    return {"contact": "", "name": "", "emails": [], "slack": [], "github": [], "names": []}
+    return {"contact": "", "name": "", "emails": [], "phones": [], "slack": [], "github": [], "names": []}
 
 
 def meta_of(p: dict[str, Any]) -> dict[str, Any]:
@@ -345,6 +359,7 @@ def meta_of(p: dict[str, Any]) -> dict[str, Any]:
     m["contact"] = str(p.get("contact") or "")
     m["name"] = str(p.get("name") or "")
     m["emails"] = list(dict.fromkeys(norm_email(str(e)) for e in p.get("emails") or [] if str(e).strip()))
+    m["phones"] = list(dict.fromkeys(n for x in p.get("phones") or [] if (n := norm_phone(str(x)))))
     m["slack"] = [
         {"id": str(s.get("id") or ""), "shown": str(s.get("shown") or ""), "real": str(s.get("real") or "")}
         for s in p.get("slack") or []
@@ -363,6 +378,7 @@ def merge(metas: Iterable[dict[str, Any]]) -> dict[str, Any]:
         out["contact"] = out["contact"] or str(m.get("contact") or "")
         out["name"] = out["name"] or str(m.get("name") or "")
         out["emails"] = list(dict.fromkeys([*out["emails"], *(m.get("emails") or [])]))
+        out["phones"] = list(dict.fromkeys([*out["phones"], *(m.get("phones") or [])]))
         have = {s["id"]: s for s in out["slack"]}
         for s in m.get("slack") or []:
             if s.get("id") in have:
@@ -398,6 +414,7 @@ def strong_keys(meta: dict[str, Any]) -> list[str]:
     """A person's identities: each one is only ever theirs."""
     out = [f"contact:{meta['contact']}"] if meta.get("contact") else []
     out += [f"email:{e}" for e in meta.get("emails") or []]
+    out += [f"phone:{n}" for n in meta.get("phones") or []]
     out += [f"slack:{s['id']}" for s in meta.get("slack") or [] if s.get("id")]
     out += [f"github:{g}" for g in meta.get("github") or []]
     return out
@@ -470,22 +487,36 @@ def build(
     github: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """What the app's pass knows: `found` is Contacts' answer for each address ({email:
-    {id, name}}), `slack_users` Slack's users.list members, `github` the GitHub login each
+    {id, name, emails, phones, me}}: the card it's on, with every address and number on
+    it; the user's own card, "me", is nobody's), `slack_users` Slack's users.list members, `github` the GitHub login each
     Slack user's profile gives (slack_github). A Slack user joins the contact their
     profile email belongs to; one who joins none is listed on their own (with their
     profile email and login), for the store to join to what it has. A name two Slack
     users share isn't one to find them by."""
     github = github or {}
     people: dict[str, dict[str, Any]] = {}
-    for email, c in sorted(found.items()):
-        if not c.get("id"):
-            continue
+    cards = [(norm_email(email), c) for email, c in sorted(found.items()) if c.get("id") and not c.get("me")]
+    # An address or number on two cards (a shared office line) is neither's.
+    on: dict[str, set[str]] = {}
+    for email, c in cards:
+        for k in {f"email:{email}", *card_keys(c)}:
+            on.setdefault(k, set()).add(str(c["id"]))
+    for email, c in cards:
         p = people.setdefault(
             str(c["id"]),
-            {"contact": str(c["id"]), "name": str(c.get("name") or ""), "emails": [], "slack": []},
+            {
+                "contact": str(c["id"]),
+                "name": str(c.get("name") or ""),
+                "emails": [],
+                "phones": [],
+                "slack": [],
+            },
         )
-        if (e := norm_email(email)) not in p["emails"]:
-            p["emails"].append(e)
+        for k in [f"email:{email}", *card_keys(c)]:
+            kind, _, v = k.partition(":")
+            got = p["emails"] if kind == "email" else p["phones"]
+            if len(on[k]) == 1 and v not in got:
+                got.append(v)
     shown_by = [_fold(slack_shown(u)) for u in slack_users]
     by_email = {e: p for p in people.values() for e in p["emails"]}
     alone: list[dict[str, Any]] = []
@@ -510,6 +541,13 @@ def build(
             alone.append({"contact": "", "name": entry["real"] or entry["shown"], "emails": [email] if email else [],
                           "slack": [entry], "github": [login] if login else []})  # fmt: skip
     return sorted(people.values(), key=lambda p: p["contact"]) + alone
+
+
+def card_keys(c: dict[str, Any]) -> list[str]:
+    """The identity keys a contact card gives (its email addresses and phone numbers)."""
+    out = [f"email:{e}" for x in c.get("emails") or [] if (e := norm_email(str(x)))]
+    out += [f"phone:{n}" for x in c.get("phones") or [] if (n := norm_phone(str(x)))]
+    return list(dict.fromkeys(out))
 
 
 def linked(lns: Iterable[dict[str, Any]]) -> list[str]:
@@ -685,8 +723,9 @@ async def _slack_users() -> tuple[list[dict[str, Any]] | None, dict[str, str]]:
 
 
 async def _resolve(emails: Sequence[str]) -> dict[str, dict[str, Any]]:
-    """Contacts' {email: {id, name}} for the addresses it has; {} without the permission
-    (never asks for it)."""
+    """Contacts' {email: {id, name, emails, phones, me?}} (the helper's `cards`: the card
+    each address is on) for the addresses it has; {} without the permission (never asks
+    for it)."""
     from . import contacts_mac
     from .mac import ToolError
 
@@ -694,10 +733,17 @@ async def _resolve(emails: Sequence[str]) -> dict[str, dict[str, Any]]:
     if not emails or not h.binary.exists() or not await contacts_mac._granted(h):
         return {}
     found: dict[str, dict[str, Any]] = {}
+    cmd, key = "cards", "cards"
     for i in range(0, len(emails), 200):
         args = [a for e in emails[i : i + 200] for a in ("--handle", e)]
         try:
-            got = (await contacts_mac.run("resolve", *args, helper=h)).get("names") or {}
+            try:
+                got = (await contacts_mac.run(cmd, *args, helper=h)).get(key) or {}
+            except ToolError as exc:
+                if cmd != "cards" or "unknown command" not in str(exc):
+                    raise
+                cmd, key = "resolve", "names"  # a helper built before `cards`: names only
+                got = (await contacts_mac.run(cmd, *args, helper=h)).get(key) or {}
         except ToolError as exc:
             log.info("people: Contacts didn't answer (%s)", exc)
             return found
@@ -729,8 +775,9 @@ async def refresh(store: Any = None) -> dict[str, int]:
     # Contacts' answer is the whole list only when it answered: a person it no longer
     # knows loses the contact (and keeps their other identities and links).
     got = await asyncio.to_thread(store.put_people, people, bool(found))
-    log.info("people: %d addresses, %d people known, %d links to them", len(emails), got.get("people", 0),
-             got.get("links", 0))  # fmt: skip
+    keys = sum(len(p["emails"]) + len(p.get("phones") or []) for p in people if p.get("contact"))
+    log.info("people: %d addresses, %d people known, %d links to them, %d keys from their contact cards",
+             len(emails), got.get("people", 0), got.get("links", 0), keys)  # fmt: skip
     return {"emails": len(emails), "people": len(people), **got}
 
 

@@ -306,3 +306,79 @@ def test_people_over_the_memory_service(tmp_path: Any) -> None:
         asyncio.run(main())
     finally:
         ix.close()
+
+
+# --- a contact card's every address and number (contacts helper `cards`) ---------------------
+
+
+CARDS: dict[str, dict[str, Any]] = {
+    "pat@acme.example": {"id": "c1", "name": "Pat Doe", "emails": ["pat@acme.example", "Pat@Second.example"],
+                         "phones": ["+1 (555) 010-2000", "555-010-3000", "+44 20 7946 0958"]},
+    "me@x.example": {"id": "c9", "name": "Mike Me", "emails": ["me@x.example", "mike@old.example"],
+                     "phones": [], "me": True},
+}  # fmt: skip
+
+
+def test_every_handle_on_a_contacts_card_is_theirs_up_front(store: index.Index) -> None:
+    got = people.build(CARDS)
+    assert [p["contact"] for p in got] == ["c1"]  # the user's own card is never a person
+    pat = got[0]
+    assert pat["emails"] == ["pat@acme.example", "pat@second.example"]
+    assert pat["phones"] == ["+15550102000", "+15550103000", "+442079460958"]  # E.164
+    keys = people.strong_keys(people.meta_of(pat))
+    assert {"email:pat@second.example", "phone:+15550103000", "phone:+442079460958"} <= set(keys)
+    store.put_people(got)
+    # Mail from the card's other address links the moment it's stored, no later pass.
+    store.put("mail:7", "mail", "Hi", "hello", "Pat <PAT@second.example>", NOW)
+    assert "mail:7" in theirs(store, "person:c1")
+    assert store.get("person:c9") is None
+    rec = store.resolve("person:c1")
+    assert rec is not None and "+442079460958" in recordpage.render(rec, store.get("person:c1"))
+    # An address two cards share joins neither.
+    shared = people.build({
+        "a@x.example": {"id": "c1", "name": "Pat Doe", "emails": ["a@x.example", "office@x.example"], "phones": ["555-010-7000"]},
+        "b@x.example": {"id": "c2", "name": "Sam Roe", "emails": ["b@x.example", "office@x.example"], "phones": ["(555) 010-7000"]},
+    })  # fmt: skip
+    assert [(p["emails"], p["phones"]) for p in shared] == [(["a@x.example"], []), (["b@x.example"], [])]
+
+
+def test_a_phone_number_as_a_key() -> None:
+    assert people.norm_phone("+1 (555) 010-2000") == "+15550102000"
+    assert people.norm_phone("555.010.2000") == "+15550102000"  # North American, inferred
+    assert people.norm_phone("+44 20 7946 0958") == "+442079460958"
+    assert people.norm_phone("ext") == ""
+    m = people.merge([{"phones": ["+15550102000"]}, {"phones": ["+15550102000", "+15550103000"]}])
+    assert m["phones"] == ["+15550102000", "+15550103000"]
+
+
+def test_the_pass_asks_the_helper_for_whole_cards(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    exe = tmp_path / "scout-contacts"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\ncmd = [a for a in sys.argv[1:] if not a.startswith('-')][0]\n"
+        "if cmd == 'status': print(json.dumps({'status': 'authorized'}))\n"
+        "elif cmd == 'cards': print(json.dumps({'cards': {'Pat@Acme.example': {'id': 'c1', 'name': 'Pat Doe', "
+        "'emails': ['pat@acme.example', 'p2@acme.example'], 'phones': ['555 010 2000']}}}))\n"
+        "else: print(json.dumps({'error': 'unknown command'})); sys.exit(1)\n"
+    )
+    exe.chmod(0o755)
+    monkeypatch.setattr(contacts_mac, "HELPER", contacts_mac.Helper(binary=exe))
+    got = asyncio.run(people._resolve(["pat@acme.example"]))
+    assert got == {"pat@acme.example": {"id": "c1", "name": "Pat Doe", "emails": ["pat@acme.example", "p2@acme.example"],
+                                        "phones": ["555 010 2000"]}}  # fmt: skip
+
+
+def test_a_helper_built_before_cards_still_gives_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    exe = tmp_path / "scout-contacts"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\ncmd = [a for a in sys.argv[1:] if not a.startswith('-')][0]\n"
+        "if cmd == 'status': print(json.dumps({'status': 'authorized'}))\n"
+        "elif cmd == 'resolve': print(json.dumps({'names': {'pat@acme.example': {'id': 'c1', 'name': 'Pat Doe'}}}))\n"
+        "else: print(json.dumps({'error': 'unknown command cards'})); sys.exit(1)\n"
+    )
+    exe.chmod(0o755)
+    monkeypatch.setattr(contacts_mac, "HELPER", contacts_mac.Helper(binary=exe))
+    assert asyncio.run(people._resolve(["pat@acme.example"])) == {
+        "pat@acme.example": {"id": "c1", "name": "Pat Doe"}
+    }
