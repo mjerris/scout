@@ -249,6 +249,43 @@ def test_with_live_events_a_pass_reads_back_less(fake: Fake, tmp_path: Path) -> 
     assert oldest() == pytest.approx(float(m["ts"]) - slack.LOOKBACK_S)
 
 
+def test_with_live_events_a_pass_reads_only_what_had_activity(fake: Fake, tmp_path: Path) -> None:
+    st = slack.State(tmp_path / "s.json")
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW)  # every conversation read, checked at NOW
+    assert st.data["last_pass"]["sweep"] is True
+    m = msg(ts(1), "U2", "since then")
+    slack.handle_event(store(), slack.Live(fake, st), ev("C1", m), now=NOW + 30)
+    fake.history["C1"].append(m)
+    fake.calls.clear()
+
+    def read() -> set[str]:
+        return {p["channel"] for k, p in fake.calls if k == "conversations.history"}
+
+    # Events unbroken since before every conversation's check: only C1 heard anything.
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW + 60, live_since=NOW - 3600)
+    assert read() == {"C1"}
+    assert st.data["last_pass"] == {"read": 1, "unchanged": 4, "sweep": False}
+    fake.calls.clear()
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW + 120, live_since=NOW - 3600)
+    assert read() == set()  # nothing since
+    # The daily sweep reads them all again, events or not.
+    fake.calls.clear()
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW + slack.SWEEP_EVERY_S + 1, live_since=NOW - 3600)
+    assert read() == {"C1", "D1", "D3", "G1", "C2"} and st.data["last_pass"]["sweep"] is True
+    # Events broke: every conversation checked before the break is read.
+    fake.calls.clear()
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW + slack.SWEEP_EVERY_S + 60,
+                    live_since=NOW + slack.SWEEP_EVERY_S + 30)  # fmt: skip
+    assert read() == {"C1", "D1", "D3", "G1", "C2"}
+    # A message whose event wasn't heard but moved the resume point (state from before
+    # `heard`) still counts as activity.
+    later = NOW + slack.SWEEP_EVERY_S + 60
+    st.advance("D1", f"{later + 5:.6f}")
+    fake.calls.clear()
+    slack.sync_pass(store(), fake, 14, state=st, now=later + 60, live_since=NOW)
+    assert read() == {"D1"}
+
+
 # --- which DMs make an alert ----------------------------------------------------------------
 
 

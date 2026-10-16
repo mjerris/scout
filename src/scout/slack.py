@@ -25,6 +25,14 @@ store_docs, thread_messages; the same skip, muted and archived rules), and moves
 conversation's resume point up. With events flowing, a pass reads back LIVE_LOOKBACK_S
 instead of LOOKBACK_S. A deleted message heard as an event leaves the copy (a pass never
 sees deletions: then it stays until it ages out).
+
+With events flowing, a pass reads only the conversations with activity: those an event
+was heard in since the pass last read them (or whose resume point moved past that
+read). Slack's lists give no per-conversation latest message for a user token, so the
+events are what says which changed. One that had none since its last read was already
+brought in by the events, so it is passed over. Once every SWEEP_EVERY_S, and whenever
+the events broke since a conversation's last read, the pass reads every conversation
+again (the safety net).
 """
 
 from __future__ import annotations
@@ -62,6 +70,7 @@ MAX_THREADS = 25  # threads (re)fetched per conversation per pass
 MAX_REPLY_PAGES = 3  # reply pages per thread
 QUIET_DAYS = 7.0  # a conversation with nothing newer than this is quiet...
 QUIET_EVERY_S = 2 * 3600.0  # ...and checked only this often
+SWEEP_EVERY_S = 86400.0  # with live events, every conversation read again this often anyway
 # Messages that are only Slack noise: joins, leaves, topic and name changes.
 SKIP_SUBTYPES = frozenset({
     "channel_join", "channel_leave", "group_join", "group_leave", "channel_topic", "channel_purpose",
@@ -396,6 +405,11 @@ class State:
             if checked is not None:
                 st["checked"] = checked
 
+    def heard(self, cid: str, now: float) -> None:
+        """A live event came in for this conversation (the pass reads it next time)."""
+        with self.lock:
+            self.channels.setdefault(cid, {})["heard"] = now
+
     def save(self) -> None:
         with self.lock:
             save_state(self.path, self.data)
@@ -500,7 +514,10 @@ def sync_pass(
 
     `live_since`: when live events (slack_events.py) have been coming in without a break
     since then, a conversation last checked after it is read back only LIVE_LOOKBACK_S
-    from its resume point, not LOOKBACK_S: its edits and new replies came as events."""
+    from its resume point, not LOOKBACK_S: its edits and new replies came as events. One
+    with no activity since it was checked is not read at all, except in the sweep every
+    SWEEP_EVERY_S. Counts of the pass (read, unchanged, sweep) are kept in the state's
+    "last_pass"."""
     st_all = state or State(state_path)
     now = time.time() if now is None else now
     chans = st_all.channels
@@ -514,7 +531,8 @@ def sync_pass(
             raise
         team_url = me = ""
     quiet = muted(get)
-    total = changed = 0
+    total = changed = read = unchanged = 0
+    sweep = live_since is None or now - float(st_all.data.get("swept") or 0) >= SWEEP_EVERY_S
     try:
         convs = conversations(get)
         with st_all.lock:
@@ -537,6 +555,9 @@ def sync_pass(
                 continue
             start = now - backfill_days * 86400
             live = live_since is not None and checked >= live_since
+            if live and not sweep and not _active(st, checked):
+                unchanged += 1
+                continue
             oldest = max(start, last - (LIVE_LOOKBACK_S if live else LOOKBACK_S)) if last else start
             try:
                 n, c, newest = sync_conversation(ix, get, conv, names, resume, oldest, team_url)
@@ -547,11 +568,22 @@ def sync_pass(
                 continue
             total += n
             changed += c
+            read += 1
             st_all.advance(cid, newest, checked=now)
             st_all.save()
+        with st_all.lock:
+            if sweep:
+                st_all.data["swept"] = now
+            st_all.data["last_pass"] = {"read": read, "unchanged": unchanged, "sweep": sweep}
     finally:
         st_all.save()
     return total, changed
+
+
+def _active(st: dict[str, Any], checked: float) -> bool:
+    """Did the conversation have activity since the pass read it at `checked`: an event
+    heard then or later, or a resume point that moved past it."""
+    return float(st.get("heard") or 0) >= checked or _fts(st.get("ts")) > checked
 
 
 # --- live events (slack_events.py receives them; this stores them like a pass would) -----
@@ -633,6 +665,7 @@ def handle_event(
     names = live.state.names(live.get)
     if left_out(conv, names, skip_set(live.skip), live.quiet):
         return []
+    live.state.heard(cid, time.time() if now is None else now)
     title = title_of(conv, names)
     if sub == "message_changed":
         m = ev.get("message") or {}
