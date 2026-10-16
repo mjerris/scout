@@ -299,7 +299,7 @@ def test_the_room_holds_peer_messages_and_asks_sessions_through_its_tool(tmp_pat
     spoken, detail = brain.describe_tool(
         "mcp__voice_app__session_ask", {"session": "porting", "message": "pause"}
     )
-    assert spoken == "Ask porting: pause?" and "pause" in detail
+    assert spoken == "Ask porting?\nIt says: pause." and "pause" in detail
 
 
 def test_session_ask_is_two_steps_by_phone_with_the_session_read_back(registry: Path, relay: Any) -> None:

@@ -496,6 +496,17 @@ class PrivacyConfig:
 
 
 @dataclass
+class ConfirmConfig:
+    # Sending (mail_send, slack_send, message_send) and calling (call_start) for a Claude
+    # session is confirmed by your spoken yes in the room. typed = true also lets a session
+    # send without asking aloud when you have already approved that exact message (or
+    # call) in your own words in its chat: it passes approved: "typed", Scout logs that,
+    # sends, and says one short line ("Sent to Joao Santos."). Only those four tools,
+    # never from the phone or the room; without this, approved: "typed" still asks aloud.
+    typed: bool = False
+
+
+@dataclass
 class Config:
     wake: WakeConfig = field(default_factory=WakeConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -524,6 +535,7 @@ class Config:
     lists: ListsConfig = field(default_factory=ListsConfig)
     notes: NotesConfig = field(default_factory=NotesConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    confirm: ConfirmConfig = field(default_factory=ConfirmConfig)
 
     def path(self, p: str) -> Path:
         """Resolve a config path relative to Scout's data folder."""

@@ -171,7 +171,9 @@ def test_sending_is_spoken_with_recipient_and_never_saved_as_always(tmp_path: Pa
         return asked, b.rules.listing()
 
     asked, rules = asyncio.run(go())
-    assert [s for s, _ in asked] == ["Send email to sam@example.com, subject Lunch?"] * 2
+    assert [s for s, _ in asked] == [
+        "Send email to sam@example.com, subject Lunch?\nIt says: Noon works."
+    ] * 2
     assert "Noon works." in asked[0][1]  # the web page shows the full message
     assert rules == []
 

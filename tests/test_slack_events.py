@@ -732,7 +732,7 @@ def test_draft_says_what_and_send_needs_the_draft(sender: Fake) -> None:
         run(slack_send.draft({"to": "Sam", "text": " "}))
     d = draft_id(out)
     spoken, detail = brain.describe_tool("mcp__voice_app__slack_send", {"draft": d})
-    assert spoken == "Send to Sam Roe on Slack: Running 5 <min> late & sorry?"
+    assert spoken == "Send the Slack message to Sam Roe?\nIt says: Running 5 <min> late & sorry."
     assert detail.startswith("send Slack message to Sam Roe (D1)")
     sent = run(slack_send.send({"draft": d}))
     assert sent == "Sent to Sam Roe on Slack (ref slack:D1:1800000000.000100)."
@@ -777,7 +777,7 @@ def test_send_is_confirmed_by_voice_and_never_promoted(sender: Fake, monkeypatch
 
     no, asked = run(go(False))
     assert no["status"] == "declined" and sender.posted == []
-    assert asked == ["From desk: Send to Sam Roe on Slack: on my way?"]
+    assert asked == ["From desk: Send the Slack message to Sam Roe?\nIt says: on my way."]
     yes, _ = run(go(True))
     assert yes["status"] == "ok" and sender.posted == [{"channel": "D1", "text": "on my way"}]
 

@@ -316,6 +316,28 @@ alone. Sending mail, adding events, and adding or completing reminders are
 confirmed by voice in the room on every call ("From myproject: Send email to sam@example.com, subject Lunch?"),
 whatever the calling session's own permission settings say.
 
+A send's read-back is short: the question first (the action and who it goes to), then
+the message itself when it's 15 words or less, else how it starts and roughly how long
+it is ("It starts: Hey Joao, I went through the setup. It's about 300 words."). The
+whole text is on the web page and in the session. An answer said over the read-back
+counts once the question has been said, if it's a clear yes or no and not Scout's own
+words coming back, and it ends the read-back.
+
+Typed approval (opt-in): when you approve a send in a Claude Code session's chat, you
+can skip the spoken question. With
+
+```toml
+[confirm]
+typed = true
+```
+
+the session's `mail_send`, `slack_send`, `message_send` and `call_start` take
+`approved: "typed"`, which the tool descriptions allow only when you explicitly approved
+that exact message (or call) in your own words in that chat. Scout logs that the
+approval was typed, sends, and says one line ("Sent to Joao Santos."). Nothing else
+takes it, the phone and the room never do, and without the key `approved: "typed"`
+still asks aloud.
+
 How to use them (which tool, untrusted email, how to say results out loud) is
 the `mail-calendar` skill in `skills/`; `scripts/install-skills.sh` links it
 into `~/.claude/skills` for the room and every other session.

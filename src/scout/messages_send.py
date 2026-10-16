@@ -36,7 +36,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import contacts_mac, mac, messages_mac
+from . import contacts_mac, mac, messages_mac, speech
 from .mac import ToolError
 
 DRAFT_TTL_S = 1800.0
@@ -198,15 +198,22 @@ def _clip(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
-def describe(a: dict[str, Any]) -> tuple[str, str]:
-    """The confirmation: (spoken question with the text read back, the page's detail)."""
+def describe(a: dict[str, Any], full: bool = False) -> tuple[str, str]:
+    """The confirmation: (spoken question, then on its own line a short read-back of the
+    text; the page's detail with all of it). full=True: the phone's read-back, the text
+    itself up to SPOKEN_CHARS (the caller has no page to look at)."""
     d = _draft(a)
     if d is None:
         return "Send a text?", f"send text draft {a.get('draft')!r} (no such draft)"
-    return (
-        f"Text {d.name}: {_clip(d.text, SPOKEN_CHARS)}?",
-        f"send text to {d.name} ({d.label} {d.handle}, {d.service})\n\n{d.text}",
-    )
+    detail = f"send text to {d.name} ({d.label} {d.handle}, {d.service})\n\n{d.text}"
+    if full:
+        return f"Text {d.name}: {_clip(d.text, SPOKEN_CHARS)}?", detail
+    return f"Send the text to {d.name}?\n{speech.read_back(d.text)}", detail
+
+
+def recipient(a: dict[str, Any]) -> str:
+    d = _draft(a)
+    return d.name if d is not None else "them"
 
 
 async def send(a: dict[str, Any]) -> str:

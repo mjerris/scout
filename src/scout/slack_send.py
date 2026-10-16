@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import slack
+from . import slack, speech
 from .config import load
 from .mac import ToolError
 
@@ -163,15 +163,22 @@ def _draft(a: dict[str, Any]) -> Draft | None:
     return d
 
 
-def describe(a: dict[str, Any]) -> tuple[str, str]:
-    """The confirmation: (spoken question with the text read back, the page's detail)."""
+def describe(a: dict[str, Any], full: bool = False) -> tuple[str, str]:
+    """The confirmation: (spoken question, then on its own line a short read-back of the
+    text; the page's detail with all of it). full=True: the phone's read-back, the text
+    itself up to SPOKEN_CHARS (the caller has no page to look at)."""
     d = _draft(a)
     if d is None:
         return "Send a Slack message?", f"send Slack draft {a.get('draft')!r} (no such draft)"
-    return (
-        f"Send to {d.label} on Slack: {_clip(d.text, SPOKEN_CHARS)}?",
-        f"send Slack message to {d.label} ({d.channel})\n\n{d.text}",
-    )
+    detail = f"send Slack message to {d.label} ({d.channel})\n\n{d.text}"
+    if full:
+        return f"Send to {d.label} on Slack: {_clip(d.text, SPOKEN_CHARS)}?", detail
+    return f"Send the Slack message to {d.label}?\n{speech.read_back(d.text)}", detail
+
+
+def recipient(a: dict[str, Any]) -> str:
+    d = _draft(a)
+    return d.label if d is not None else "Slack"
 
 
 def _escape(text: str) -> str:

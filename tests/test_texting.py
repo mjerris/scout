@@ -145,7 +145,7 @@ def test_draft_reads_back_and_sends_once(texts: Sends) -> None:
     assert texts.sent == []  # a draft sends nothing
     d = draft_id(out)
     spoken, detail = brain.describe_tool("mcp__voice_app__message_send", {"draft": d})
-    assert spoken == "Text Pat Doe: I'm running late?"
+    assert spoken == "Send the text to Pat Doe?\nIt says: I'm running late."
     assert detail.startswith("send text to Pat Doe (mobile +15550102000, iMessage)")
     assert run(messages_send.send({"draft": d})) == "Sent to Pat Doe (+15550102000) in Messages."
     assert texts.sent == [("+15550102000", "iMessage", "I'm running late")]
@@ -225,7 +225,7 @@ def test_send_is_confirmed_by_voice_and_never_promoted(texts: Sends, monkeypatch
 
     no, asked = run(go(False))
     assert no["status"] == "declined" and texts.sent == []
-    assert asked == ["From desk: Text Pat Doe: late?"]
+    assert asked == ["From desk: Send the text to Pat Doe?\nIt says: late."]
     yes, _ = run(go(True))
     assert yes["status"] == "ok" and texts.sent == [("+15550102000", "iMessage", "late")]
 
