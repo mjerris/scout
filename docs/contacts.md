@@ -185,6 +185,62 @@ the store what it found. The store merges the records those identities join into
 to it. A Slack user Scout has no record with makes no record. A contact no longer in
 Contacts' answer loses the contact and keeps the rest.
 
+**GitHub logins** (`github_people.py`, run by scout-memory's GitHub sync every six hours,
+the first time at its start; `people.slack_github` in the app's pass). A login joins the
+rest of its person by an address or an account, never by a name:
+
+- **Commit emails.** For each repo the sync tracks (state/github.json's repos), the commit
+  list (`/repos/<o>/<r>/commits`, GET): five pages of 100 the first time, then only what came
+  since the newest commit seen (its date; the commits at that date are kept, so none is
+  counted twice). Each commit gives its author's and committer's (login, address). Skipped:
+  noreply addresses (`*@users.noreply.github.com`, `noreply@github.com`), bots (`[bot]`,
+  type Bot, web-flow, github-actions...), automation addresses (ci@, build@, deploy@... and
+  the machine addresses above), a commit without a GitHub user, and you (a login that commits
+  with one of your addresses is taken for yours too). An address is a login's only when no
+  other login used it, and only when it's that login's most used address or on two commits
+  or more, so one stray commit doesn't hand a login someone else's address. 60 requests a
+  pass at most (commits and profiles together); a rate limit waits for GitHub's reset.
+  The counts are kept in state/github_people.json.
+- **The public profile** (`/users/<login>`, with its ETag, read again weekly) for the logins
+  Scout has people for and the ones commits showed: its email, when it shows one, is a key
+  like a commit's. Its name is not.
+- **Slack's GitHub field.** When the workspace has a custom profile field labelled GitHub
+  (`team.profile.get`, checked daily), each member's (`users.profile.get`, 100 a pass, read
+  again weekly) gives their login, which joins their Slack user. Both calls need the
+  `users.profile:read` scope; without it (or without such a field) that's recorded in
+  state/people.json ("missing_scope", "none") and nothing more is asked that day. The
+  SignalWire workspace's token (2026-10-16) has `users:read` and `users:read.email` but not
+  `users.profile:read`, so whether it has a GitHub field can't be read yet: add the scope
+  to the Slack app and it's used from the next pass.
+- **Told.** "Brian's GitHub is briankwest" (also "Brian is briankwest on GitHub", "Brian's
+  GitHub username is @briankwest", a github.com link, or the login spelled out with spaces
+  as it's heard) is a fact like any other (memory.py; kept by tier 0 without "remember",
+  and by the remember tools), and the store gives the login to the one person who goes by
+  that name (`Index.apply_told`, whenever facts change and after each pass): the login's own
+  record merges into theirs. With no one or several people by that name, it waits for a
+  later pass. Forget it ("forget Brian's GitHub") and the login comes off them again; its
+  GitHub items link to the login's own record.
+- **Same name, asked.** A login whose GitHub name (the profile's, else the commit author
+  name it used most) is another person's full name, with no key shared, is a suggestion,
+  not a merge (`Index.people_suggestions`). When a request names them, Claude's context
+  carries the question ("Is Brian West on GitHub the same as briankwest?"), asked once when
+  it bears on the request. A yes is remembered as "Brian West's GitHub is briankwest"
+  (merged, as told); a no as "Brian West's GitHub is not briankwest", which keeps it from
+  being asked again (forget it to be asked again).
+
+What these find goes to `put_people` as the other identities do (`complete` false: nobody
+made, nobody's contact dropped). Any entry holding one of your identities is left out, so a
+contact card with your address or your GitHub login never becomes a person. The log line is
+counts only: "people: github N commits read, N logins seen, N mapped to an email, N merged,
+N suggestions".
+
+On a copy of the live store (2026-10-16, read-only GitHub calls, counts only): the first
+pass read 4,048 commits from the 9 tracked repos in 60 requests and saw 50 logins, all 50
+with an address that's theirs alone; two more passes read 60 profiles (18 show an email, 49
+a full name). It merged 10 records (170 people to 160), and 20 people now hold a GitHub
+login with an address or Slack user (14 of them with the same surname on both sides, none
+different, 6 with no name to compare). 8 same-name suggestions; no address two logins used.
+
 **The backfill.** scout-memory links what was stored before, at startup, in the
 background: 500 records a step from where the last step stopped (kept in the store's
 settings, so a restart resumes), in two passes (the second finds the people named only by
@@ -219,3 +275,5 @@ links. "Joao Santos" is one person (his Slack user), linked to all 28 DMs with h
   until they're synced again.
 - A record that names someone only by name, stored before anyone went by that name, is
   linked by the next backfill (it runs once; `restart_people_backfill` runs it again).
+- Slack's GitHub field once the token has `users.profile:read`.
+- The commit history before the first pass's 500 commits a repo isn't read.

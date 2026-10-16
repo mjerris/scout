@@ -236,7 +236,9 @@ def says_remember(question: str, tools: str) -> bool:
     if _REMEMBER_TOOL.search(tools or ""):
         return True
     q = _WAKE.sub("", (question or "").strip())
-    return bool(_SAYS_KEEP.search(q)) and not _ASKS.match(q)
+    from .people import told_github  # "Brian's GitHub is briankwest" is kept without "remember"
+
+    return (bool(_SAYS_KEEP.search(q)) and not _ASKS.match(q)) or told_github(q) is not None
 
 
 def says_rule(question: str) -> bool:

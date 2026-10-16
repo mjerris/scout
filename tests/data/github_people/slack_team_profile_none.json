@@ -1,0 +1,13 @@
+{
+ "ok": true,
+ "profile": {
+  "fields": [
+   {
+    "id": "Xf01",
+    "ordering": 0,
+    "label": "Title",
+    "type": "text"
+   }
+  ]
+ }
+}

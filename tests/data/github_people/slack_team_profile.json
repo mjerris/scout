@@ -1,0 +1,20 @@
+{
+ "ok": true,
+ "profile": {
+  "fields": [
+   {
+    "id": "Xf01",
+    "ordering": 0,
+    "label": "Title",
+    "type": "text"
+   },
+   {
+    "id": "Xf02",
+    "ordering": 1,
+    "label": "GitHub",
+    "type": "link",
+    "hint": "Your GitHub profile"
+   }
+  ]
+ }
+}

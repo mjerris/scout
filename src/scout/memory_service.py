@@ -24,6 +24,7 @@ token (state/memory.token, readable by this user only):
     POST /v1/slack/alerts {}                              -> {alerts}: DMs to say, taken (slack_events.py)
     POST /v1/people/candidates {limit} -> {emails} | /v1/people/put {people, complete} -> {people, removed, links}
     POST /v1/people/search {person, query, kinds, since, limit, semantic} -> {hits}  (people.py)
+    POST /v1/people/suggestions {request} -> {suggestions}  (same-name GitHub people to ask about)
 
 Scout's own records are markdown files under memory/ (journal.py; facts.md), the
 index is built from them, and edits to them are picked up within a minute.
@@ -169,6 +170,10 @@ class Service:
 
     def _index_memories(self) -> None:
         self.ix.sync("memory", self.memory.as_documents())
+        try:  # "Brian's GitHub is briankwest" told or forgotten: the person's login (people.py)
+            self.ix.apply_told()
+        except Exception:
+            log.exception("people: applying told GitHub logins failed")
 
     def _delete(self, id: str) -> str:
         self.ix.delete(id)
@@ -221,6 +226,7 @@ class Service:
             "/v1/people/candidates": lambda a: {"emails": self.ix.people_candidates(int(a.get("limit") or 400))},
             "/v1/people/put": lambda a: self.ix.put_people(list(a.get("people") or []), bool(a.get("complete", True))),
             "/v1/people/named": lambda a: {"people": self.ix.people_named(str(a.get("name") or ""))},
+            "/v1/people/suggestions": lambda a: {"suggestions": self.ix.people_suggestions(str(a.get("request") or ""))},
             "/v1/people/search": lambda a: {"hits": [_hit(h) for h in self.ix.person_search(
                 str(a.get("person") or ""), str(a.get("query") or ""), kinds=_kinds(a.get("kinds")),
                 since=a.get("since"), limit=int(a.get("limit") or 8), semantic=a.get("semantic", None))]},

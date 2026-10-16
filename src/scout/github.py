@@ -332,6 +332,10 @@ async def loop(ix: index.Index, cfg: Any, state: Path = STATE) -> None:
                     p.backlog = len(due(ix, cfg, load_state(state), time.time()))
                 if changed:
                     log.info("github: %d items changed (%d requests)", changed, asked)
+                # Logins joined to their people by commit emails and profiles, every six hours.
+                from . import github_people
+
+                await run.run_in_executor(None, github_people.run_pass, ix, get)
         except GitHubError as exc:
             log.warning("github: sync failed: %s", exc)
         except Exception:

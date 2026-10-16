@@ -1109,8 +1109,15 @@ class Index:
         unless they're a contact. complete: Contacts' list is everyone's, so a person whose
         contact isn't in it loses the contact (and keeps the rest). Returns counts."""
         keep: list[str] = []
+        merged = 0
+        ctx = self.people_ctx()
         for p in found:
-            got = self._join(people.meta_of(p), create=bool(p.get("contact")))
+            meta = people.meta_of(p)
+            keys = people.strong_keys(meta)
+            if any(ctx.is_me(k) for k in keys):
+                continue  # the user (their Slack id, an address, their login) is never a person
+            merged += len(self._owners(keys)) > 1
+            got = self._join(meta, create=bool(p.get("contact")))
             if got and got not in keep:
                 keep.append(got)
         removed = 0
@@ -1134,7 +1141,8 @@ class Index:
                 ).fetchone()[0]
                 for pid in keep
             )
-        return {"people": len(keep), "removed": removed, "links": made}
+        self.apply_told()  # a told login whose name was ambiguous may fit one person now
+        return {"people": len(keep), "removed": removed, "links": made, "merged": merged}
 
     def _owners(self, keys: Sequence[str]) -> list[str]:
         """The people holding these identities, in the order the keys come."""
@@ -1286,6 +1294,134 @@ class Index:
                 kinds,
             ).fetchone()[0]
         return {**st, "total": int(total), "people": self.count(people.KIND)}
+
+    # GitHub logins: told to Scout (a fact), and the same-name suggestions (github_people.py).
+
+    _TOLD_KEY = "people_told"  # {fact id: {login, added}}: the told logins applied
+    _GH_NAMES_KEY = "github_names"  # {login: the full name they go by on GitHub}
+
+    def _setting(self, key: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return _meta(row[0]) if row else {}
+
+    def _set_setting(self, key: str, value: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, json.dumps(value))
+            )
+
+    def people_logins(self) -> list[str]:
+        """The GitHub logins the store has people for."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT key FROM person_keys WHERE key LIKE 'github:%'"
+            ).fetchall()
+        return sorted(str(r[0]).partition(":")[2] for r in rows)
+
+    def put_github_names(self, names: dict[str, str]) -> None:
+        self._set_setting(self._GH_NAMES_KEY, {str(k).lower(): str(v) for k, v in names.items()})
+
+    def _told(self) -> dict[str, people.Told]:
+        """The facts that give someone's GitHub login (people.told_github), by fact id."""
+        with self._lock:
+            rows = self._conn.execute("SELECT id, title FROM docs WHERE kind = 'memory'").fetchall()
+        return {str(id): t for id, title in rows if (t := people.told_github(str(title))) is not None}
+
+    def _told_target(self, t: people.Told) -> Hit | None:
+        """The one person a told name means, other than the login's own record; the login's
+        record itself when it already goes by that name; None when no one or several do."""
+        owners = self._owners([f"github:{t.login}"])
+        named = [p["id"] for p in self.people_named(t.name)]
+        others = [pid for pid in named if pid not in owners]
+        if len(others) == 1:
+            return self.get(others[0])
+        if not others and len(owners) == 1 and owners[0] in named:
+            return self.get(owners[0])
+        return None
+
+    def apply_told(self) -> dict[str, int]:
+        """Make the store what the facts say about GitHub logins: "Brian's GitHub is
+        briankwest" gives the login to the one person called Brian (merging the login's own
+        record into theirs); a fact forgotten takes the login back off them, and the
+        records by that login are linked to it again on their own. A name no one or
+        several people go by waits for a later call. The user's login is never given."""
+        told = {fid: t for fid, t in self._told().items() if not t.negative}
+        st = self._setting(self._TOLD_KEY)
+        ctx = self.people_ctx()
+        added = undone = 0
+        for fid, t in told.items():
+            if fid in st:
+                continue
+            if ctx.is_me(f"github:{t.login}") or ctx.is_me("", t.name):
+                st[fid] = {"login": t.login, "added": False}
+                continue
+            target = self._told_target(t)
+            if target is None:
+                continue
+            had = t.login in (target.meta.get("github") or [])
+            if not had:
+                self._join(people.merge([target.meta, {"github": [t.login]}]))
+                added += 1
+            st[fid] = {"login": t.login, "added": not had}
+        for fid in [f for f in st if f not in told]:
+            gone = st.pop(fid)
+            login = str(gone.get("login") or "")
+            if gone.get("added") and login and not any(t.login == login for t in told.values()):
+                self._untell(login)
+                undone += 1
+        self._set_setting(self._TOLD_KEY, st)
+        return {"added": added, "undone": undone}
+
+    def _untell(self, login: str) -> None:
+        """A told login taken back: off the person holding it, and the GitHub records by
+        it linked again (to the login's own record, made anew)."""
+        for pid in self._owners([f"github:{login}"]):
+            h = self.get(pid)
+            if h is not None:
+                self._put_person(
+                    pid, {**h.meta, "github": [g for g in h.meta.get("github") or [] if g != login]}
+                )
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, kind, title, who, meta FROM docs WHERE kind = 'github'"
+            ).fetchall()
+        for id, kind, title, who, meta in rows:
+            m = _meta(meta)
+            if login in {str(x).lower() for x in [m.get("author"), *(m.get("assignees") or [])] if x}:
+                self.link_participants(str(id), str(kind), str(title), str(who), m)
+
+    def people_suggestions(self, request: str = "") -> list[dict[str, str]]:
+        """GitHub people who may be someone Scout knows by another identity: the login's
+        GitHub name is another person's full name, they share no key, and the user hasn't
+        said no ("Brian West's GitHub is not briank"). With `request`, only the ones whose
+        name or login it mentions. [{login, name, person, title, ask}]."""
+        names = self._setting(self._GH_NAMES_KEY)
+        no = [t for t in self._told().values() if t.negative]
+        words = set(re.findall(r"[a-z0-9-]+", people._fold(request)))
+        out = []
+        for login, name in sorted(names.items()):
+            if request and not (
+                login in words or words & {w for w in people._fold(name).split() if len(w) > 2}
+            ):
+                continue
+            owners = self._owners([f"github:{login}"])
+            if not owners:
+                continue
+            others = [p for p in self.people_named(name) if p["id"] not in owners]
+            if len(others) != 1:
+                continue
+            o = self.get(others[0]["id"])
+            if o is None or login in (o.meta.get("github") or []):
+                continue
+            theirs = {people._fold(n) for n in [o.title, name, *(o.meta.get("names") or [])]}
+            if any(
+                t.login == login and (t.name in theirs or t.name == people._fold(name).split()[0]) for t in no
+            ):
+                continue
+            out.append({"login": login, "name": name, "person": o.id, "title": o.title,
+                        "ask": f"Is {name} on GitHub the same as {login}?"})  # fmt: skip
+        return out
 
     def people_named(self, name: str) -> list[dict[str, Any]]:
         """The people who go by this name (any of theirs, or an address): the full name,
@@ -2372,6 +2508,7 @@ class Store(Protocol):
     def people_candidates(self, limit: int = 400) -> list[str]: ...
     def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]: ...
     def people_named(self, name: str) -> list[dict[str, Any]]: ...
+    def people_suggestions(self, request: str = "") -> list[dict[str, str]]: ...
     def person_search(
         self, person: str, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
         limit: int = 8, semantic: bool | None = True,
