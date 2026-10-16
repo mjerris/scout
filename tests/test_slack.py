@@ -317,7 +317,7 @@ def test_the_fetcher_honors_retry_after_and_slack_errors(monkeypatch: pytest.Mon
 
 
 def test_slack_loop_syncs_with_the_config(
-    fake: FakeSlack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake: FakeSlack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(slack, "fetcher", lambda token: fake)
 
@@ -329,10 +329,12 @@ def test_slack_loop_syncs_with_the_config(
     class Cfg:
         token, every_min, backfill_days, skip = "xoxp-x", 15.0, 14.0, ["launch"]
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError), caplog.at_level("INFO", logger="scout.memory_service"):
         asyncio.run(memory_service.slack_loop(store(), Cfg(), tmp_path / "slack.json"))
     chans = {h.meta["channel"] for h in store().recent(["slack"], limit=50)}
     assert chans == {"D1", "G1", "C2"}
+    said = [r.getMessage() for r in caplog.records if r.getMessage().startswith("slack: ")]
+    assert said and "; 3 conversations read, 0 unchanged (the full sweep)" in said[0]  # counts only
 
 
 # --- privacy in local_search ----------------------------------------------------------------

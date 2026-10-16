@@ -88,6 +88,20 @@ requests go out at most one every 1.2 seconds, and a 429 waits for its `Retry-Af
 (up to a minute) and tries again. A pass over a hundred conversations takes about
 two minutes.
 
+**Only what changed, while live events flow.** Slack's conversation lists give a user
+token no latest message or read mark per conversation (`users.conversations` and
+`conversations.list` carry neither; `client.counts` refuses an xoxp token), so the live
+events say which conversations changed: each one heard is marked in the state
+(`heard`). While the events have been up without a break since a conversation was last
+read, the pass reads it only when an event was heard in it since then, or its resume
+point moved past that read; the rest were brought in by the events already. Once a day
+(`SWEEP_EVERY_S`), and for every conversation last read before the events' last break,
+the pass reads them all again, the safety net. Each pass logs its counts: "slack: N
+messages (N items changed) in N s; N conversations read, N unchanged (the full sweep)".
+Measured on the live workspace (2026-10-16, about 1,005 conversations, read-only into a
+scratch store): a pass took 1,250 to 1,335 s reading every one; with live events, 19 s
+reading 7 (983 unchanged).
+
 ## Privacy
 
 Slack text is private, like mail and meetings: `local_search` gives Claude only the
