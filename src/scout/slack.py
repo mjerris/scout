@@ -520,6 +520,7 @@ def sync_pass(
     "last_pass"."""
     st_all = state or State(state_path)
     now = time.time() if now is None else now
+    t0 = time.monotonic()  # each conversation is checked when it's read: now plus the pass so far
     chans = st_all.channels
     names = st_all.names(get)
     skipped = skip_set(skip)
@@ -559,6 +560,7 @@ def sync_pass(
                 unchanged += 1
                 continue
             oldest = max(start, last - (LIVE_LOOKBACK_S if live else LOOKBACK_S)) if last else start
+            at = now + (time.monotonic() - t0)  # live events up since before this count as covering it
             try:
                 n, c, newest = sync_conversation(ix, get, conv, names, resume, oldest, team_url)
             except SlackError as exc:
@@ -569,7 +571,7 @@ def sync_pass(
             total += n
             changed += c
             read += 1
-            st_all.advance(cid, newest, checked=now)
+            st_all.advance(cid, newest, checked=at)
             st_all.save()
         with st_all.lock:
             if sweep:

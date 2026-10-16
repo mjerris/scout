@@ -234,7 +234,7 @@ def test_with_live_events_a_pass_reads_back_less(fake: Fake, tmp_path: Path) -> 
     fake.history["C1"] = [msg(ts(60), "U1", "first")]
     slack.sync_pass(store(), fake, 14, state=st, now=NOW)  # checked at NOW
     m = msg(ts(1), "U2", "since then")
-    slack.handle_event(store(), slack.Live(fake, st), ev("C1", m), now=NOW)
+    slack.handle_event(store(), slack.Live(fake, st), ev("C1", m), now=NOW + 30)  # heard after the pass
     fake.history["C1"].append(m)
 
     def oldest() -> float:
@@ -284,6 +284,26 @@ def test_with_live_events_a_pass_reads_only_what_had_activity(fake: Fake, tmp_pa
     fake.calls.clear()
     slack.sync_pass(store(), fake, 14, state=st, now=later + 60, live_since=NOW)
     assert read() == {"D1"}
+
+
+def test_a_conversation_read_after_events_came_up_counts_as_covered(
+    fake: Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first pass after a start begins a moment before the events connect: each
+    # conversation is checked when it's read, not when the pass began, so the next pass
+    # passes over the ones read after the connection came up.
+    clock = iter(range(0, 10_000, 10))
+    monkeypatch.setattr(time, "monotonic", lambda: float(next(clock)))
+    st = slack.State(tmp_path / "s.json")
+    slack.sync_pass(store(), fake, 14, state=st, now=NOW)
+    checks = sorted(float(c["checked"]) for c in st.channels.values())
+    assert checks[0] > NOW and len(set(checks)) == len(checks)  # each read at its own time
+    fake.calls.clear()
+    connected = checks[0] + 1  # the events came up just after the first read
+    slack.sync_pass(store(), fake, 14, state=st, now=checks[-1] + 60, live_since=connected)
+    read = {p["channel"] for k, p in fake.calls if k == "conversations.history"}
+    first = next(cid for cid, c in st.channels.items() if float(c["checked"]) > checks[-1])
+    assert len(read) == 1 and read == {first}  # only the one read before the connection
 
 
 # --- which DMs make an alert ----------------------------------------------------------------
