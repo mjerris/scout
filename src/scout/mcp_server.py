@@ -17,7 +17,7 @@ import aiohttp
 from mcp.server.mcpserver import MCPServer
 
 from .config import DATA, load
-from .shared_tools import BY_NAME
+from .shared_tools import BY_NAME, TYPED_NOTE, TYPED_TOOLS
 
 INSTRUCTIONS = """\
 Voice I/O through the always-on scout app on this Mac. Use `discuss`
@@ -259,7 +259,9 @@ async def _tool(name: str, args: dict[str, Any]) -> str:
 
 
 def _doc(name: str) -> str:
-    return BY_NAME[name].description
+    """A shared tool's description; the send and call tools also say when a session may
+    pass approved: "typed" (only here: the room's own copies never offer it)."""
+    return BY_NAME[name].description + (TYPED_NOTE if name in TYPED_TOOLS else "")
 
 
 @mcp.tool(description=_doc("calendar_events"))
@@ -357,8 +359,12 @@ async def mail_draft(to: list[str], cc: list[str] | None = None, subject: str = 
 
 
 @mcp.tool(description=_doc("mail_send"))
-async def mail_send(to: list[str], cc: list[str] | None = None, subject: str = "", body: str = "") -> str:
-    return await _tool("mail_send", {"to": to, "cc": cc, "subject": subject, "body": body})
+async def mail_send(
+    to: list[str], cc: list[str] | None = None, subject: str = "", body: str = "", approved: str = ""
+) -> str:
+    return await _tool(
+        "mail_send", {"to": to, "cc": cc, "subject": subject, "body": body, "approved": approved or None}
+    )
 
 
 @mcp.tool(description=_doc("slack_draft"))
@@ -367,8 +373,8 @@ async def slack_draft(to: str, text: str) -> str:
 
 
 @mcp.tool(description=_doc("slack_send"))
-async def slack_send(draft: str) -> str:
-    return await _tool("slack_send", {"draft": draft})
+async def slack_send(draft: str, approved: str = "") -> str:
+    return await _tool("slack_send", {"draft": draft, "approved": approved or None})
 
 
 @mcp.tool(description=_doc("messages_recent"))
@@ -412,8 +418,8 @@ async def message_draft(to: str, text: str) -> str:
 
 
 @mcp.tool(description=_doc("message_send"))
-async def message_send(draft: str) -> str:
-    return await _tool("message_send", {"draft": draft})
+async def message_send(draft: str, approved: str = "") -> str:
+    return await _tool("message_send", {"draft": draft, "approved": approved or None})
 
 
 @mcp.tool(description=_doc("call_prepare"))
@@ -422,8 +428,8 @@ async def call_prepare(to: str) -> str:
 
 
 @mcp.tool(description=_doc("call_start"))
-async def call_start(call: str) -> str:
-    return await _tool("call_start", {"call": call})
+async def call_start(call: str, approved: str = "") -> str:
+    return await _tool("call_start", {"call": call, "approved": approved or None})
 
 
 @mcp.tool(description=_doc("call_link"))

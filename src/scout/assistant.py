@@ -49,7 +49,7 @@ from . import (
 )
 from .asr import Transcriber
 from .audio import Utterance, analyze
-from .brain import Brain, PhoneBrain, describe_tool
+from .brain import Brain, PhoneBrain, describe_tool, split_question
 from .config import DATA, Config
 from .floor import Floor
 from .mac import ToolError
@@ -606,11 +606,22 @@ class Assistant:
 
         # Echo only if our speech actually overlapped the clip; a reply that merely
         # starts in the echo tail is the user's alone (and may reuse our words).
-        echo = (
-            not self.echo_cancelled
-            and utt.echo
-            and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
-        )
+        # (utt.echo only says playback was on when the speech began.)
+        over_us = utt.echo and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
+        echo = not self.echo_cancelled and over_us
+        if confirming and over_us and not echo and not self._is_stop(text):
+            # Said over the read-back of a question (or a barge-in over it). The canceller
+            # may not have taken all of our voice out, and the message may hold a "yes":
+            # only a clear yes or no that isn't our own words is an answer.
+            spoken = self.speaker.recent_speech(since=utt.started)
+            residual = speech.strip_own_speech(text, spoken, self.pronounce.tts(spoken))
+            if not residual or speech.parse_answer(residual) is None:
+                self._reject("answer", text, "not a clear yes or no over the read-back")
+                return
+            text = residual
+            cmd = speech.strip_wake(
+                text, self.cfg.wake.names, self.cfg.wake.max_position, self.cfg.wake.greeted_names
+            )
         if echo:
             # The mic heard the assistant too: "<wake> stop" always counts;
             # otherwise keep only the words that weren't ours.
@@ -748,6 +759,8 @@ class Assistant:
                 self._spawn(self._reopen_confirm())
             elif self._confirm_fut is not None:
                 self._confirm_fut.set_result(answer)
+                if not direct and getattr(self.speaker, "speaking", self.speaker.busy):
+                    self.speaker.stop()  # answered over the read-back: the rest isn't needed
             return None
 
         if cmd is not None or direct:
@@ -1783,18 +1796,26 @@ class Assistant:
         self._confirm_audience = out
         self._confirm_fut = fut
         ok: bool | str | None = False
+        question, read_back = split_question(spoken)
         try:
             self.emit("confirm", id=cid, text=description)
             self._set_state("confirming")
             if out["mini"]:
-                self.speaker.speak(spoken)
+                self.speaker.speak(question)
             if out["client"]:
-                self.emit("say", text=spoken, to=out["client"])
+                self.emit("say", text=f"{question} {read_back}".strip(), to=out["client"])
             await self.speaker.wait_idle()
             if not fut.done():
                 barged, self._confirm_barged = self._confirm_barged, None
                 # An answer begun over the question counts from when it began.
                 self._confirm_started = (barged - 0.2) if barged else time.monotonic()
+                if read_back and out["mini"] and not barged:
+                    # The action and who it's for have been said: an answer said over
+                    # the read-back counts (_hear keeps only a clear yes or no that
+                    # isn't our own words), and ends it.
+                    self.speaker.speak(read_back)
+                    await self.speaker.wait_idle()
+                    self._confirm_barged = None
             try:
                 ok = await asyncio.wait_for(fut, timeout or self.cfg.claude.confirm_timeout_s)
             except TimeoutError:
@@ -1869,6 +1890,23 @@ class Assistant:
                     return {"status": "error", "error": f"there's no note {nid}"}
                 spoken = f"Delete note {nid}, {h.title}?"
             return {"status": "ok", "text": spoken}
+        typed = False
+        if "approved" in args:  # the user's approval typed in that session's chat
+            if name not in shared_tools.TYPED_TOOLS:
+                return {
+                    "status": "error",
+                    "error": f"approved is only for {', '.join(shared_tools.TYPED_TOOLS)}; leave it out",
+                }
+            if args["approved"] != "typed":
+                return {"status": "error", "error": 'approved can only be "typed"; leave it out to ask aloud'}
+            if agent == PHONE:
+                return {"status": "error", "error": "typed approval isn't for the phone"}
+            args = {k: v for k, v in args.items() if k != "approved"}
+            typed = self.cfg.confirm.typed
+            if not typed:
+                log.info(
+                    "typed approval from %s for %s, but [confirm] typed is off: asking aloud", agent, name
+                )
         if agent == PHONE and (name in NOT_BY_PHONE or (t.asks and not confirmed)):
             # Nobody in the room should be asked about a call they can't hear.
             return {"status": "error", "error": f"{name} can't be used from the phone"}
@@ -1878,6 +1916,12 @@ class Assistant:
         if t.asks and confirmed:  # the caller said yes on the phone (two steps, a gate)
             log.info("confirmed on the phone: %s", name)
             tr.record(name, "phone", True, describe_tool(name, args)[1], by=agent)
+        elif t.asks and typed:  # approved in the session's chat (config [confirm] typed)
+            detail = describe_tool(name, args)[1]
+            log.info(
+                "approved by typing in %s's chat (no spoken question): %s", agent, detail.splitlines()[0]
+            )
+            tr.record(name, "typed", True, detail, by=agent)
         elif t.asks and tr.tier(name) == "auto":  # promoted by the user (trust.py)
             log.info("allowed by trust, for %s: %s", agent, name)
             tr.record(name, "auto", True, describe_tool(name, args)[1], by=agent)
@@ -1919,7 +1963,16 @@ class Assistant:
         origin = sessions.ORIGIN.set(agent)  # session_ask: whose late reply it is
         run = mail_phone.BY_PHONE.get(name, t.run) if agent == PHONE else t.run
         try:
-            return {"status": "ok", "text": await run(args)}
+            said = shared_tools.recipient(name, args) if typed else ""  # before the draft is used up
+            text = await run(args)
+            if typed:  # no question was asked aloud: say, briefly, that it went
+                owner = self.floor.owner()
+                line = f"Calling {said}." if name == "call_start" else f"Sent to {said}."
+                if owner in (None, agent):
+                    self.speaker.speak(line)
+                else:
+                    log.info("not said (%s has the floor): %s", owner, line)
+            return {"status": "ok", "text": text}
         except ToolError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:  # report it to the caller; don't take the app down

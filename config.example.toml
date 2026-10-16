@@ -190,3 +190,10 @@ enabled = true
 # every_min = 10                          # fetch new items, refresh the ones due
 # open_every_min = 30                     # an open item is checked this often (with its ETag)
 # closed_every_days = 7                   # a closed or merged one this rarely; commits never
+
+[confirm]
+# Sends and calls for a Claude session (mail_send, slack_send, message_send, call_start)
+# are confirmed by your spoken yes in the room. typed = true lets a session skip that when
+# you already approved the exact message in its chat (it passes approved: "typed"): Scout
+# logs it, sends, and says "Sent to <who>." Never for other tools, the phone or the room.
+# typed = false

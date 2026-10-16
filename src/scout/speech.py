@@ -354,6 +354,36 @@ def parse_answer(text: str) -> bool | str | None:
     return "always" if answer is True else answer
 
 
+# ------------------------------------------------------------- read-backs ---
+READ_BACK_WORDS = 15  # a message up to this long is read back whole
+_FIRST_SENTENCE = re.compile(r"(.+?[.!?])(?=\s|$)")
+
+
+def about_words(n: int) -> str:
+    """A word count as it's said: "about 20", "about 350", "about 2,300"."""
+    step = 10 if n < 60 else 50 if n < 1000 else 100
+    return f"about {max(step, round(n / step) * step):,}"
+
+
+def read_back(text: str, words: int = READ_BACK_WORDS) -> str:
+    """A message to send, said back short (the whole text is on the user's screen): all
+    of it when it's short, else how it starts (its first sentence when that's short too,
+    else its first `words` words) and roughly how long it is. Never the whole of a long
+    body: a 2,000-character Slack message read back went on long enough that the yes
+    said over it was lost."""
+    flat = " ".join(to_speech(text).split())
+    if not flat:
+        return "It's empty."
+    w = flat.split()
+    if len(w) <= words:
+        return f"It says: {flat}" + ("" if flat[-1] in ".!?" else ".")
+    m = _FIRST_SENTENCE.match(flat)
+    first = (
+        m.group(1) if m and len(m.group(1).split()) <= words else " ".join(w[:words]).rstrip(",;:") + "..."
+    )
+    return f"It starts: {first} It's {about_words(len(w))} words."
+
+
 # ------------------------------------------------------------------ "wait" ---
 _SPAN = r"(?:sec|second|minute|moment|bit)"
 _WAIT_CORE = (

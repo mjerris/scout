@@ -123,6 +123,11 @@ def describe(a: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def recipient(a: dict[str, Any]) -> str:
+    c = _call(a)
+    return c.name if c is not None else "them"
+
+
 async def start(a: dict[str, Any]) -> str:
     """Only ever after the user's yes (asks=True): open the call prompt on the Mac, once."""
     with _lock:

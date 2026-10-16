@@ -291,12 +291,17 @@ def test_shared_tools_are_offered_alike_to_the_room_and_other_sessions() -> None
     assert set(brain.ALWAYS_ASK_TOOLS) == asks
     offered = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
     assert not {t.name for t in NOT_DESK} & set(offered)  # desk sessions have their own
+    from scout.shared_tools import TYPED_NOTE, TYPED_TOOLS
+
     for t in SHARED:
         assert t.name in offered, t.name
         theirs = offered[t.name].input_schema or {}
-        assert set(theirs.get("properties", {})) == set(t.schema["properties"]), t.name
+        # Sessions alone may pass the user's typed approval to the send and call tools.
+        typed = t.name in TYPED_TOOLS
+        extra = {"approved"} if typed else set()
+        assert set(theirs.get("properties", {})) == set(t.schema["properties"]) | extra, t.name
         assert set(theirs.get("required") or []) == set(t.schema.get("required", [])), t.name
-        assert offered[t.name].description == t.description
+        assert offered[t.name].description == t.description + (TYPED_NOTE if typed else "")
 
 
 def test_room_loads_scout_and_the_users_enabled_plugins(tmp_path: Path) -> None:

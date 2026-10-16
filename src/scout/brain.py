@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 )
 
 from .config import DATA, ROOT, ClaudeConfig
-from . import behavior, extmcp, trust
+from . import behavior, extmcp, speech, trust
 from .rules import Rules
 import contextlib
 
@@ -184,11 +184,11 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
     if name in SLACK_SEND_TOOLS or name == "slack_send":
         from . import slack_send
 
-        return slack_send.describe(args)
+        return slack_send.describe(args, full)
     if name in MESSAGE_SEND_TOOLS or name == "message_send":
         from . import messages_send
 
-        return messages_send.describe(args)
+        return messages_send.describe(args, full)
     if name in CALL_TOOLS or name == "call_start":
         from . import calls
 
@@ -204,7 +204,10 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
             str(args.get("session") or "a session")[:80],
             " ".join(str(args.get("message") or "").split()),
         )
-        return f"Ask {who}: {text[:300]}?", f"message to the Claude session {who}:\n{text}"
+        detail = f"message to the Claude session {who}:\n{text}"
+        if full:
+            return f"Ask {who}: {text[:300]}?", detail
+        return f"Ask {who}?\n{speech.read_back(text)}", detail
     if name in RULE_WRITE_TOOLS or name in ("rule_add", "rule_drop"):
         if name.endswith("rule_add"):
             rule = behavior.normalized(str(args.get("rule") or ""))
@@ -218,6 +221,14 @@ def describe_tool(name: str, args: dict[str, Any], full: bool = False) -> tuple[
         tool, server = parts[-1].replace("_", " "), parts[1].replace("_", " ")
         return f"Use {tool}?", f"use {tool} from {server}"
     return f"Use {name}?", f"use the {name} tool"
+
+
+def split_question(spoken: str) -> tuple[str, str]:
+    """A confirmation as (the question, the read-back said after it). describe_tool puts
+    a read-back on its own line after the question: an answer said over the read-back
+    counts, since the action and who it's for have been said by then."""
+    question, _, rest = spoken.partition("\n")
+    return question.strip(), " ".join(rest.split())
 
 
 def _with(spoken: str, args: dict[str, Any], fields: tuple[tuple[str, str, bool], ...]) -> str:
@@ -246,7 +257,9 @@ def _describe_mail(args: dict[str, Any]) -> tuple[str, str]:
     cc = args.get("cc") or []
     detail = f"send email to {', '.join(to)}" + (f", cc {', '.join(map(str, cc))}" if cc else "")
     detail += f"\nsubject: {args.get('subject', '')}\n\n{args.get('body', '')}"
-    return f"Send email to {who}, subject {subject}?", detail
+    body = str(args.get("body") or "")
+    question = f"Send email to {who}, subject {subject}?"
+    return (f"{question}\n{speech.read_back(body)}" if body.strip() else question), detail
 
 
 def _describe_event(args: dict[str, Any]) -> tuple[str, str]:
