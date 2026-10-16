@@ -1,24 +1,34 @@
-"""One person across Scout's sources (docs/contacts.md, People; docs/links.md, same_person).
+"""One person across Scout's sources (docs/contacts.md, People; docs/links.md, People).
 
-A person is a contact: the record `person:<contact id>` (kind `person`) holds who they
-are elsewhere, found by email address:
+A person is a record of kind `person`, one per real person, found by stable ids only:
 
-- the email addresses of theirs that Scout has seen: mail senders, meeting attendees
-  (Granola's attendee list), their Slack profile's email;
-- their Slack user (users.list: the profile email matches one of their addresses), by
-  the name Slack messages are stored under;
-- the names they go by (the contact's, Slack's).
+- their Slack user id (U...; from each message's author and @-mentions, and a DM's other
+  party), with the names Slack has shown for them over time;
+- their email addresses (mail senders and recipients, meeting attendees, their Slack
+  profile's email);
+- their contact (Contacts' id, found by one of their addresses);
+- their GitHub login (an item's author and assignees).
 
-The app builds the people (`refresh`, every PASS_EVERY_S): it asks the store which
-addresses it has seen, Contacts which contacts have them (the helper's `resolve`; never
-asks for the permission) and Slack who has them, and hands the list to the store. The
-store links each person `same_person` to the records that are theirs under those
-identities (`matches`: mail from them, Slack messages they wrote, meetings they were in;
-the newest LINKS_PER_SOURCE of each) and keeps those links current in its upkeep.
+Every mail, meeting, Slack message and GitHub item is linked to the people in it as it's
+stored (`participants`, Index.link_participants), one link per person, record to
+person: `with` (a DM's other party, a group DM's members, a meeting's attendees), `from`
+(a channel message's author, a mail's sender, an item's author), `to` (a mail's To and
+Cc, an item's assignees), `mentions` (someone a Slack message @-mentions). Someone seen
+for the first time gets a record of their own (`person:slack:<id>`,
+`person:email:<address>`, `person:github:<login>`); a name alone never makes a person
+(a meeting attendee without an address links to the one person with that full name).
+The user (`[tasks] me`, their Slack id, their GitHub login) is never a person.
 
-Uses: local_search's `person` ("what did Pat say about the launch"), tasks_list's
-`owner` ("what does Pat owe me", for any of the names Pat goes by), and the record
-pages (a person's identities; "Same person" on what's theirs)."""
+The app's pass (`refresh`, every PASS_EVERY_S) joins identities: Slack's directory
+gives each user's profile email, Contacts the contact an address belongs to. The store
+merges the records those join into one (`Index.put_people`): the contact's
+(`person:<contact id>`) when there is one, else the Slack user's, with every link moved
+to it. A backfill (`Index.backfill_people`, run by scout-memory at startup) links what
+was stored before.
+
+Uses: local_search's `person` ("what did I talk about with Joao"), tasks_list's `owner`
+("what does Pat owe me", for any of the names Pat goes by), and the record pages (a
+person's identities, and what's theirs)."""
 
 from __future__ import annotations
 
@@ -26,8 +36,12 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import time
 from collections.abc import Iterable, Sequence
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -35,9 +49,21 @@ KIND = "person"
 PASS_EVERY_S = 6 * 3600.0
 FIRST_PASS_S = 120.0  # after the app starts
 MAX_EMAILS = 400  # addresses looked up in Contacts a pass (two calls to the helper)
-LINKS_PER_SOURCE = 200  # newest records of each source linked to a person
-SOURCES = ("mail", "meeting", "slack")
+SOURCES = ("mail", "meeting", "slack", "github")
+# Record -> person, strongest first: a record links each person once, by the first that fits.
+RELS = ("from", "with", "to", "mentions")
+MAX_PARTIES = 60  # people linked from one record (a mail to a list, a big meeting)
 _EMAIL = re.compile(r"[^\s<>@\"',;]+@[^\s<>@\"',;]+\.[^\s<>@\"',;]+")
+_SLACK_ID = re.compile(r"[UW][A-Z0-9]+")
+_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+# Addresses that are a machine's, not a person's: no record of their own.
+_AUTOMATED = re.compile(
+    r"^(?:no-?reply|do-?not-?reply|donotreply|notifications?|notify|mailer-daemon|postmaster|bounces?|"
+    r"alerts?|calendar-notification|invitations?|updates?|news(?:letter)?|marketing|support|billing|"
+    r"receipts?|automated|system|root|daemon)\b|[+-]noreply\b|^.*-notes@|^meet-recordings",
+    re.I,
+)
+NOT_PEOPLE = frozenset({"someone", "a bot", "unknown", "them", "speaker"})
 
 
 def person_id(contact_id: str) -> str:
@@ -58,15 +84,27 @@ def sender_email(who: str) -> str:
     return sender_address(who)
 
 
+def is_part(kind: str, id: str) -> bool:
+    """A part of a longer record (a thread's chunk, a meeting's transcript): linked with
+    the record it's part of, not on its own. A GitHub id's # is the item's number."""
+    return kind != "github" and "#" in id
+
+
+def automated(email: str) -> bool:
+    return bool(_AUTOMATED.search(email))
+
+
 def attendees(meta: dict[str, Any]) -> list[dict[str, str]]:
     return [a for a in meta.get("attendees") or [] if isinstance(a, dict)]
 
 
 def emails_in(kind: str, who: str, meta: dict[str, Any]) -> list[str]:
-    """The email addresses a record shows for the people in it: a mail's sender, a
-    meeting's attendees."""
+    """The email addresses a record shows for the people in it: a mail's sender and
+    recipients, a meeting's attendees."""
     if kind == "mail":
-        return [e] if (e := sender_email(who)) else []
+        out = [e] if (e := sender_email(who)) else []
+        return out + [norm_email(m.group(0)) for k in ("to", "cc") for a in meta.get(k) or []
+                      if (m := _EMAIL.search(str(a)))]  # fmt: skip
     if kind == "meeting":
         return [norm_email(str(a["email"])) for a in attendees(meta) if a.get("email")]
     return []
@@ -78,12 +116,356 @@ def slack_shown(u: dict[str, Any]) -> str:
     return str(p.get("display_name") or p.get("real_name") or u.get("real_name") or u.get("name") or "")
 
 
+# --- the user, and who Slack's ids are (read from the state scout-memory keeps) ----------------
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """What linking needs besides the record: who the user is (never a person), each
+    DM's other party, and the names Slack has shown for its users."""
+
+    me_slack: str = ""
+    me_emails: frozenset[str] = frozenset()
+    me_github: frozenset[str] = frozenset()
+    me_names: frozenset[str] = frozenset()  # folded
+    dm_user: dict[str, str] = field(default_factory=dict)  # DM channel -> the other party
+    slack_names: dict[str, list[str]] = field(default_factory=dict)  # user id -> names
+
+    def is_me(self, key: str, name: str = "") -> bool:
+        kind, _, v = key.partition(":")
+        if kind == "slack":
+            return bool(self.me_slack) and v == self.me_slack
+        if kind == "email":
+            return v in self.me_emails
+        if kind == "github":
+            return v in self.me_github
+        return bool(name) and _fold(name) in self.me_names
+
+    def uid_named(self, name: str) -> str:
+        """The Slack user who goes by this name, when exactly one does."""
+        want = _fold(name)
+        if not want:
+            return ""
+        got = {u for u, ns in self.slack_names.items() if any(_fold(n) == want for n in ns)}
+        return next(iter(got)) if len(got) == 1 else ""
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def make_ctx(me: Sequence[str], slack_state: dict[str, Any], github_state: dict[str, Any]) -> Ctx:
+    """The Ctx from `[tasks] me`, state/slack.json and state/github.json."""
+    emails = {m.group(0).lower() for x in me if (m := _EMAIL.search(str(x)))}
+    names = {_fold(re.sub(r"<[^>]*>", " ", str(x))) for x in me if "@" not in re.sub(r"<[^>]*>", "", str(x))}
+    slack_names: dict[str, list[str]] = {}
+    for uid, shown in (slack_state.get("users") or {}).items():
+        slack_names.setdefault(str(uid), []).append(str(shown))
+    for uid, p in (slack_state.get("people") or {}).items():
+        if isinstance(p, dict):
+            slack_names.setdefault(str(uid), []).extend(
+                str(p.get(k) or "") for k in ("real", "display", "name")
+            )
+    slack_names = {u: list(dict.fromkeys(n for n in ns if n and n != u)) for u, ns in slack_names.items()}
+    me_slack = str(slack_state.get("me") or "")
+    names |= {_fold(n) for n in slack_names.get(me_slack, [])}
+    dm = {
+        str(cid): str(c["user"])
+        for cid, c in (slack_state.get("convs") or {}).items()
+        if isinstance(c, dict) and c.get("is_im") and c.get("user")
+    }
+    login = str(github_state.get("login") or "").lower()
+    return Ctx(me_slack, frozenset(emails), frozenset({login} if login else ()), frozenset(n for n in names if n),
+               dm, slack_names)  # fmt: skip
+
+
+_ctx: tuple[float, Ctx] | None = None
+_ctx_lock = threading.Lock()
+CTX_TTL_S = 60.0
+
+
+def context() -> Ctx:
+    """The Ctx scout-memory links with, read again at most every CTX_TTL_S."""
+    global _ctx
+    with _ctx_lock:
+        if _ctx is not None and time.monotonic() - _ctx[0] < CTX_TTL_S:
+            return _ctx[1]
+        from .config import DATA, load
+
+        try:
+            me = list(load().tasks.me)
+        except Exception:  # a config being edited: no user names this minute
+            me = []
+        state = DATA / "state"
+        got = make_ctx(me, _read_json(state / "slack.json"), _read_json(state / "github.json"))
+        _ctx = (time.monotonic(), got)
+        return got
+
+
+# --- who a record is with ---------------------------------------------------------------------
+
+
+class Party(NamedTuple):
+    """Someone in a record: an identity key (slack:<id>, email:<address>, github:<login>,
+    or name:<full name> / slackname:<name>, which only find someone already known), how
+    they're in it, the name the record shows for them, and whether they may get a record
+    of their own."""
+
+    key: str
+    rel: str
+    name: str = ""
+    create: bool = True
+
+
+def _name_party(name: str, rel: str, slack: bool = False) -> Party | None:
+    n = " ".join(str(name).split())
+    if not n or _fold(n) in NOT_PEOPLE:
+        return None
+    if slack:
+        return Party(f"slackname:{_fold(n)}", rel, n, False)
+    return Party(f"name:{_fold(n)}", rel, n, False) if len(n.split()) > 1 else None
+
+
+def _slack_parties(id: str, title: str, who: str, meta: dict[str, Any], ctx: Ctx) -> list[Party]:
+    channel = str(meta.get("channel") or (id.split(":")[1] if id.count(":") >= 2 else ""))
+    named: dict[str, str] = {str(k): str(v) for k, v in (meta.get("names") or {}).items()}
+    dm_user = str(meta.get("dm_user") or ctx.dm_user.get(channel) or "")
+    group = title.startswith("Group DM with")
+    out: list[Party] = []
+
+    def slack_party(uid: str, rel: str) -> None:
+        if _SLACK_ID.fullmatch(uid) and uid != "USLACKBOT":
+            shown = named.get(uid, "")  # slack.Names gives the id itself when it couldn't look it up
+            name = shown if shown and shown != uid else next(iter(ctx.slack_names.get(uid, [])), "")
+            out.append(Party(f"slack:{uid}", rel, name))
+
+    if dm_user:
+        slack_party(dm_user, "with")
+    if meta.get("bot"):  # an app's messages: only a DM's other party
+        return out
+    lines = [ln for ln in meta.get("lines") or [] if isinstance(ln, list) and ln]
+    if lines:
+        for ln in lines:
+            slack_party(str(ln[0] or ""), "with" if dm_user or group else "from")
+        for ln in lines:
+            for uid in ln[1] if len(ln) > 1 and isinstance(ln[1], list) else []:
+                slack_party(str(uid), "mentions")
+        return out
+    # Stored before messages kept their authors' ids: the names, through Slack's users.
+    for n in who.split(", "):
+        uid = ctx.uid_named(n)
+        if uid:
+            slack_party(uid, "with" if dm_user or group else "from")
+        elif p := _name_party(n, "with" if dm_user or group else "from", slack=True):
+            out.append(p)
+    return out
+
+
+def _display_name(who: str) -> str:
+    n = re.sub(r"<[^>]*>", " ", who).strip().strip('"').strip("'").strip()
+    return "" if "@" in n else " ".join(n.split())
+
+
+def _email_party(raw: str, rel: str, name: str = "", create: bool = True) -> Party | None:
+    m = _EMAIL.search(raw)
+    if not m:
+        return None
+    e = norm_email(m.group(0))
+    return Party(f"email:{e}", rel, name, create and not automated(e))
+
+
+def participants(kind: str, id: str, title: str, who: str, meta: dict[str, Any], ctx: Ctx) -> list[Party]:
+    """The people in a record, the user left out, each once (by their strongest rel)."""
+    out: list[Party | None] = []
+    if is_part(kind, id):
+        return []
+    if kind == "slack":
+        out += _slack_parties(id, title, who, meta, ctx)
+    elif kind == "mail":
+        sender = sender_email(who)
+        if sender:
+            out.append(
+                Party(
+                    f"email:{sender}",
+                    "from",
+                    _display_name(who),
+                    not automated(sender) and not meta.get("bulk"),
+                )
+            )
+        out += [_email_party(str(a), "to") for k in ("to", "cc") for a in meta.get(k) or []]
+    elif kind == "meeting":
+        listed = attendees(meta)
+        if listed:
+            for a in listed:
+                name = str(a.get("name") or "")
+                out.append(
+                    _email_party(str(a["email"]), "with", name)
+                    if a.get("email")
+                    else _name_party(name, "with")
+                )
+        else:
+            for n in who.split(","):
+                out.append(_email_party(n, "with", _display_name(n)) if "@" in n else _name_party(n, "with"))
+    elif kind == "github":
+        logins = [(str(meta.get("author") or ""), "from")] + [
+            (str(a), "to") for a in meta.get("assignees") or []
+        ]
+        for login, rel in logins:
+            if _LOGIN.fullmatch(login) and not login.endswith("[bot]"):
+                out.append(Party(f"github:{login.lower()}", rel, login))
+    seen: dict[str, Party] = {}
+    for p in out:
+        if p is None or ctx.is_me(p.key, p.name):
+            continue
+        if p.key not in seen or RELS.index(p.rel) < RELS.index(seen[p.key].rel):
+            seen[p.key] = p
+    return list(seen.values())[:MAX_PARTIES]
+
+
+# --- a person's record ------------------------------------------------------------------------
+
+
+def blank() -> dict[str, Any]:
+    return {"contact": "", "name": "", "emails": [], "slack": [], "github": [], "names": []}
+
+
+def meta_of(p: dict[str, Any]) -> dict[str, Any]:
+    """A person's record meta from what's known of them (people.build's or a stored one)."""
+    m = blank()
+    m["contact"] = str(p.get("contact") or "")
+    m["name"] = str(p.get("name") or "")
+    m["emails"] = list(dict.fromkeys(norm_email(str(e)) for e in p.get("emails") or [] if str(e).strip()))
+    m["slack"] = [
+        {"id": str(s.get("id") or ""), "shown": str(s.get("shown") or ""), "real": str(s.get("real") or "")}
+        for s in p.get("slack") or []
+        if isinstance(s, dict) and s.get("id")
+    ]
+    m["github"] = list(dict.fromkeys(str(g).lower() for g in p.get("github") or [] if g))
+    m["names"] = names(p)
+    return m
+
+
+def merge(metas: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """One person's meta from several: the first contact and name win; identities and
+    names are all kept."""
+    out = blank()
+    for m in metas:
+        out["contact"] = out["contact"] or str(m.get("contact") or "")
+        out["name"] = out["name"] or str(m.get("name") or "")
+        out["emails"] = list(dict.fromkeys([*out["emails"], *(m.get("emails") or [])]))
+        have = {s["id"]: s for s in out["slack"]}
+        for s in m.get("slack") or []:
+            if s.get("id") in have:
+                old = have[s["id"]]
+                old["shown"], old["real"] = (
+                    old["shown"] or s.get("shown", ""),
+                    old["real"] or s.get("real", ""),
+                )
+            else:
+                have[s["id"]] = dict(s)
+                out["slack"].append(have[s["id"]])
+        out["github"] = list(dict.fromkeys([*out["github"], *(m.get("github") or [])]))
+        out["names"] = _uniq_names([*out["names"], *(m.get("names") or [])])
+    return out
+
+
+def _uniq_names(ns: Iterable[Any]) -> list[str]:
+    out: list[str] = []
+    for n in ns:
+        n = " ".join(str(n or "").split())
+        if n and _fold(n) not in (_fold(o) for o in out):
+            out.append(n)
+    return out
+
+
+def names(p: dict[str, Any]) -> list[str]:
+    """Every name a person goes by: the contact's, then Slack's, then the rest seen."""
+    return _uniq_names([p.get("name"), *(x for s in p.get("slack") or [] for x in (s.get("real"), s.get("shown"))),
+                        *(p.get("names") or [])])  # fmt: skip
+
+
+def strong_keys(meta: dict[str, Any]) -> list[str]:
+    """A person's identities: each one is only ever theirs."""
+    out = [f"contact:{meta['contact']}"] if meta.get("contact") else []
+    out += [f"email:{e}" for e in meta.get("emails") or []]
+    out += [f"slack:{s['id']}" for s in meta.get("slack") or [] if s.get("id")]
+    out += [f"github:{g}" for g in meta.get("github") or []]
+    return out
+
+
+def name_keys(meta: dict[str, Any]) -> list[str]:
+    """The names they're found by when a record shows only a name: a full name (meetings),
+    and for a Slack user any name Slack showed (old Slack records)."""
+    ns = [_fold(n) for n in meta.get("names") or []]
+    out = [f"name:{n}" for n in ns if len(n.split()) > 1]
+    if meta.get("slack"):
+        out += [f"slackname:{n}" for n in ns]
+    return list(dict.fromkeys(out))
+
+
+def canonical(meta: dict[str, Any]) -> str:
+    """The record id a person is kept under: the contact's, else their Slack user's,
+    else their first address's or GitHub login's."""
+    if meta.get("contact"):
+        return person_id(str(meta["contact"]))
+    for key in strong_keys(meta):
+        if key.startswith("slack:"):
+            return f"person:{key}"
+    keys = strong_keys(meta)
+    return f"person:{keys[0]}" if keys else ""
+
+
+def from_party(p: Party) -> dict[str, Any]:
+    """The meta of someone first seen in a record."""
+    m = blank()
+    kind, _, v = p.key.partition(":")
+    if kind == "slack":
+        m["slack"] = [{"id": v, "shown": "", "real": ""}]
+    elif kind == "email":
+        m["emails"] = [v]
+    elif kind == "github":
+        m["github"] = [v]
+    m["names"] = _uniq_names([p.name])
+    return m
+
+
+def record(p: dict[str, Any]) -> dict[str, Any]:
+    """The store item for a person (kind person; no ts: it keeps the one it has). Their
+    addresses are only in meta."""
+    meta = meta_of(p)
+    known = meta["names"]
+    title = str(meta.get("name") or (known[0] if known else ""))
+    if not title:
+        keys = strong_keys(meta)
+        title = keys[0].partition(":")[2] if keys else "Someone"
+        if "@" in title:
+            title = title.split("@")[0]
+    n = len(meta["emails"])
+    bits = [f"{n} email address{'es' * (n != 1)}"] if n else []
+    bits += [f"Slack {s['shown'] or s['real'] or s['id']}" for s in meta["slack"]]
+    bits += [f"GitHub {g}" for g in meta["github"]]
+    return {
+        "id": canonical(meta),
+        "kind": KIND,
+        "title": title,
+        "body": f"{title}: " + ("; ".join(bits) or "seen in Scout's records"),
+        "who": ", ".join(known)[:300],
+        "meta": meta,
+    }
+
+
 def build(
     found: dict[str, dict[str, Any]], slack_users: Sequence[dict[str, Any]] = ()
 ) -> list[dict[str, Any]]:
-    """The people: `found` is Contacts' answer for each address ({email: {id, name}}),
-    `slack_users` Slack's users.list members. A Slack user joins the contact their
-    profile email belongs to; a name two Slack users share isn't used to match."""
+    """What the app's pass knows: `found` is Contacts' answer for each address ({email:
+    {id, name}}), `slack_users` Slack's users.list members. A Slack user joins the
+    contact their profile email belongs to; one who joins none is listed on their own
+    (with their profile email), for the store to join to what it has. A name two Slack
+    users share isn't one to find them by."""
     people: dict[str, dict[str, Any]] = {}
     for email, c in sorted(found.items()):
         if not c.get("id"):
@@ -96,72 +478,33 @@ def build(
             p["emails"].append(e)
     shown_by = [_fold(slack_shown(u)) for u in slack_users]
     by_email = {e: p for p in people.values() for e in p["emails"]}
+    alone: list[dict[str, Any]] = []
     for u in slack_users:
-        email = norm_email(str((u.get("profile") or {}).get("email") or ""))
-        owner = by_email.get(email) if email else None
-        if owner is None or u.get("deleted") or u.get("is_bot"):
+        if u.get("deleted") or u.get("is_bot") or not u.get("id"):
             continue
-        shown = slack_shown(u)
         prof = u.get("profile") or {}
-        owner["slack"].append({
+        email = norm_email(str(prof.get("email") or ""))
+        shown = slack_shown(u)
+        entry = {
             "id": str(u.get("id") or ""),
             "shown": shown if shown and shown_by.count(_fold(shown)) == 1 else "",
             "real": str(prof.get("real_name") or u.get("real_name") or ""),
-        })  # fmt: skip
-    return sorted(people.values(), key=lambda p: p["contact"])
+        }
+        owner = by_email.get(email) if email else None
+        if owner is not None:
+            owner["slack"].append(entry)
+        else:
+            alone.append({"contact": "", "name": entry["real"] or entry["shown"], "emails": [email] if email else [],
+                          "slack": [entry]})  # fmt: skip
+    return sorted(people.values(), key=lambda p: p["contact"]) + alone
 
 
-def names(p: dict[str, Any]) -> list[str]:
-    """Every name a person goes by: the contact's, then Slack's."""
-    out: list[str] = []
-    for n in [p.get("name"), *(x for s in p.get("slack") or [] for x in (s.get("real"), s.get("shown")))]:
-        if n and _fold(n) not in (_fold(o) for o in out):
-            out.append(str(n))
-    return out
-
-
-def record(p: dict[str, Any]) -> dict[str, Any]:
-    """The store item for a person (kind person; no ts: it keeps the one it has)."""
-    known = names(p)
-    bits = [f"{len(p['emails'])} email address{'es' * (len(p['emails']) != 1)}"]
-    bits += [f"Slack {s['shown'] or s['real'] or s['id']}" for s in p.get("slack") or []]
-    return {
-        "id": person_id(p["contact"]),
-        "kind": KIND,
-        "title": str(p.get("name") or (known[0] if known else p["contact"])),
-        "body": f"{p.get('name') or 'A contact'}: " + "; ".join(bits),
-        "who": ", ".join(known)[:300],
-        "meta": {"contact": p["contact"], "emails": list(p["emails"]), "slack": list(p.get("slack") or []), "names": known},
-    }  # fmt: skip
-
-
-def matches(meta: dict[str, Any], kind: str, who: str, record_meta: dict[str, Any]) -> bool:
-    """Is this record (mail, meeting or Slack; not a part) one of the person's?"""
-    emails = set(meta.get("emails") or [])
-    if kind == "mail":
-        return sender_email(who) in emails
-    if kind == "meeting":
-        listed = attendees(record_meta)
-        if any(norm_email(str(a.get("email") or "")) in emails for a in listed):
-            return True
-        if any(a.get("email") for a in listed):
-            return False  # their addresses are known, and none is theirs
-        full = {_fold(n) for n in meta.get("names") or [] if len(str(n).split()) > 1}
-        return any(_fold(n) in full for n in who.split(","))
-    if kind == "slack":
-        shown = {_fold(s["shown"]) for s in meta.get("slack") or [] if s.get("shown")}
-        return any(_fold(n) in shown for n in who.split(","))
-    return False
-
-
-def prefilter(meta: dict[str, Any]) -> list[tuple[str, str]]:
-    """(kind, needle) pairs: a record whose `who` or `meta` contains the needle may be
-    the person's (matches decides). Keeps the store's queries to the few candidates."""
-    out = [("mail", e) for e in meta.get("emails") or []]
-    out += [("meeting", e) for e in meta.get("emails") or []]
-    out += [("meeting", n) for n in meta.get("names") or [] if len(str(n).split()) > 1]
-    out += [("slack", s["shown"]) for s in meta.get("slack") or [] if s.get("shown")]
-    return out
+def linked(lns: Iterable[dict[str, Any]]) -> list[str]:
+    """From a person's links (Index.links), the records that are theirs."""
+    return list(dict.fromkeys(
+        str(ln["id"]) for ln in lns
+        if (ln["dir"] == "in" and ln["rel"] in RELS) or (ln["dir"] == "out" and ln["rel"] == "same_person")
+    ))  # fmt: skip
 
 
 def candidate_emails(rows: Iterable[tuple[str, str, str]], limit: int = MAX_EMAILS) -> list[str]:
@@ -173,7 +516,7 @@ def candidate_emails(rows: Iterable[tuple[str, str, str]], limit: int = MAX_EMAI
         except ValueError:
             m = {}
         for e in emails_in(kind, who, m if isinstance(m, dict) else {}):
-            if _EMAIL.fullmatch(e):
+            if _EMAIL.fullmatch(e) and not automated(e):
                 out.setdefault(e, None)
                 if len(out) >= limit:
                     return list(out)
@@ -235,14 +578,14 @@ async def refresh(store: Any = None) -> dict[str, int]:
     )
     emails = [e for e in emails if e][: MAX_EMAILS * 2]
     found = await _resolve(emails)
-    if not found:
+    if not found and users is None:
         return {"emails": len(emails), "people": 0}
     people = build(found, users or [])
-    # Without Slack this pass, people only Slack found are kept as they are.
-    got = await asyncio.to_thread(store.put_people, people, users is not None)
-    log.info(
-        "people: %d addresses, %d people, %d same_person links", len(emails), len(people), got.get("links", 0)
-    )
+    # Contacts' answer is the whole list only when it answered: a person it no longer
+    # knows loses the contact (and keeps their other identities and links).
+    got = await asyncio.to_thread(store.put_people, people, bool(found))
+    log.info("people: %d addresses, %d people known, %d links to them", len(emails), got.get("people", 0),
+             got.get("links", 0))  # fmt: skip
     return {"emails": len(emails), "people": len(people), **got}
 
 
@@ -272,7 +615,7 @@ def owner_names(contact: dict[str, Any], record: Any) -> tuple[set[str], set[str
 async def owed_by(owner: str, tasks: Sequence[Any], store: Any) -> list[Any] | str:
     """The tasks whose owner is this person (tasks_list's `owner`): written as any name
     they go by. An owner written as a bare first name another contact shares counts
-    when the task was found in a record of theirs (same_person). Without Contacts, the
+    when the task was found in a record of theirs (linked to them). Without Contacts, the
     owner as written. A str: which person to ask about."""
     from . import contacts_mac
     from .mac import ToolError
@@ -311,9 +654,7 @@ async def owed_by(owner: str, tasks: Sequence[Any], store: Any) -> list[Any] | s
             out.append(t)
             continue
         if theirs is None:
-            theirs = {
-                ln["id"] for ln in await asyncio.to_thread(store.links, pid) if ln["rel"] == "same_person"
-            }
+            theirs = set(linked(await asyncio.to_thread(store.links, pid)))
         srcs = {
             ln["id"] for ln in await asyncio.to_thread(store.links, f"task:{t.n}") if ln["rel"] == "found_in"
         }

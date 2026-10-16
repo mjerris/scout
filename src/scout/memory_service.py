@@ -220,6 +220,7 @@ class Service:
             "/v1/slack/alerts": lambda a: {"alerts": self.slack_alerts.take()},
             "/v1/people/candidates": lambda a: {"emails": self.ix.people_candidates(int(a.get("limit") or 400))},
             "/v1/people/put": lambda a: self.ix.put_people(list(a.get("people") or []), bool(a.get("complete", True))),
+            "/v1/people/named": lambda a: {"people": self.ix.people_named(str(a.get("name") or ""))},
             "/v1/people/search": lambda a: {"hits": [_hit(h) for h in self.ix.person_search(
                 str(a.get("person") or ""), str(a.get("query") or ""), kinds=_kinds(a.get("kinds")),
                 since=a.get("since"), limit=int(a.get("limit") or 8), semantic=a.get("semantic", None))]},
@@ -456,6 +457,7 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
         from . import github
 
         asyncio.create_task(github.loop(ix, load().github))  # noqa: RUF006 (runs for the service's life)
+    asyncio.create_task(people_backfill(ix))  # noqa: RUF006 (runs once, logs its own failure)
     if cfg.semantic and cfg.background_embed:
         await ix.background(lambda: True)  # embeds, and re-reads edited journal files
     else:
@@ -463,6 +465,41 @@ async def serve(host: str, port: int, db: Path = DB, root: Path = ROOT) -> None:
             await asyncio.sleep(60)
             await asyncio.get_running_loop().run_in_executor(None, _sync_files, ix)
             await asyncio.get_running_loop().run_in_executor(None, ix.upkeep)
+
+
+PEOPLE_BATCH = 500  # records a backfill step links (index.Index.backfill_people)
+PEOPLE_GAP_S = 0.2  # between steps: searches and new records get the store in between
+PEOPLE_LOG_EVERY = 10  # steps between progress lines
+
+
+async def people_backfill(
+    ix: index.Index, batch: int = PEOPLE_BATCH, gap_s: float = PEOPLE_GAP_S
+) -> dict[str, Any]:
+    """Link the records stored before records were linked to people (people.py), in the
+    background, a batch at a time, from where it last stopped. Counts only in the log."""
+    loop = asyncio.get_running_loop()
+    t0 = time.monotonic()
+    step = 0
+    st: dict[str, Any] = {}
+    try:
+        st = await loop.run_in_executor(None, ix.backfill_people, 0)
+        if st.get("done"):
+            return st
+        log.info("people: backfill starting (%d of %d records done)", st["records"], st["total"])
+        while True:
+            st = await loop.run_in_executor(None, ix.backfill_people, batch)
+            step += 1
+            if st["done"]:
+                break
+            if step % PEOPLE_LOG_EVERY == 0:
+                log.info("people: backfill %d of %d records, %d links, %d people", st["records"], st["total"],
+                         st["links"], st["people"])  # fmt: skip
+            await asyncio.sleep(gap_s)
+        log.info("people: backfill done: %d records, %d links, %d people in %.0f s", st["records"], st["links"],
+                 st["people"], time.monotonic() - t0)  # fmt: skip
+    except Exception:
+        log.exception("people: the backfill failed; it resumes at the next start")
+    return st
 
 
 async def _terminate(closing: list[Callable[[], Awaitable[None]]], wait_s: float = 3.0) -> None:

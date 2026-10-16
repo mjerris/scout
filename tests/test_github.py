@@ -148,7 +148,9 @@ def test_named_items_become_records_with_state_people_and_privacy(
     # resolve: its link is the item's page; private when its repo is
     r = store.resolve("github:acme/api#117")
     assert r is not None and r["url"] == "https://github.com/acme/api/pull/117" and r["private"] is True
-    assert r["related"] == []  # the Slack message that named it isn't stored here: left out
+    # The Slack message that named it isn't stored here: left out; its people are linked.
+    assert all(x["kind"] == "person" for x in r["related"])
+    assert ("person:github:luca", "from") in {(x["id"], x["rel"]) for x in r["related"]}
     pub = store.resolve("github:pub/lib#9")
     assert pub is not None and pub["private"] is False
 

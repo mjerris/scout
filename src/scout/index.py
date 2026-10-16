@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE INDEX IF NOT EXISTS links_dst ON links(dst);
 -- Items the cross-reference pass (link_xrefs) has read, with the text it read (their sig).
 CREATE TABLE IF NOT EXISTS xref_seen (id TEXT PRIMARY KEY, sig TEXT NOT NULL, ts REAL NOT NULL);
+-- Who each person record is (people.py): an identity (slack:<id>, email:<address>,
+-- github:<login>, contact:<id>) is one person's; a name (name:, slackname:) may be several's.
+CREATE TABLE IF NOT EXISTS person_keys (key TEXT NOT NULL, person TEXT NOT NULL, PRIMARY KEY (key, person));
+CREATE INDEX IF NOT EXISTS person_keys_person ON person_keys(person);
 """
 
 
@@ -426,7 +430,8 @@ class Index:
     discuss_min: float = xref.DISCUSS_MIN
     # Where the phone reaches Scout's web UI (links.web_base in the service): record pages.
     web_base: Callable[[], str] = lambda: ""
-    _people_at: str = field(init=False, repr=False, default="")  # link_people's place in the list
+    # Who the user is and who Slack's ids are, for linking records to people (people.py).
+    people_ctx: Callable[[], people.Ctx] = people.context
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,6 +589,11 @@ class Index:
                     sig,
                 ),
             )
+        if kind in people.SOURCES and not people.is_part(kind, id):
+            try:
+                self.link_participants(id, kind, title, who, meta)
+            except Exception:  # linking never fails storing
+                log.exception("index: linking a record to its people failed")
         return True
 
     def delete(self, id: str) -> None:
@@ -902,13 +912,21 @@ class Index:
             ).fetchall()
         return [{"id": r[0], "rel": r[1], "dir": r[2]} for r in rows]
 
-    def _set_links(self, src: str, rels: Sequence[str], to: Sequence[tuple[str, str]]) -> None:
+    def _set_links(
+        self, src: str, rels: Sequence[str], to: Sequence[tuple[str, str]], people_only: bool = False
+    ) -> None:
         """Make src's links of these rels exactly `to` ((dst, rel) pairs); the ones kept
-        keep their time."""
+        keep their time. Links to people (person:...) are kept apart: `people_only` sets
+        only those, else they're left as they are (a Slack message's `mentions` of a
+        person and of a GitHub item are set by different passes)."""
+        person_link = (
+            f"(substr(dst, 1, 7) = 'person:' AND rel IN ({', '.join(repr(r) for r in people.RELS)}))"
+        )
+        scope = person_link if people_only else f"NOT {person_link}"
         with self._tx():
             have = set(
                 self._conn.execute(
-                    f"SELECT dst, rel FROM links WHERE src = ? AND rel IN ({','.join('?' * len(rels))})",  # noqa: S608 (placeholders only)
+                    f"SELECT dst, rel FROM links WHERE src = ? AND rel IN ({','.join('?' * len(rels))}) AND {scope}",  # noqa: S608 (placeholders only)
                     (src, *rels),
                 ).fetchall()
             )
@@ -1085,78 +1103,225 @@ class Index:
         return people.candidate_emails(((str(k), str(w), str(m)) for k, w, m in rows), limit)
 
     def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]:
-        """Store the people the app found (people.build) and link each to what's theirs.
-        complete: the list is everyone, so a person no longer found is removed."""
+        """What the app's pass knows of people (people.build): each one's identities join
+        the records the store has for them into one (merged: links move to it), under
+        the contact's id when there is one. Someone the store has no record of makes none,
+        unless they're a contact. complete: Contacts' list is everyone's, so a person whose
+        contact isn't in it loses the contact (and keeps the rest). Returns counts."""
         keep: list[str] = []
         for p in found:
-            r = people.record(p)
-            self.put(r["id"], people.KIND, r["title"], r["body"], r["who"], None, r["meta"])
-            keep.append(r["id"])
+            got = self._join(people.meta_of(p), create=bool(p.get("contact")))
+            if got and got not in keep:
+                keep.append(got)
         removed = 0
         if complete:
-            with self._lock:
-                old = [
-                    str(r[0])
-                    for r in self._conn.execute("SELECT id FROM docs WHERE kind = ?", (people.KIND,))
-                ]
-            for id in set(old) - set(keep):
-                self.delete(id)
-                removed += 1
-        made = sum(self.link_person(id) for id in keep)
-        return {"people": len(keep), "removed": removed, "links": made}
-
-    def link_person(self, id: str) -> int:
-        """Make a person's same_person links exactly the records that are theirs now
-        (people.matches), the newest people.LINKS_PER_SOURCE of each source."""
-        h = self.get(id)
-        if h is None or h.kind != people.KIND:
-            return 0
-        found: dict[str, list[tuple[float, str]]] = {k: [] for k in people.SOURCES}
-        seen: set[str] = set()
-        for kind, needle in people.prefilter(h.meta):
+            contacts = {str(p.get("contact")) for p in found if p.get("contact")}
             with self._lock:
                 rows = self._conn.execute(
-                    "SELECT id, kind, who, meta, ts FROM docs WHERE kind = ? AND instr(id, '#') = 0 AND "
-                    "(instr(who, ?) > 0 OR instr(lower(who), ?) > 0 OR instr(lower(meta), ?) > 0) "
-                    "ORDER BY ts DESC LIMIT ?",
-                    (kind, needle, needle.lower(), needle.lower(), people.LINKS_PER_SOURCE * 2),
+                    "SELECT id, meta FROM docs WHERE kind = ? AND json_extract(meta, '$.contact') <> ''",
+                    (people.KIND,),
                 ).fetchall()
-            for rid, k, who, meta, ts in rows:
-                if rid not in seen and people.matches(h.meta, str(k), str(who), _meta(meta)):
-                    seen.add(rid)
-                    found[str(k)].append((float(ts), str(rid)))
-        to = [
-            (rid, "same_person")
-            for k in people.SOURCES
-            for _, rid in sorted(found[k], reverse=True)[: people.LINKS_PER_SOURCE]
-        ]
-        self._set_links(id, ("same_person",), to)
-        return len(to)
-
-    def link_people(self, limit: int = 20) -> int:
-        """The upkeep's share: the next `limit` people relinked (new mail and messages
-        join them), round the list. Returns the links they have."""
+            for id, meta in rows:
+                m = _meta(meta)
+                if str(m.get("contact") or "") not in contacts:
+                    self._put_person(str(id), {**people.merge([m]), "contact": "", "name": ""})
+                    removed += 1
         with self._lock:
-            ids = [
-                str(r[0])
-                for r in self._conn.execute(
-                    "SELECT id FROM docs WHERE kind = ? AND id > ? ORDER BY id LIMIT ?",
-                    (people.KIND, self._people_at, limit),
+            made = sum(
+                self._conn.execute(
+                    f"SELECT count(*) FROM links WHERE dst = ? AND rel IN ({','.join('?' * len(people.RELS))})",  # noqa: S608 (placeholders only)
+                    (pid, *people.RELS),
+                ).fetchone()[0]
+                for pid in keep
+            )
+        return {"people": len(keep), "removed": removed, "links": made}
+
+    def _owners(self, keys: Sequence[str]) -> list[str]:
+        """The people holding these identities, in the order the keys come."""
+        if not keys:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, person FROM person_keys WHERE key IN (SELECT value FROM json_each(?))",
+                (json.dumps(list(keys)),),
+            ).fetchall()
+        by: dict[str, list[str]] = {}
+        for k, pid in rows:
+            by.setdefault(str(k), []).append(str(pid))
+        return list(dict.fromkeys(pid for k in keys for pid in sorted(by.get(k, []))))
+
+    def _put_person(self, id: str, meta: dict[str, Any]) -> None:
+        """A person's record and the keys that find them."""
+        r = people.record(meta)
+        with self._tx():
+            self.put(id, people.KIND, r["title"], r["body"], r["who"], None, r["meta"])
+            self._conn.execute("DELETE FROM person_keys WHERE person = ?", (id,))
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO person_keys(key, person) VALUES (?, ?)",
+                [(k, id) for k in [*people.strong_keys(r["meta"]), *people.name_keys(r["meta"])]],
+            )
+
+    def _join(self, meta: dict[str, Any], create: bool = True) -> str | None:
+        """The one person with these identities: the records holding any of them merged
+        into one (its id people.canonical's; their links moved to it), or a new one when
+        none does and `create`. Returns its id."""
+        owners = self._owners(people.strong_keys(meta))
+        if not owners and not create:
+            return None
+        with self._tx():
+            olds = [h for h in (self.get(o) for o in owners) if h is not None and h.kind == people.KIND]
+            # A known contact keeps its record; else the oldest record's name comes first.
+            merged = people.merge([meta, *(h.meta for h in olds)] if meta.get("contact") else
+                                  [*(h.meta for h in olds), meta])  # fmt: skip
+            if merged.get("contact"):
+                new = people.person_id(str(merged["contact"]))
+            elif len(olds) == 1:
+                new = olds[0].id  # one record: its id stays
+            else:
+                best = people.canonical(merged)
+                new = best if not olds or best in (h.id for h in olds) else olds[0].id
+            if not new:
+                return None
+            for h in olds:
+                if h.id != new:
+                    self._move_person(h.id, new)
+            self._put_person(new, merged)
+        return new
+
+    def _move_person(self, old: str, new: str) -> None:
+        """Merge: old's links become new's, and old goes."""
+        with self._tx():
+            for col in ("dst", "src"):
+                self._conn.execute(f"UPDATE OR IGNORE links SET {col} = ? WHERE {col} = ?", (new, old))  # noqa: S608 (a fixed column)
+                self._conn.execute(f"DELETE FROM links WHERE {col} = ?", (old,))  # noqa: S608
+            self._conn.execute("DELETE FROM person_keys WHERE person = ?", (old,))
+            self.delete(old)
+
+    def _party_person(self, p: people.Party) -> str | None:
+        """The person a record's party is: the one with that identity (who gets any new
+        name the record shows them by: a renamed Slack user), else a new one; a name finds
+        only someone already known, and only when one person goes by it."""
+        if p.key.startswith(("name:", "slackname:")):
+            got = self._owners([p.key])
+            return got[0] if len(got) == 1 else None
+        got = self._owners([p.key])
+        if not got:
+            return self._join(people.from_party(p)) if p.create else None
+        pid = got[0]
+        if p.name:
+            h = self.get(pid)
+            if h is not None and people._fold(p.name) not in (
+                people._fold(n) for n in h.meta.get("names") or []
+            ):
+                self._put_person(pid, people.merge([h.meta, {"names": [p.name]}]))
+        return pid
+
+    def link_participants(self, id: str, kind: str, title: str, who: str, meta: dict[str, Any]) -> int:
+        """A record's links to the people in it (people.participants): exactly those, one
+        per person. Returns how many."""
+        pairs: dict[str, str] = {}
+        for p in people.participants(kind, id, title, who, meta, self.people_ctx()):
+            pid = self._party_person(p)
+            if pid and pid not in pairs:
+                pairs[pid] = p.rel
+        self._set_links(id, people.RELS, list(pairs.items()), people_only=True)
+        return len(pairs)
+
+    # The backfill: records stored before they were linked to people, a batch at a time.
+    BACKFILL_VERSION = 1
+    _BACKFILL_KEY = "people_backfill"
+
+    def _backfill_state(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (self._BACKFILL_KEY,)
+            ).fetchone()
+        st = _meta(row[0]) if row else {}
+        if st.get("v") != self.BACKFILL_VERSION:
+            st = {"v": self.BACKFILL_VERSION, "pass": 1, "at": 0, "done": False, "records": 0, "links": 0}
+        return st
+
+    def restart_people_backfill(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM settings WHERE key = ?", (self._BACKFILL_KEY,))
+
+    def backfill_people(self, batch: int = 500) -> dict[str, Any]:
+        """The next `batch` records (mail, meetings, Slack, GitHub; not their parts) linked
+        to their people, from where the last batch stopped (resumable: the place is kept
+        in the store). Two passes: a record that names someone only by name (a meeting
+        without addresses) finds them once the first pass has made everyone seen by id.
+        Linking sets each record's links exactly, so running it again changes nothing.
+        Its first batch drops the same_person links the old matcher made.
+        Returns {done, records, links, total, people}: counts only (a batch of 0: only
+        those)."""
+        st = self._backfill_state()
+        kinds = people.SOURCES
+        if not st["done"] and batch > 0:
+            if st["at"] == 0 and st["pass"] == 1:
+                with self._lock:
+                    self._conn.execute("DELETE FROM links WHERE rel = 'same_person'")
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT rowid, id, kind, title, who, meta FROM docs WHERE rowid > ? AND kind IN ({','.join('?' * len(kinds))}) "  # noqa: S608 (placeholders only)
+                    "AND (kind = 'github' OR instr(id, '#') = 0) ORDER BY rowid LIMIT ?",
+                    (st["at"], *kinds, batch),
+                ).fetchall()
+            for rowid, id, kind, title, who, meta in rows:
+                st["links"] += self.link_participants(str(id), str(kind), str(title), str(who), _meta(meta))
+                st["at"] = int(rowid)
+            st["records"] += len(rows)
+            if len(rows) < batch and st["pass"] == 1:
+                st.update({"pass": 2, "at": 0, "records": 0, "links": 0})
+            else:
+                st["done"] = len(rows) < batch
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                    (self._BACKFILL_KEY, json.dumps(st)),
                 )
-            ]
-        self._people_at = ids[-1] if len(ids) == limit else ""
-        return sum(self.link_person(id) for id in ids)
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT count(*) FROM docs WHERE kind IN ({','.join('?' * len(kinds))}) "  # noqa: S608 (placeholders only)
+                "AND (kind = 'github' OR instr(id, '#') = 0)",
+                kinds,
+            ).fetchone()[0]
+        return {**st, "total": int(total), "people": self.count(people.KIND)}
+
+    def people_named(self, name: str) -> list[dict[str, Any]]:
+        """The people who go by this name (any of theirs, or an address): the full name,
+        else (one word) a first name. [{id, title, links}], most linked first."""
+        want = people._fold(name)
+        if not want:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, title, meta FROM docs WHERE kind = ?", (people.KIND,)
+            ).fetchall()
+        exact, first = [], []
+        for id, title, meta in rows:
+            m = _meta(meta)
+            ns = [people._fold(n) for n in [title, *(m.get("names") or [])]] + list(m.get("emails") or [])
+            if want in ns:
+                exact.append((str(id), str(title)))
+            elif " " not in want and any(n.split()[:1] == [want] for n in ns):
+                first.append((str(id), str(title)))
+        out = []
+        for id, title in exact or first:
+            with self._lock:
+                n = self._conn.execute("SELECT count(*) FROM links WHERE dst = ?", (id,)).fetchone()[0]
+            out.append({"id": id, "title": title, "links": int(n)})
+        return sorted(out, key=lambda x: -x["links"])
 
     def person_items(self, person: str) -> list[str]:
-        """The records linked same_person to a person, with their parts (a thread's
+        """The records linked to a person (people.linked), with their parts (a thread's
         chunks, a meeting's transcript)."""
-        bases = [ln["id"] for ln in self.links(person) if ln["rel"] == "same_person" and ln["dir"] == "out"]
+        bases = people.linked(self.links(person))
         if not bases:
             return []
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id FROM docs WHERE id IN (SELECT value FROM json_each(?1)) OR (instr(id, '#') > 0 "
-                "AND substr(id, 1, instr(id, '#') - 1) IN (SELECT value FROM json_each(?1)))",
+                "AND kind <> 'github' AND substr(id, 1, instr(id, '#') - 1) IN (SELECT value FROM json_each(?1)))",
                 (json.dumps(bases),),
             ).fetchall()
         return [str(r[0]) for r in rows]
@@ -1567,7 +1732,6 @@ class Index:
                 n = p.updated = self.link_tasks()
                 read, made = self.link_xrefs()
                 p.backlog = self.xref_backlog()
-                self.link_people()
             if n:
                 log.info("index: %d tasks got their link", n)
             if made:
@@ -2207,6 +2371,7 @@ class Store(Protocol):
     def missing(self, kind: str, key: str, limit: int = 20) -> list[Hit]: ...
     def people_candidates(self, limit: int = 400) -> list[str]: ...
     def put_people(self, found: Sequence[dict[str, Any]], complete: bool = True) -> dict[str, int]: ...
+    def people_named(self, name: str) -> list[dict[str, Any]]: ...
     def person_search(
         self, person: str, query: str, kinds: Sequence[str] | None = None, since: float | None = None,
         limit: int = 8, semantic: bool | None = True,

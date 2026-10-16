@@ -145,6 +145,7 @@ def test_a_new_dm_is_stored_as_a_poll_would(fake: Fake, tmp_path: Path) -> None:
     got = item(store(), f"slack:D1:{m['ts']}")
     assert got == item(other, f"slack:D1:{m['ts']}")
     assert got["title"] == "DM with Sam" and got["body"] == "Sam: @Pat Doe lunch tomorrow?"
+    assert got["meta"]["dm_user"] == "U2"  # who it's with, by id (people.py), both ways
     assert got["meta"]["permalink"] == f"https://acme.slack.com/archives/D1/p{m['ts'].replace('.', '')}"
     st = json.loads((tmp_path / "s.json").read_text())
     assert st["channels"]["D1"]["ts"] == m["ts"]  # the poll's resume point moved up

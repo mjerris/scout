@@ -152,49 +152,70 @@ it off there takes it back; `tccutil reset AppleEvents` forgets every Automation
 
 ## People
 
-A contact is one person across Scout's sources (`people.py`, docs/links.md
-`same_person`). Every six hours (and two minutes after the app starts) the app:
+A person is one real person across Scout's sources (`people.py`; docs/links.md, People):
+a record of kind `person` (private like mail), found only by stable ids: their Slack user
+id, their email addresses, their contact, their GitHub login. Names are kept (every name
+Slack has shown them by, so a renamed user stays one person) but a name alone never makes
+a person.
 
-1. asks the store which email addresses it has seen: mail senders, meeting attendees
-   (Granola's attendee list, kept with each note from now on);
-2. reads Slack's members (`users.list`; a profile's email needs the `users:read.email`
-   scope, else Slack is left out);
-3. asks Contacts which contacts have those addresses (the helper's `resolve`, 200 at a
-   time, at most 800 a pass; it never asks for the permission: without it nothing
-   happens);
-4. hands the store one person per contact: `person:<contact id>` (kind `person`,
-   private like mail) with the addresses found, the Slack user whose profile email is
-   theirs (by the name their messages are stored under; a name two Slack users share is
-   left out), and the names they go by.
+**Linked as it's stored.** Every mail, meeting, Slack message and GitHub item is linked,
+record to person, to the people in it (one link per person, the first rel that fits):
 
-The store links each person `same_person` to their records: mail from one of their
-addresses, meetings that list one of their addresses (or, for a meeting without
-addresses, their full name), Slack messages and threads they wrote in, the newest 200 of
-each. It's exact (a name alone never links mail, and a meeting by name only by a full
-name) and idempotent: each person's links are set to what matches now, and the store's upkeep
-relinks 20 people a minute, so new mail and messages join them. A person no longer
-found is removed with their links (unless Slack couldn't be read that pass).
+| rel | who |
+|---|---|
+| `with` | a DM's other party (by the DM's user id, also when only you wrote), a group DM's members, a meeting's attendees |
+| `from` | a channel message's authors (by user id), a mail's sender, a GitHub item's author |
+| `to` | a mail's To and Cc, a GitHub item's assignees |
+| `mentions` | someone a Slack message @-mentions |
+
+Someone seen for the first time gets a record: `person:slack:<user id>`,
+`person:email:<address>`, `person:github:<login>`. A machine's address (no-reply,
+notifications, billing and the like) or a bulk sender makes nobody, nor does an app's
+message in a channel. A meeting attendee without an address, and a Slack message stored
+before messages kept their authors' ids, link by name only to the one person who goes
+by it (the names Slack showed, from state/slack.json, for old Slack messages). You are
+never a person: `[tasks] me` (names and addresses), your Slack id, your GitHub login.
+
+**Joined by the app's pass.** Every six hours (and two minutes after the app starts) the
+app reads Slack's members (`users.list`; a profile's email needs the `users:read.email`
+scope), asks Contacts which contacts have the addresses Scout has seen (the helper's
+`resolve`, 200 at a time, at most 800 a pass; it never asks for the permission) and hands
+the store what it found. The store merges the records those identities join into one:
+`person:<contact id>` when it's a contact, else the Slack user's record; every link moves
+to it. A Slack user Scout has no record with makes no record. A contact no longer in
+Contacts' answer loses the contact and keeps the rest.
+
+**The backfill.** scout-memory links what was stored before, at startup, in the
+background: 500 records a step from where the last step stopped (kept in the store's
+settings, so a restart resumes), in two passes (the second finds the people named only by
+name in the first), progress in the log as counts. It sets each record's links exactly,
+so it's idempotent; its first step drops the `same_person` links the old matcher made.
 
 Where it's used:
 
-- `local_search` with `person` ("what did Pat say about the launch": query "the launch",
-  person "Pat"): only Pat's records, by words and meaning. When the store has nothing
-  linked to Pat yet, it says so and searches for the words with Pat's name.
+- `local_search` with `person` ("what did I talk about with Joao", "messages with
+  Joao": person "Joao", query empty or the topic): only their records, by words and
+  meaning, with their parts. The person is the contact the name means, else the one
+  person Scout's records know by that name (several: it asks which); with nothing linked
+  it searches for the words with their name.
 - `tasks_list` with `owner` ("what does Pat owe me"): tasks whose owner is any name Pat
   goes by (the contact's, a nickname, Slack's). A bare first name another contact
-  shares ("Pat") counts only when the task was found in a record of Pat Doe's.
-- The record page of a person lists the names, addresses and Slack user ("Also known
-  as") and their records; a record of theirs shows "Same person".
+  shares ("Pat") counts only when the task was found in a record linked to Pat Doe.
+- The record page of a person lists the names, addresses, Slack user and GitHub login
+  ("Also known as") and their records ("With them", "From them", "To them", "Mentioned
+  by"); a record shows its people ("With", "From", "To", "Mentions").
 
-On a copy of the live store (2026-10-15, counts only; Contacts and Slack aren't readable
-there, so stand-ins were the 50 most frequent mail senders): 79 sender addresses among 172
-mails, 230 Granola notes (none stored with attendee addresses yet: they come with each
-note's next sync), 4,370 Slack records. 50 stand-ins made 143 `same_person` links to mail
-in 0.47 s, the same 143 again on a second pass; an upkeep share of 20 took 0.18 s. Named
-by their senders' full names, 41 stand-ins also linked 7 meetings (3 people) by name.
+On a copy of the live store (2026-10-16, counts only, offline: no Contacts or Slack
+directory, so no merges): the backfill read 5,086 records in 16 s and made 174 people (86
+Slack users, 63 addresses, 24 GitHub logins, the 1 contact) and 2,508 links (1,412 from,
+1,070 with, 18 to, 8 mentions): 1,624 Slack records, 143 mails, 165 meetings, 44 GitHub
+items. 2,900 Slack records are apps' messages and link nobody. Run again it made the same
+links. "Joao Santos" is one person (his Slack user), linked to all 28 DMs with him.
 
 ## Next
 
 - Tier 0 for "text Pat ..." and "call Pat" (today Claude does both with the tools).
 - Granola notes stored before attendee addresses were kept are linked by full name
   until they're synced again.
+- A record that names someone only by name, stored before anyone went by that name, is
+  linked by the next backfill (it runs once; `restart_people_backfill` runs it again).

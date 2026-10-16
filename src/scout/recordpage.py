@@ -30,6 +30,9 @@ REL_NAMES = {
     ("mentions", "out"): "Mentions", ("mentions", "in"): "Mentioned by",
     ("discusses", "out"): "Discusses", ("discusses", "in"): "Discussed in",
     ("same_person", "out"): "Theirs", ("same_person", "in"): "Same person",
+    ("with", "out"): "With", ("with", "in"): "With them",
+    ("from", "out"): "From", ("from", "in"): "From them",
+    ("to", "out"): "To", ("to", "in"): "To them",
 }  # fmt: skip
 # Fields shown for a task, in this order (the reminder's ids and titles aren't).
 TASK_FIELDS = ("status", "owner", "due", "importance", "urgency", "effort", "pin", "source", "github", "found",
@@ -119,6 +122,7 @@ def _identities(meta: dict[str, Any]) -> str:
         )
         for s in meta.get("slack") or []
     ]
+    rows += [("github", str(g)) for g in meta.get("github") or []]
     return (
         "<h2>Also known as</h2><table>"
         + "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows if v)
