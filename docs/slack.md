@@ -193,9 +193,25 @@ Pradovera") or a user id. A new DM or group DM from one of them makes the Scout 
 say once:
 
 - "Luca messaged you on Slack."
-- "Luca sent you 3 messages on Slack." (a burst: messages are gathered until eight
-  seconds pass with nothing new, at most a minute)
+- "Luca sent you 3 messages on Slack." (a burst, said once)
 - "Luca and Sam messaged you on Slack."
+- "Slack messages from Luca, Sam, and 2 others." (three people or more)
+
+How often it speaks:
+
+- **One conversation, once.** A DM, a group DM, or the mentions in one channel are
+  gathered until `announce_quiet_s` (45) seconds pass with nothing new there, then
+  said once. A conversation that keeps going is said `announce_max_wait_s` (180)
+  seconds after its first message anyway.
+- **One announcement at a time.** At most one Slack announcement every
+  `announce_min_gap_min` (5) minutes; what settles in between waits and is merged
+  into the next one. 0 turns the gap off.
+- **Not where you're talking.** A conversation you wrote in within
+  `announce_skip_if_replied_min` (5) minutes isn't announced, and what was waiting
+  from it is dropped when you write there: you've seen it. scout-memory hears your own
+  messages like anyone's and queues only where you wrote, not what.
+- **Not during a call or a turn.** While you're on the phone with Scout, or the room
+  is mid-request, nothing is said; it's kept and said, merged, once that's over.
 
 `announce_dms` picks which DMs: `"listed"` (the default: only the people in
 `announce`), `"all"` (every DM and group DM), or `"off"`. `announce_mentions = true`
@@ -209,7 +225,7 @@ once. It's said like the pulse: it waits for the floor, so it never talks over y
 or a session, and in the pulse's `quiet_hours` it's only logged.
 
 scout-memory hears the event and queues the alert (the item's id and the name to say;
-no text); the Scout app takes the queue every five seconds (`POST /v1/slack/alerts`,
+no text; for your own message only the conversation and time); the Scout app takes the queue every five seconds (`POST /v1/slack/alerts`,
 each alert handed out once; one not taken within ten minutes is dropped as stale).
 The sentence carries the message's id, so "give me a link to that" right after opens
 it in Slack (docs/links.md).

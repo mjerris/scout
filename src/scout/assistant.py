@@ -517,9 +517,12 @@ class Assistant:
         if slack.announcing(sc):  # DMs and mentions said out loud (slack_alerts.py)
             from . import slack_alerts
 
+            def held() -> bool:  # on the phone with Scout, or the room mid-turn
+                return not idle() or slack_alerts.on_a_call()
+
             self._spawn(
-                slack_alerts.Announcer(
-                    lambda text: self.announce(text, "slack"), self.cfg.pulse.quiet_hours
+                slack_alerts.Announcer.from_config(
+                    lambda text: self.announce(text, "slack"), sc, self.cfg.pulse.quiet_hours, held
                 ).run()
             )
         while True:

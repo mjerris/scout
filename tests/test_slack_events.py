@@ -321,7 +321,10 @@ def test_alerts_for_announced_people_only(fake: Fake, tmp_path: Path) -> None:
     group = msg(ts(4), "U1", "group hello")
     assert [a["who"] for a in slack.handle_event(s, lv, ev("G1", group), now=NOW)] == ["Pat"]  # by id
     assert slack.handle_event(s, lv, ev("C1", msg(ts(4), "U2", "in a channel")), now=NOW) == []
-    assert slack.handle_event(s, lv, ev("D1", msg(ts(3), "UME", "my own")), now=NOW) == []
+    own = msg(ts(3), "UME", "my own")
+    assert slack.handle_event(s, lv, ev("D1", own), now=NOW) == [
+        {"channel": "D1", "ts": own["ts"], "replied": True}
+    ]
     bot = msg(ts(3), "U2", "beep", bot_id="B1", subtype="bot_message")
     assert slack.handle_event(s, lv, ev("D1", bot), now=NOW) == []
     edit = {"type": "message", "subtype": "message_changed", "channel": "D1",
@@ -634,6 +637,9 @@ def test_alerts_are_taken_once_and_go_stale() -> None:
     a.add({"id": "slack:D1:2.0", "who": "Sam"}, now=100.0 + a.KEEP_S + 5)
     assert [x["id"] for x in a.take(now=100.0 + a.KEEP_S + 10)] == ["slack:D1:2.0"]
     assert a.take() == []
+    for n in range(50):  # with no taker (the app not announcing) the queue doesn't grow
+        a.add({"channel": "D1", "ts": f"{n}.0", "replied": True}, now=100.0 + n * (a.KEEP_S + 1))
+        assert len(a._items) == 1
 
 
 def test_the_poll_waits_longer_while_events_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -690,47 +696,169 @@ def test_the_sentence_says_who_and_how_many() -> None:
     )
 
 
+NOON = dt.datetime(2026, 10, 15, 12, 0).astimezone()
+
+
+def replied(channel: str, n: int) -> dict[str, Any]:
+    return {"channel": channel, "ts": f"{n}.0", "replied": True}
+
+
+class AppQueue:
+    """The queue the app takes, by step time: {t: [alerts]}; what's said, in order."""
+
+    def __init__(self, at: dict[float, list[dict[str, Any]]], **kw: Any) -> None:
+        self.at, self.t = at, 0.0
+        self.said: list[str] = []
+        self.held = False
+
+        async def say(text: str) -> None:
+            self.said.append(text)
+
+        kw.setdefault("now", lambda: NOON)
+        self.ann = slack_alerts.Announcer(say, "22:00-08:00", take=self.take, held=lambda: self.held, **kw)
+
+    def take(self) -> list[dict[str, Any]]:
+        return self.at.pop(self.t, [])
+
+    def steps(self, *times: float) -> list[str | None]:
+        async def go() -> list[str | None]:
+            out = []
+            for t in times:
+                self.t = t
+                out.append(await self.ann.step(t))
+            return out
+
+        return run(go())
+
+
 def test_a_burst_is_said_once_after_it_settles() -> None:
-    queue: list[list[dict[str, Any]]] = [[a("Luca", 1)], [a("Luca", 2)], [], [a("Luca", 2)], [], []]
-    said: list[str] = []
+    s = AppQueue({0.0: [a("Joao", 1)], 10.0: [a("Joao", 2)], 20.0: [a("Joao", 3), a("Joao", 2)]})
+    out = s.steps(0.0, 10.0, 20.0, 30.0, 64.0, 65.0, 120.0)
+    assert out == [None, None, None, None, None, "Joao sent you 3 messages on Slack.", None]
+    assert s.said == ["Joao sent you 3 messages on Slack."]  # message 2 came twice: said once
+    assert refs.refs_of(s.said[0]) == ("slack:D1:1.0", "slack:D1:2.0", "slack:D1:3.0")
 
-    async def say(text: str) -> None:
-        said.append(text)
 
-    noon = dt.datetime(2026, 10, 15, 12, 0).astimezone()
-    ann = slack_alerts.Announcer(
-        say, "22:00-08:00", take=lambda: queue.pop(0) if queue else [], now=lambda: noon
-    )
+def test_a_long_chat_is_said_by_the_max_wait() -> None:
+    s = AppQueue({float(t): [a("Joao", t // 30 + 1)] for t in range(0, 300, 30)})
+    times = [float(t) for t in range(0, 300, 30)]
+    out = s.steps(*times[:6], 179.0, 180.0)
+    assert out[:-1] == [None] * 7 and out[-1] == "Joao sent you 7 messages on Slack."  # never quiet for 45 s
 
-    async def go() -> list[str | None]:
-        return [await ann.step(t) for t in (0.0, 3.0, 6.0, 12.0, 30.0, 40.0)]
 
-    out = run(go())
-    assert out == [None, None, None, "Luca sent you 2 messages on Slack.", None, None]
-    assert said == ["Luca sent you 2 messages on Slack."]  # message 2 came twice: said once
-    assert refs.refs_of(said[0]) == ("slack:D1:1.0", "slack:D1:2.0")
+def test_one_announcement_per_gap_the_rest_merged() -> None:
+    s = AppQueue({
+        0.0: [a("Joao", 1)],
+        50.0: [a("Len", 2, "D2")],
+        60.0: [a("Sam", 3, "D3"), a("Sam", 4, "D3")],
+        70.0: [a("Pat", 5, "G1")],
+        80.0: [{**a("Luca", 6, "C1"), "mention": "#launch"}],
+    })  # fmt: skip
+    out = s.steps(0.0, 45.0, 50.0, 60.0, 70.0, 80.0, 130.0, 344.0, 345.0, 400.0)
+    assert out[1] == "Joao messaged you on Slack."
+    assert out[2:8] == [None] * 6  # settled by 125 s, but the gap is five minutes from 45 s
+    assert out[8] == "Slack messages from Len, Sam, and 2 others."
+    assert out[9] is None and len(s.said) == 2
+    assert len(refs.refs_of(s.said[1])) == 5  # each message's id, for "a link to that"
+
+
+def test_merged_sentences_name_three_then_count() -> None:
+    three = [a("Len", 1), a("Sam", 2, "D2"), a("Pat", 3, "D3")]
+    assert slack_alerts.sentence(three) == "Slack messages from Len, Sam, and Pat."
+    assert slack_alerts.sentence([*three, a("Kim", 4, "D4")]) == "Slack messages from Len, Sam, and 2 others."
+    two = [a("Len", 1), a("Sam", 2, "D2"), a("Sam", 3, "D2")]
+    assert slack_alerts.sentence(two) == "Len messaged you and Sam sent you 2 messages on Slack."
+
+
+def test_a_conversation_you_just_replied_in_is_not_said() -> None:
+    s = AppQueue({
+        0.0: [replied("D1", 1)],
+        60.0: [a("Joao", 2)],  # you're talking with Joao
+        100.0: [a("Len", 3, "D2")],
+        120.0: [replied("D2", 4)],  # you answered Len before Scout said it
+        400.0: [a("Joao", 5)],  # more than five minutes after your reply
+    })  # fmt: skip
+    out = s.steps(0.0, 60.0, 100.0, 120.0, 200.0, 300.0, 400.0, 450.0)
+    assert out[:7] == [None] * 7
+    assert out[7] == "Joao messaged you on Slack." and s.said == [out[7]]
+    assert refs.refs_of(out[7]) == ("slack:D1:5.0",)
+
+
+def test_a_reply_drops_what_was_waiting_for_the_gap() -> None:
+    s = AppQueue({0.0: [a("Joao", 1)], 60.0: [a("Len", 2, "D2")], 200.0: [replied("D2", 3)]})
+    out = s.steps(0.0, 45.0, 60.0, 110.0, 200.0, 345.0, 600.0)
+    assert out[1] == "Joao messaged you on Slack." and out[2:] == [None] * 5
 
 
 def test_quiet_hours_and_a_down_service() -> None:
-    said: list[str] = []
-
-    async def say(text: str) -> None:
-        said.append(text)
-
     night = dt.datetime(2026, 10, 15, 23, 30).astimezone()
-    batches = [[a("Luca", 1)], []]
-    ann = slack_alerts.Announcer(say, "22:00-08:00", take=lambda: batches.pop(0), now=lambda: night)
+    s = AppQueue({0.0: [a("Luca", 1)]}, now=lambda: night)
+    out = s.steps(0.0, 50.0)
 
     def down() -> list[dict[str, Any]]:
         raise ToolError("memory service down")
 
-    async def go() -> list[str | None]:
-        out = [await ann.step(0.0), await ann.step(20.0)]
-        ann.take = down
-        out.append(await ann.step(40.0))
-        return out
+    s.ann.take = down
+    out += s.steps(100.0)
+    assert out == [None, "Luca messaged you on Slack.", None] and s.said == []  # only logged
 
-    assert run(go()) == [None, "Luca messaged you on Slack.", None] and said == []  # only logged
+
+def test_held_during_a_call_or_a_turn_then_said_merged() -> None:
+    s = AppQueue({0.0: [a("Joao", 1)], 100.0: [a("Len", 2, "D2")]})
+    s.held = True  # on the phone with Scout, or the room mid-turn
+    out = s.steps(0.0, 50.0, 100.0, 200.0, 900.0)
+    assert out == [None] * 5 and s.said == []
+    s.held = False
+    assert s.steps(905.0) == ["Joao and Len messaged you on Slack."]
+
+
+def test_a_phone_call_holds_the_announcement(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(phone_service, "active_calls", lambda path=None: {"c1": "dev1"})
+    assert slack_alerts.on_a_call()
+    monkeypatch.setattr(phone_service, "active_calls", lambda path=None: {})
+    assert not slack_alerts.on_a_call()
+
+    def broken(path: Any = None) -> dict[str, str]:
+        raise OSError("no state file")
+
+    monkeypatch.setattr(phone_service, "active_calls", broken)
+    assert not slack_alerts.on_a_call()
+
+
+def test_the_debounce_defaults_apply_without_config() -> None:
+    sc = config.SlackConfig()
+    assert (sc.announce_quiet_s, sc.announce_max_wait_s) == (45.0, 180.0)
+    assert (sc.announce_min_gap_min, sc.announce_skip_if_replied_min) == (5.0, 5.0)
+    p = Path(__file__).resolve().parents[1] / ".tmp" / f"slack-deb-{time.time_ns()}.toml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        p.write_text('[slack]\ntoken = "xoxp-1"\napp_token = "xapp-1"\nannounce_dms = "all"\n')
+        c = config.load(p)
+        assert (c.slack.announce_quiet_s, c.slack.announce_min_gap_min) == (45.0, 5.0)
+        ann = slack_alerts.Announcer.from_config(lambda text: asyncio.sleep(0), c.slack, "22:00-08:00")
+        assert (ann.quiet_s, ann.max_wait_s, ann.min_gap_s, ann.skip_if_replied_s) == (
+            45.0,
+            180.0,
+            300.0,
+            300.0,
+        )
+        p.write_text("[slack]\nannounce_quiet_s = 20\nannounce_min_gap_min = 0\nannounce_max_wait_s = -1\n")
+        c = config.load(p)
+        ann = slack_alerts.Announcer.from_config(lambda text: asyncio.sleep(0), c.slack, "")
+        assert (ann.quiet_s, ann.min_gap_s, ann.max_wait_s) == (20.0, 0.0, 180.0)  # a negative: the default
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_your_own_message_marks_the_conversation_replied(fake: Fake, tmp_path: Path) -> None:
+    s = store()
+    lv = live(fake, tmp_path / "s.json", announce_dms="all")
+    mine = msg(ts(3), "UME", "on it")
+    assert slack.handle_event(s, lv, ev("D1", mine), now=NOW) == [
+        {"channel": "D1", "ts": mine["ts"], "replied": True}
+    ]  # no text, no id: only where
+    quiet = live(fake, tmp_path / "t.json")  # nothing announced: nothing to mark
+    assert slack.handle_event(s, quiet, ev("D1", msg(ts(2), "UME", "again")), now=NOW) == []
 
 
 def test_the_app_announces_through_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -928,7 +1056,10 @@ def test_announce_every_dm_and_mentions(fake: Fake, tmp_path: Path) -> None:
         {"id": f"slack:C1:{to_me['ts']}", "who": "Luca", "channel": "C1", "ts": to_me["ts"],
          "group": False, "mention": "#launch"}
     ]  # fmt: skip
-    assert slack.handle_event(s, lv, ev("C1", msg(ts(2), "UME", "<@UME> note to self")), now=NOW) == []
+    note = msg(ts(2), "UME", "<@UME> note to self")
+    assert slack.handle_event(s, lv, ev("C1", note), now=NOW) == [
+        {"channel": "C1", "ts": note["ts"], "replied": True}
+    ]
 
 
 def test_dms_off_still_says_mentions(fake: Fake, tmp_path: Path) -> None:

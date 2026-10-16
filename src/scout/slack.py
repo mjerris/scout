@@ -657,7 +657,8 @@ def handle_event(
 ) -> list[dict[str, Any]]:
     """One message event (new, edited, deleted, a thread reply) into the store, the way a
     pass stores it, and the conversation's resume point moved up. Returns the alerts it
-    makes: a new DM or group DM from someone in [slack] announce (each message once)."""
+    makes: a new DM or group DM from someone in [slack] announce (each message once), or
+    for your own message, a mark that you replied there ({channel, ts, replied})."""
     if ev.get("type") != "message" or not ev.get("channel"):
         return []
     live.refresh(now)
@@ -693,6 +694,10 @@ def handle_event(
     live.state.advance(cid, ts)
     alert = _alert(live, conv, ev, doc_id, names, now)
     live.state.save()
+    if alert is None and live.me and str(ev.get("user") or "") == live.me and says_anything(live):
+        # Your own message: you're talking there, so the app doesn't announce it for a
+        # while (slack_alerts.py). Only where and when, never the text.
+        return [{"channel": cid, "ts": ts, "replied": True}]
     return [alert] if alert else []
 
 
@@ -713,12 +718,16 @@ def announced_as(entries: Sequence[str], uid: str, person: dict[str, str]) -> st
     return None
 
 
-def announcing(cfg: Any) -> bool:
-    """Whether [slack] has anything to say out loud: live events, and DMs or mentions on."""
-    said = (
+def says_anything(cfg: Any) -> bool:
+    """Whether DMs or mentions are said at all ([slack] announce_dms, announce_mentions)."""
+    return bool(
         cfg.announce_mentions or cfg.announce_dms == "all" or (cfg.announce_dms == "listed" and cfg.announce)
     )
-    return bool(cfg.token and cfg.app_token and said)
+
+
+def announcing(cfg: Any) -> bool:
+    """Whether [slack] has anything to say out loud: live events, and DMs or mentions on."""
+    return bool(cfg.token and cfg.app_token and says_anything(cfg))
 
 
 def _first_name(person: dict[str, str]) -> str:
