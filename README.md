@@ -20,6 +20,17 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   WebRTC removed 27.7 dB of the assistant's voice (Whisper could recover 2%
   of its words, vs 97% with no canceller); Apple 15 dB / 6%, with ~100 ms
   more latency, so WebRTC is the default.
+- **Echo path, per speaker and mic:** AEC3 finds an echo only up to ~500 ms
+  behind what was played; a TV over HDMI is further behind than that. The webrtc
+  backend measures each output and input pair's echo delay and level from
+  Scout's own speech (cross-correlating what it played with the raw mic), or
+  with a short quiet sweep when the room is quiet (`audio.calibrate_chirp`), and
+  holds the canceller's reference back when the path needs it. Results are kept
+  in `state/audio_devices.json`, used at startup, and re-checked as it talks: a
+  drift past 50 ms, or echo left over, measures again. Headphones are recorded
+  as having no echo path. `voice_status` shows the pair's entry (`echo_path`);
+  `scoutctl.sh echo show|reset` lists or clears them. `audio.echo_calibration`
+  turns it off; `audio.output_delay_ms` is only the first guess for a new pair.
 - **Barge-in:** with a canceller, talking over the assistant stops it. Over
   the answer to your request, what you say becomes the follow-up (held to the
   follow-up rules below); over a desk session's `discuss` message, it becomes

@@ -27,10 +27,22 @@ MAX_DELAY_HINT_MS = 500  # set_stream_delay_ms fails above this
 # AEC3 only finds an echo up to about 500 ms behind the reference it was given, and the
 # delay hint doesn't move that window (measured offline: 550 ms with a 500 ms hint, 600 ms
 # with a 0 ms one, both under 2 dB removed; tests/test_audio_backends.py). For a longer
-# path (a TV: ~780 ms) the reference is delayed here first, leaving this much of the
-# expected delay for AEC3 to find: room for the real delay to be shorter than expected,
-# and up to ~300 ms longer.
+# path (a TV over HDMI; measured per device pair, echo_cal.py) the reference is delayed
+# here first, leaving this much of the expected delay for AEC3 to find: room for the
+# real delay to be shorter than expected, and up to ~300 ms longer.
 REF_LEAD_MS = 200
+AEC3_SEARCH_MS = 400  # delays up to this are left to AEC3 alone (it finds ~500 ms: a margin)
+
+
+def plan(delay_ms: float) -> tuple[int, int]:
+    """(reference delay, AEC3 hint) in ms for an echo path this long: AEC3 alone up to
+    AEC3_SEARCH_MS; past that the reference is held back (whole 10 ms blocks) and AEC3
+    is left REF_LEAD_MS to find, room for the real delay to be a little shorter."""
+    total = max(0, round(delay_ms))
+    if total <= AEC3_SEARCH_MS:
+        return 0, total
+    ref = (total - REF_LEAD_MS) // 10 * 10
+    return ref, total - ref
 
 
 class EchoCanceller:
@@ -86,15 +98,15 @@ class EchoCanceller:
 
     def set_delay_ms(self, delay_ms: float) -> None:
         """Expected delay between a reference sample being processed and its echo being
-        captured. AEC3 finds the exact delay itself, but only within ~500 ms of the
-        reference: past REF_LEAD_MS the reference is held back by the rest (whole
-        blocks), and AEC3 gets the remainder as its hint. (The processor also rejects
+        captured (measured per device pair: echo_cal.py). AEC3 finds the exact delay
+        itself, but only within ~500 ms of the reference: past that the reference is
+        held back (plan()), and AEC3 gets the remainder as its hint. (The processor also rejects
         hints over 500 ms: "Failed to set stream delay" on every block, no mic audio.)"""
         total = max(0, round(delay_ms))
-        blocks = max(0, total - REF_LEAD_MS) // 10
-        self.delay_ms = total
-        self.ref_delay_ms = blocks * 10
-        self.hint_ms = min(MAX_DELAY_HINT_MS, total - self.ref_delay_ms)
+        ref, hint = plan(total)
+        blocks = ref // 10
+        self.delay_ms, self.ref_delay_ms = total, ref
+        self.hint_ms = min(MAX_DELAY_HINT_MS, hint)
         if self._ring.shape[0] != blocks + 1:
             # Another echo path (the TV, then the Mac's speakers): AEC3 adapts again, so
             # the running estimate starts over rather than vouch for the old path.

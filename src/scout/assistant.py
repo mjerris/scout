@@ -174,6 +174,7 @@ class Assistant:
         # so talk-over is real speech (barge-in) and text-based echo stripping is off.
         self.echo_cancelled = echo_cancelled
         self.echo_stats: Callable[[], dict[str, Any]] = dict  # the voice layer's stats(); set by the app
+        self.last_onset = 0.0  # when speech last began in the room (monotonic)
         self._message_barged: float | None = None
         self._confirm_barged: float | None = None  # onset of an answer said over the question
         self._barge_pending: float | None = None  # onset of speech over a reply, until its words are heard
@@ -1057,6 +1058,7 @@ class Assistant:
     def on_speech_onset(self, while_speaking: bool) -> None:
         """Called by the mic loop when speech starts. With an echo canceller,
         speech while we're talking is the user talking over us: stop."""
+        self.last_onset = time.monotonic()
         if not (while_speaking and self.echo_cancelled and self.cfg.audio.barge_in):
             return
         # Words, not chimes: barging into the "heard you" chime or a working tick
@@ -1162,6 +1164,8 @@ class Assistant:
             "room_busy": self.busy,
             "voices": self.speaker.voices(),
             "default_voice": self.speaker.voice,
+            # The echo path measured for the speaker and mic in use (echo_cal.py).
+            "echo_path": self.echo_stats().get("calibration"),
         }
 
     # --- room turns ---------------------------------------------------------------------

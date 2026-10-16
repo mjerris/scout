@@ -123,6 +123,7 @@ def create(
     *,
     noise_suppression: bool = False,
     output_delay_ms: float = 0.0,
+    calibration: Any = None,
 ) -> AudioIO:
     """Pick a backend. "auto" means webrtc when livekit is installed, else plain.
 
@@ -146,7 +147,11 @@ def create(
         from .audio_webrtc import WebRTCAudioIO
 
         return WebRTCAudioIO(
-            input_device, output_device, noise_suppression=noise_suppression, output_delay_ms=output_delay_ms
+            input_device,
+            output_device,
+            noise_suppression=noise_suppression,
+            output_delay_ms=output_delay_ms,
+            calibration=calibration,
         )
     if backend == "plain":
         from .audio_plain import PlainAudioIO
