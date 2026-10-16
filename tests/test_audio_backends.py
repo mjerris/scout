@@ -144,6 +144,25 @@ def test_near_end_speech_survives_double_talk(room_run: dict[str, Any]) -> None:
     assert contour >= 0.6
 
 
+@pytest.mark.parametrize("actual_ms", [700, 830, 950])
+def test_echo_from_a_tv_far_behind_the_stream_is_removed(actual_ms: float) -> None:
+    """Live on the SAMSUNG over HDMI (output_delay_ms 700 + 80 ms of stream latency =
+    780 ms) the canceller removed 0.5 dB after 85 s of playback: AEC3 only finds an
+    echo up to about 500 ms behind its reference, whatever the delay hint says. The
+    canceller now delays the reference itself, so the lag it has to find is short; the
+    TV's real delay may be some way off what was measured."""
+    secs = 16
+    far = speechlike(secs, 120, 3)
+    echo = room(far, delay_ms=actual_ms)
+    noise = (np.random.default_rng(1).standard_normal(far.size) * 10 ** (-65 / 20)).astype(np.float32)
+    out, aec = cancel(echo + noise, far, delay_ms=780)
+    span = slice(8 * SR, 15 * SR)
+    suppression = db(echo[span]) - db(out[span])
+    print(f"TV {actual_ms} ms behind, 780 ms expected: {suppression:.1f} dB removed, estimate {aec.erle_db}")
+    assert suppression >= 20
+    assert aec.erle_db is not None and aec.erle_db >= 15
+
+
 # -- resampling -------------------------------------------------------------------
 
 
@@ -609,13 +628,16 @@ def test_plain_device_change_reopens_input() -> None:
 
 def test_canceller_delay_hint_is_capped_where_webrtc_accepts_it() -> None:
     """Above 500 ms every block failed ("Failed to set stream delay") and no mic audio
-    came through at all: found live with a TV's 700 ms output delay."""
+    came through at all: found live with a TV's 700 ms output delay. The reference is
+    held back instead, and AEC3 is hinted only the short rest."""
     from scout.aec import EchoCanceller
 
     aec = EchoCanceller(48000)
     try:
         aec.set_delay_ms(780)
-        assert aec.delay_ms == 500
+        assert (aec.delay_ms, aec.ref_delay_ms, aec.hint_ms) == (780, 580, 200)
+        aec.set_delay_ms(80)  # the Mac's own speakers: nothing held back
+        assert (aec.delay_ms, aec.ref_delay_ms, aec.hint_ms) == (80, 0, 80)
         out = aec.process(np.zeros(480, np.int16), np.zeros(480, np.int16))
         assert out.shape == (480,)
     finally:
