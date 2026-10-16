@@ -1,0 +1,52 @@
+[
+ {
+  "sha": "b01",
+  "html_url": "https://github.com/o/api/commit/b01",
+  "author": {
+   "login": "sam",
+   "type": "User"
+  },
+  "committer": {
+   "login": "web-flow",
+   "type": "User"
+  },
+  "commit": {
+   "message": "x",
+   "author": {
+    "name": "Sam Roe",
+    "email": "sam@corp.example",
+    "date": "2026-10-12T09:00:00Z"
+   },
+   "committer": {
+    "name": "GitHub",
+    "email": "noreply@github.com",
+    "date": "2026-10-12T09:00:00Z"
+   }
+  }
+ },
+ {
+  "sha": "a10",
+  "html_url": "https://github.com/o/api/commit/a10",
+  "author": {
+   "login": "octo",
+   "type": "User"
+  },
+  "committer": {
+   "login": "web-flow",
+   "type": "User"
+  },
+  "commit": {
+   "message": "x",
+   "author": {
+    "name": "Octo Cat",
+    "email": "octo@acme.example",
+    "date": "2026-10-10T12:00:00Z"
+   },
+   "committer": {
+    "name": "GitHub",
+    "email": "noreply@github.com",
+    "date": "2026-10-10T12:00:00Z"
+   }
+  }
+ }
+]

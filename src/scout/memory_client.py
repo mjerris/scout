@@ -211,6 +211,9 @@ class Store:
     def people_named(self, name: str) -> list[dict[str, Any]]:
         return list(self.c.call("/v1/people/named", {"name": name})["people"])
 
+    def people_suggestions(self, request: str = "") -> list[dict[str, str]]:
+        return list(self.c.call("/v1/people/suggestions", {"request": request})["suggestions"])
+
     def person_search(
         self,
         person: str,

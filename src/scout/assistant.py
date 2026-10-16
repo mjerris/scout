@@ -1564,15 +1564,33 @@ class Assistant:
                 log.info("context prefetch skipped: %s", exc)
                 return None
 
+        async def unsure() -> list[dict[str, str]]:
+            """Same-name GitHub people the request names, for Claude to ask about (people.py)."""
+            if not self.cfg.contacts.enabled:
+                return []
+            try:
+                return await asyncio.to_thread(index.default().people_suggestions, text)
+            except Exception as exc:  # the store is down, or older: none this time
+                log.info("people suggestions left out of the context: %s", type(exc).__name__)
+                return []
+
         low = text.lower()
-        facts, cal, inbox = await asyncio.gather(
+        facts, cal, inbox, maybe = await asyncio.gather(
             memories(),
             fetched(calendar()) if _CALENDARISH.search(low) else nothing(),
             fetched(mail()) if _MAILISH.search(low) else nothing(),
+            unsure(),
         )
         if facts:
             lines.append("The user told Scout (memories that may bear on this request):")
             lines += [f"  - {f} (ref {memory.fact_id(f)})" for f in facts]  # open_link takes the ref
+        if maybe:
+            lines.append(
+                "Scout isn't sure these are the same person (the same name, nothing else shared). If it "
+                "bears on the request, ask the user once, briefly; on a yes remember \"<name>'s GitHub is "
+                '<login>", on a no remember "<name>\'s GitHub is not <login>":'
+            )
+            lines += [f"  - {m['ask']}" for m in maybe[:3]]
         lines += [part for part in (cal, inbox) if part is not None]
         return "[Context]\n" + "\n".join(lines) + "\n[/Context]\n" + text
 

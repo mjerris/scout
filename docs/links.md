@@ -120,8 +120,10 @@ by each) and the names they go by. Records link to the people in them by id as t
 stored; the app's pass merges the records one person had under different identities.
 Links to people are set apart from a record's other links of the same rel (a Slack
 message's `mentions` of a person and of a GitHub item come from different passes).
-`person_search` searches only a person's records and their parts. Details and live
-counts: docs/contacts.md, People.
+`person_search` searches only a person's records and their parts. A GitHub login joins
+the rest of its person by its commit emails, its profile's email, a Slack GitHub field, or
+being told ("Brian's GitHub is briankwest"); a same name is only asked about. Details and
+live counts: docs/contacts.md, People.
 
 **Where a fact was told.** The turn that told Scout a fact lists it on its `refs:`
 line. When that turn says remember (its remember tool ran, or the request says

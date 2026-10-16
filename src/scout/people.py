@@ -26,6 +26,12 @@ merges the records those join into one (`Index.put_people`): the contact's
 to it. A backfill (`Index.backfill_people`, run by scout-memory at startup) links what
 was stored before.
 
+A GitHub login joins its person by an address or account, never a name
+(github_people.py: commit emails and the public profile; slack_github: a Slack profile
+field for GitHub), or by being told: "Brian's GitHub is briankwest" is a fact (told_github)
+the store applies (Index.apply_told) and takes back when it's forgotten. A same name is a
+suggestion the user answers (Index.people_suggestions).
+
 Uses: local_search's `person` ("what did I talk about with Joao"), tasks_list's `owner`
 ("what does Pat owe me", for any of the names Pat goes by), and the record pages (a
 person's identities, and what's theirs)."""
@@ -459,13 +465,17 @@ def record(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def build(
-    found: dict[str, dict[str, Any]], slack_users: Sequence[dict[str, Any]] = ()
+    found: dict[str, dict[str, Any]],
+    slack_users: Sequence[dict[str, Any]] = (),
+    github: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """What the app's pass knows: `found` is Contacts' answer for each address ({email:
-    {id, name}}), `slack_users` Slack's users.list members. A Slack user joins the
-    contact their profile email belongs to; one who joins none is listed on their own
-    (with their profile email), for the store to join to what it has. A name two Slack
+    {id, name}}), `slack_users` Slack's users.list members, `github` the GitHub login each
+    Slack user's profile gives (slack_github). A Slack user joins the contact their
+    profile email belongs to; one who joins none is listed on their own (with their
+    profile email and login), for the store to join to what it has. A name two Slack
     users share isn't one to find them by."""
+    github = github or {}
     people: dict[str, dict[str, Any]] = {}
     for email, c in sorted(found.items()):
         if not c.get("id"):
@@ -490,12 +500,15 @@ def build(
             "shown": shown if shown and shown_by.count(_fold(shown)) == 1 else "",
             "real": str(prof.get("real_name") or u.get("real_name") or ""),
         }
+        login = github.get(entry["id"], "")
         owner = by_email.get(email) if email else None
         if owner is not None:
             owner["slack"].append(entry)
+            if login:
+                owner.setdefault("github", []).append(login)
         else:
             alone.append({"contact": "", "name": entry["real"] or entry["shown"], "emails": [email] if email else [],
-                          "slack": [entry]})  # fmt: skip
+                          "slack": [entry], "github": [login] if login else []})  # fmt: skip
     return sorted(people.values(), key=lambda p: p["contact"]) + alone
 
 
@@ -523,20 +536,152 @@ def candidate_emails(rows: Iterable[tuple[str, str, str]], limit: int = MAX_EMAI
     return list(out)
 
 
+# --- a GitHub login, told or from a profile ---------------------------------------------------
+
+_GH_WORD = r"git\s?hub(?:\s(?:login|username|user\s?name|handle|account|user|id|name))?"
+_TOLD = (
+    re.compile(rf"^(?P<name>.+?)(?:'s|s')\s{_GH_WORD}\sis\s(?P<not>not\s)?(?P<login>.+)$", re.I),
+    re.compile(r"^(?P<name>.+?)\sis\s(?P<not>not\s)?(?P<login>.+?)\son\sgit\s?hub$", re.I),
+    re.compile(r"^(?P<login>\S+)\son\sgit\s?hub\sis\s(?P<not>not\s)?(?P<name>.+)$", re.I),
+)
+_NOT_LOGINS = frozenset(
+    {"a", "an", "the", "it", "that", "this", "unknown", "private", "none", "empty", "same"}
+)
+_NOT_NAMES = frozenset(
+    {"my", "me", "i", "your", "you", "his", "her", "their", "our", "its", "it", "that", "this"}
+)
+
+
+class Told(NamedTuple):
+    """A fact naming someone's GitHub login: "Brian's GitHub is briankwest" (folded name,
+    login), or "... is not ..." (negative: a no to a suggestion)."""
+
+    name: str
+    login: str
+    negative: bool
+
+
+def github_login(raw: Any) -> str:
+    """A GitHub login from how it's written: "briankwest", "@BrianKWest",
+    "https://github.com/briankwest/", "brian k west" (said aloud); "" when it can't be one."""
+    from .memory import _STOP
+
+    t = str(raw or "").strip().strip(".,!?\"'").strip()
+    t = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", t, flags=re.I).strip("/")
+    t = t.lstrip("@")
+    words = t.split()
+    if not words or (len(words) > 1 and any(w.lower() in _STOP for w in words)) or t.lower() in _NOT_LOGINS:
+        return ""
+    login = "".join(words).lower()
+    return login if _LOGIN.fullmatch(login) and not login.endswith("-") else ""
+
+
+def told_github(fact: str) -> Told | None:
+    """The GitHub login a fact gives someone, or None when it isn't one."""
+    t = " ".join(str(fact or "").replace("\u2019", "'").split()).strip().rstrip(".!")
+    if t.endswith("?"):
+        return None
+    for pat in _TOLD:
+        m = pat.match(t)
+        if m is None:
+            continue
+        name = _fold(m.group("name")).strip("\"'")
+        login = github_login(m.group("login"))
+        if (
+            not name
+            or not login
+            or name in _NOT_NAMES
+            or name.split()[0] in ("what", "who", "whats", "what's")
+        ):
+            return None
+        return Told(name, login, bool(m.group("not")))
+    return None
+
+
+# Slack's custom profile field for GitHub, when the workspace has one (team.profile.get).
+SLACK_FIELD_EVERY_S = 86400.0  # whether there's a field, asked again this often
+SLACK_PROFILE_TTL_S = 7 * 86400.0  # one user's profile, read again this rarely
+MAX_SLACK_PROFILES = 100  # users.profile.get calls a pass
+_GH_LABEL = re.compile(r"\bgit\s?hub\b", re.I)
+
+
+def slack_github(
+    get: Any, users: Sequence[dict[str, Any]], state: dict[str, Any], now: float
+) -> dict[str, str]:
+    """{Slack user id: GitHub login} from the workspace's GitHub profile field. Without
+    such a field (or the users.profile:read scope that reads it), that's recorded in
+    `state` (why: "none", or Slack's error such as "missing_scope") and nothing more is
+    asked until it's checked again a day later. Profiles are read MAX_SLACK_PROFILES a
+    pass and kept SLACK_PROFILE_TTL_S."""
+    from .slack import SlackError
+
+    f: dict[str, Any] = state.setdefault("slack_field", {})
+    if now - float(f.get("checked") or 0) >= SLACK_FIELD_EVERY_S:
+        try:
+            fields = ((get("team.profile.get", {}).get("profile") or {}).get("fields")) or []
+        except SlackError as exc:
+            f.update(id="", why=str(exc).rpartition(": ")[2] or "error", checked=now)
+        else:
+            hit = next(
+                (x for x in fields if isinstance(x, dict) and _GH_LABEL.search(str(x.get("label") or ""))),
+                None,
+            )
+            f.update(id=str(hit.get("id") or "") if hit else "", why="" if hit else "none", checked=now)
+        log.info("people: Slack's GitHub profile field: %s", "found" if f["id"] else f["why"])
+    fid = str(f.get("id") or "")
+    if not fid:
+        return {}
+    known: dict[str, Any] = state.setdefault("slack_github", {})
+    due = [str(u["id"]) for u in users if u.get("id") and now - float((known.get(str(u["id"])) or {}).get("checked") or 0)
+           >= SLACK_PROFILE_TTL_S][:MAX_SLACK_PROFILES]  # fmt: skip
+    for uid in due:
+        try:
+            prof = get("users.profile.get", {"user": uid}).get("profile") or {}
+        except SlackError as exc:
+            if "user_not_found" in str(exc):
+                known[uid] = {"login": "", "checked": now}
+                continue
+            log.info("people: Slack profiles stopped this pass (%s)", str(exc).rpartition(": ")[2])
+            break
+        val = ((prof.get("fields") or {}).get(fid) or {}) if isinstance(prof.get("fields"), dict) else {}
+        login = github_login(val.get("value")) or github_login(val.get("alt"))
+        known[uid] = {"login": login, "checked": now}
+    return {uid: str(v["login"]) for uid, v in known.items() if isinstance(v, dict) and v.get("login")}
+
+
 # --- the app's pass ---------------------------------------------------------------------------
 
 
-async def _slack_users() -> list[dict[str, Any]] | None:
-    """Slack's members with their profiles, or None when Slack can't be read (not set up)."""
+STATE = Path("state") / "people.json"  # under DATA: the Slack GitHub field and profiles read
+
+
+async def _slack_users() -> tuple[list[dict[str, Any]] | None, dict[str, str]]:
+    """Slack's members with their profiles, or None when Slack can't be read (not set up),
+    and the GitHub login each one's profile field gives (slack_github)."""
     from . import slack_send
+    from .config import DATA
 
     try:
         get = slack_send._fetch()
         people, _ = await asyncio.to_thread(slack_send.directory, get)
     except Exception as exc:  # no token, offline, refused: no Slack this pass
         log.info("people: no Slack users this pass (%s)", type(exc).__name__)
-        return None
-    return list(people)
+        return None, {}
+    path = DATA / STATE
+    state = _read_json(path)
+    try:
+        logins = await asyncio.to_thread(slack_github, get, list(people), state, time.time())
+    except Exception as exc:  # offline mid-pass: the users without their logins
+        log.info("people: no Slack GitHub field this pass (%s)", type(exc).__name__)
+        logins = {}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    except OSError as exc:
+        log.info("people: %s not saved (%s)", path.name, type(exc).__name__)
+    return list(people), logins
 
 
 async def _resolve(emails: Sequence[str]) -> dict[str, dict[str, Any]]:
@@ -569,7 +714,7 @@ async def refresh(store: Any = None) -> dict[str, int]:
     if not load().contacts.enabled:
         return {}
     store = store or index.default()
-    users = await _slack_users()
+    users, logins = await _slack_users()
     seen = await asyncio.to_thread(store.people_candidates, MAX_EMAILS)
     emails = list(
         dict.fromkeys(
@@ -580,7 +725,7 @@ async def refresh(store: Any = None) -> dict[str, int]:
     found = await _resolve(emails)
     if not found and users is None:
         return {"emails": len(emails), "people": 0}
-    people = build(found, users or [])
+    people = build(found, users or [], logins)
     # Contacts' answer is the whole list only when it answered: a person it no longer
     # knows loses the contact (and keeps their other identities and links).
     got = await asyncio.to_thread(store.put_people, people, bool(found))

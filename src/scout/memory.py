@@ -323,10 +323,20 @@ _TOO_VAGUE = {"it", "that", "this", "everything", "all", "all of it", "all that"
 def told(text: str) -> str | None:
     """The fact a request tells Scout to keep ("remember that my dentist is Dr. Lee"), as
     answer() would keep it; None when it isn't one ("remember to call Sam")."""
-    m = _REMEMBER.match(_clean(text))
-    if m is None or _NOT_A_FACT.match(m.group(1)):
+    t = _clean(text)
+    m = _REMEMBER.match(t)
+    if m is None:
+        return normalized(t) if _github_fact(t) else None
+    if _NOT_A_FACT.match(m.group(1)):
         return None
     return normalized(m.group(1))
+
+
+def _github_fact(t: str) -> bool:
+    """ "Brian's GitHub is briankwest": a fact to keep without "remember" (people.told_github)."""
+    from .people import told_github
+
+    return told_github(t) is not None
 
 
 def answer(text: str, memory: Memory) -> str | None:
@@ -344,6 +354,12 @@ def answer(text: str, memory: Memory) -> str | None:
             return None  # a reminder or a question: Claude
         try:
             kept = memory.add(fact)
+        except ToolError as exc:
+            return f"Sorry, {exc}."
+        return said(f"Okay, I'll remember that {spoken(kept)}.", [kept])
+    if _github_fact(t):  # "Brian's GitHub is briankwest": the store gives Brian the login
+        try:
+            kept = memory.add(t)
         except ToolError as exc:
             return f"Sorry, {exc}."
         return said(f"Okay, I'll remember that {spoken(kept)}.", [kept])
