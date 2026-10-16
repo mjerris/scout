@@ -283,3 +283,21 @@ def test_scout_memory_runs_the_backfill_at_startup_and_logs_counts(
     said = [r.getMessage() for r in caplog.records]
     assert any(m.startswith("people: backfill done: 5 records, 5 links, 5 people") for m in said)
     assert not any("acme" in m for m in said)  # counts only
+
+
+def test_the_backfills_progress_says_which_pass(
+    store: index.Index, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scout import memory_service
+
+    for n in range(5):
+        store.put(f"mail:{n}", "mail", "Hi", "x", f"p{n}@acme.example", NOW)
+    store.restart_people_backfill()
+    monkeypatch.setattr(memory_service, "PEOPLE_LOG_EVERY", 1)
+    with caplog.at_level("INFO", logger="scout.memory_service"):
+        asyncio.run(memory_service.people_backfill(store, batch=2, gap_s=0))
+    said = [r.getMessage() for r in caplog.records if "backfill" in r.getMessage()]
+    assert said[0] == "people: backfill starting (pass 1: 0 of 5 records done)"
+    progress = [m for m in said if " of 5 records," in m]
+    assert progress[0].startswith("people: backfill pass 1: 2 of 5 records")
+    assert any(m.startswith("people: backfill pass 2: 2 of 5 records") for m in progress)
