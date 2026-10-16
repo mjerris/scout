@@ -78,6 +78,15 @@ class AudioConfig:
     # past ~300 ms (webrtc: AEC3 finds an echo only up to ~500 ms behind; the reference
     # is held back by the rest) and it tells Scout when its voice has really finished.
     output_delay_ms: float = 0.0
+    # webrtc: measure each output and input pair's echo path (delay and level) from
+    # Scout's own speech, keep it in state/audio_devices.json, and use it from then on
+    # (echo_cal.py; `python -m scout.echo_cal show|reset`). output_delay_ms is only the
+    # starting guess for a pair not measured yet.
+    echo_calibration: bool = True
+    # ...and when a pair still needs measuring and the room has been quiet a while, play
+    # a short quiet sweep to measure it (never while anyone talks, Scout is busy, or
+    # right after a call was started). false: measure from speech only.
+    calibrate_chirp: bool = True
     barge_in_min_learned_s: float = 3.0
     barge_in_min_erle_db: float = 12.0
     # WebRTC noise suppression on the mic. Off by default: it learns steady room

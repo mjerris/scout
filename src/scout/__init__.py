@@ -107,12 +107,18 @@ async def _amain(cfg: config_mod.Config) -> None:
     )
     if cfg.audio.backend == "apple":  # its helper takes one device name, not a fallback list
         input_spec, output_spec = device_name(input_spec, "input"), device_name(output_spec, "output")
+    calibration = None
+    if cfg.audio.echo_calibration:
+        from .echo_cal import Calibrator
+
+        calibration = Calibrator()
     io = audio_io.create(
         cfg.audio.backend,
         input_spec,
         output_spec,
         noise_suppression=cfg.audio.noise_suppression,
         output_delay_ms=cfg.audio.output_delay_ms,
+        calibration=calibration,
     )
     await io.start(loop, on_audio_event)
     log.info("voice layer: %s", io.name)
@@ -143,6 +149,8 @@ async def _amain(cfg: config_mod.Config) -> None:
             )
 
     assistant._spawn(warm())
+    if calibration is not None and cfg.audio.calibrate_chirp:
+        assistant._spawn(_echo_check(io, assistant))
     assistant._spawn(assistant.start_tier1())
     speaker.pronounce = assistant.pronounce
     runner = await web.start(cfg.web, assistant, cfg.phone) if cfg.web.enabled else None
@@ -278,6 +286,48 @@ async def _wait_for_microphone(spec: str, poll_s: float = 5.0) -> None:
     while not microphone_present(spec):
         await asyncio.sleep(poll_s)
     log.info("microphone found")
+
+
+ECHO_CHECK_S = 15.0  # how often to see whether a sweep is due
+CHIRP_QUIET_S = 30.0  # nobody has started talking for this long
+CHIRP_EVERY_S = 600.0  # at most one sweep this often
+CHIRP_AFTER_CALL_S = 7200.0  # and none this soon after a call was started on the Mac
+
+
+def chirp_ok(assistant: Any, now: float, last_chirp: float) -> bool:
+    """May the measuring sweep play now? Only into a quiet, idle room: Scout says nothing
+    and has no turn or question going, nobody has the floor, nobody has started talking
+    for CHIRP_QUIET_S, the mic is on, and no call was started on the Mac lately (the
+    iPhone's calls play through the Mac)."""
+    from . import calls
+
+    return (
+        assistant.state == "idle"
+        and not assistant.speaker.busy
+        and not assistant.mic_muted
+        and assistant.floor.owner() is None
+        and now - assistant.last_onset >= CHIRP_QUIET_S
+        and now - last_chirp >= CHIRP_EVERY_S
+        and time.time() - calls.last_started >= CHIRP_AFTER_CALL_S
+    )
+
+
+async def _echo_check(io: AudioIO, assistant: Any) -> None:
+    """The active fallback of the echo-path check (echo_cal.py): when the device pair
+    still needs measuring, a short quiet sweep once the room allows it."""
+    log = logging.getLogger("scout")
+    last = -CHIRP_EVERY_S
+    while True:
+        await asyncio.sleep(ECHO_CHECK_S)
+        try:
+            wants = getattr(io, "wants_calibration", None)
+            if wants is None or not wants() or not chirp_ok(assistant, time.monotonic(), last):
+                continue
+            last = time.monotonic()
+            log.info("echo path: measuring with a short quiet sweep (the room is quiet)")
+            await io.calibrate().done  # type: ignore[attr-defined]
+        except Exception:
+            log.exception("echo path: the measuring sweep failed")
 
 
 async def _watch(io: AudioIO, speaker: Speaker, events: asyncio.Queue[tuple[str, dict[str, Any]]]) -> None:

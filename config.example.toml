@@ -29,6 +29,9 @@ silence_ms = 1200     # pause that ends an utterance
 min_speech_ms = 300
 max_utterance_s = 30.0
 echo_tail_ms = 400
+# output_delay_ms = 700    # a TV's own delay: the first guess until the echo path is measured
+echo_calibration = true    # webrtc: measure each speaker+mic pair's echo path, keep it (state/audio_devices.json)
+calibrate_chirp = true     # ...with a short quiet sweep when the room is quiet, if speech hasn't measured it
 save_utterances = 0   # keep the last N clips in state/utterances/ for tuning
 
 [gate]

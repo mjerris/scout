@@ -2,6 +2,7 @@
 # Manage Scout's background app.
 #   scoutctl.sh status | restart | logs [N] | uninstall [--purge]
 #   scoutctl.sh phone pair | list | forget <device> | calls   (pair: a one-time code + QR for the app; calls: active ones)
+#   scoutctl.sh echo show | reset   (the echo path measured per speaker and mic: echo_cal.py)
 #   scoutctl.sh rules list | add "<rule>" [--enforced <code>] [--origin <text>] | drop <words> [--yes] | prompt
 #     (Scout's behavior rules, memory/behavior.md: docs/behavior-rules.md)
 # uninstall stops and removes the login item; --purge also deletes Scout's data
@@ -56,6 +57,10 @@ status)
 restart)
     launchctl kickstart -k "$DOMAIN/$LABEL"
     echo "restarted"
+    ;;
+echo)
+    UV_PROJECT_ENVIRONMENT="$DATA/venv" uv run --frozen --quiet --project "$DATA/current" \
+        python -m scout.echo_cal "${2:-show}"
     ;;
 phone)
     shift

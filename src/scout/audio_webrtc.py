@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from .aec import EchoCanceller, Resampler, resample_offline
+from .echo_cal import Calibrator, estimate, sweep
 from .audio_io import EventHandler, FrameAssembler, PlayHandle
 from .audio_plain import (
     RESTART_ATTEMPTS,
@@ -37,6 +38,11 @@ log = logging.getLogger(__name__)
 
 RATE = 48000
 BLOCK = RATE // 100  # 10 ms
+# The passive echo-path check (echo_cal.py) takes stretches of playback with the raw mic:
+# each runs until the speaker has been quiet this long (the echo of its end comes back
+# up to ~1.5 s later), or this long in all.
+CAPTURE_TAIL_BLOCKS = 150
+CAPTURE_MAX_BLOCKS = 800
 
 
 class PlaybackRing:
@@ -113,8 +119,15 @@ class WebRTCAudioIO:
         noise_suppression: bool = True,
         latency: str | float = "low",
         output_delay_ms: float = 0.0,
+        calibration: Calibrator | None = None,
     ) -> None:
         self.input_device, self.output_device = input_device, output_device
+        self._cal = calibration
+        self._pending_delay: float | None = None  # a measured delay for the audio thread to apply
+        self._cap_ref: list[np.ndarray] = []
+        self._cap_mic: list[np.ndarray] = []
+        self._cap_tail = 0
+        self._measuring = False
         # Delay the output device adds after the computer hands it audio, which
         # PortAudio can't see (a TV's sound processing: ~750 ms measured on a Samsung
         # over HDMI). It's added to the canceller's delay hint and to when playback
@@ -191,15 +204,24 @@ class WebRTCAudioIO:
             callback=self._callback,
         )
         self._latency = _total_latency(stream.latency)
-        out_name = self._sd.device_name(out_dev, "output").lower()
-        self._extra_out = self._delay_out if (not self._delay_for or self._delay_for in out_name) else 0.0
-        # The reference block is processed when it is written; its echo comes
-        # back after the output and input latencies of the stream.
-        self._aec.set_delay_ms(1000 * (sum(self._latency) + self._extra_out))
+        in_name = self._sd.device_name(in_dev, "input")
+        out_name = self._sd.device_name(out_dev, "output")
+        self._extra_out = (
+            self._delay_out if (not self._delay_for or self._delay_for in out_name.lower()) else 0.0
+        )
+        # The reference block is processed when it is written; its echo comes back
+        # after the output and input latencies of the stream (and a TV's own delay).
+        # What was measured on this pair of devices wins (echo_cal.py).
+        expected = 1000 * (sum(self._latency) + self._extra_out)
+        if self._cal is not None:
+            expected = self._cal.select(in_name, out_name, expected)
+        self._pending_delay = None
+        self._cap_ref, self._cap_mic, self._cap_tail = [], [], 0
+        self._aec.set_delay_ms(expected)
         self._last_frame = time.monotonic()
         stream.start()
         self._stream = stream
-        self._names = (self._sd.device_name(in_dev, "input"), self._sd.device_name(out_dev, "output"))
+        self._names = (in_name, out_name)
         log.info(
             "audio (webrtc): in %s, out %s, latency %.0f/%.0f ms",
             *self._names,
@@ -247,6 +269,9 @@ class WebRTCAudioIO:
                 self._odd_blocks += 1
                 outdata.fill(0)
                 return
+            if self._pending_delay is not None:  # measured on the loop: applied here, between blocks
+                self._aec.set_delay_ms(self._pending_delay)
+                self._pending_delay = None
             out = self._out_block
             finished = self._ring.read_into(out)
             if self._gain != 1.0 or self._gain_target != 1.0:
@@ -255,6 +280,8 @@ class WebRTCAudioIO:
                 out[:] = np.rint(out * ramp).astype(np.int16)
                 self._gain = self._gain_target
             outdata[:] = out[:, None]  # the same mono signal on every speaker channel
+            if self._cal is not None and loop is not None:
+                self._capture(indata[:, 0], out, loop)
             cleaned = self._aec.process(indata[:, 0], out)
             pcm = np.clip(np.rint(self._decim.process(cleaned)), -32768, 32767).astype("<i2").tobytes()
             if loop is not None:
@@ -272,7 +299,48 @@ class WebRTCAudioIO:
             self._cpu_total += dt
             self._cpu_max = max(self._cpu_max, dt)
 
+    def _capture(self, mic: np.ndarray, out: np.ndarray, loop: asyncio.AbstractEventLoop) -> None:
+        """Keep playback and the raw mic together for the passive echo-path check."""
+        if out.any():
+            self._cap_tail = CAPTURE_TAIL_BLOCKS
+        elif self._cap_tail == 0:
+            return
+        else:
+            self._cap_tail -= 1
+        self._cap_ref.append(out.copy())
+        self._cap_mic.append(mic.copy())
+        if self._cap_tail == 0 or len(self._cap_ref) >= CAPTURE_MAX_BLOCKS:
+            ref, mic_blocks = self._cap_ref, self._cap_mic
+            self._cap_ref, self._cap_mic = [], []
+            loop.call_soon_threadsafe(self._measure, ref, mic_blocks)
+
     # -- loop side
+
+    def _measure(self, ref: list[np.ndarray], mic: list[np.ndarray]) -> None:
+        if self._measuring or self._loop is None or self._cal is None:
+            return  # one at a time; the next stretch will do
+        self._measuring = True
+        cal = self._cal
+        fut = self._loop.run_in_executor(None, estimate, np.concatenate(ref), np.concatenate(mic), RATE)
+
+        def done(f: asyncio.Future[Any]) -> None:
+            self._measuring = False
+            try:
+                new = cal.add(f.result())
+            except Exception as exc:  # a bad stretch must not stop the check
+                log.warning("echo path: measuring failed: %r", exc)
+                return
+            if new is not None:
+                self._pending_delay = new
+
+        fut.add_done_callback(done)
+
+    def calibrate(self) -> PlayHandle:
+        """The active fallback: a short quiet sweep, measured like any playback."""
+        return self.play(sweep(), 24000)
+
+    def wants_calibration(self) -> bool:
+        return self._cal is not None and self._cal.wanted
 
     def _deliver(self, pcm: bytes, finished: list[int] | None) -> None:
         self._last_frame = time.monotonic()
@@ -350,6 +418,7 @@ class WebRTCAudioIO:
             "ref_delay_ms": self._aec.ref_delay_ms,
             "erle_db": None if erle is None else round(erle, 1),
             "echo_learned_s": round(self._aec.learned_seconds, 1),
+            "calibration": None if self._cal is None else self._cal.status(),
             "callback_us_avg": round(1e6 * self._cpu_total / n, 1),
             "callback_us_max": round(1e6 * self._cpu_max, 1),
             "queued_seconds": round(self._ring.samples / RATE, 3),
@@ -376,6 +445,8 @@ class WebRTCAudioIO:
         seen, since = self._callbacks, time.monotonic()
         while True:
             await asyncio.sleep(self.monitor_interval)
+            if self._cal is not None:
+                self._cal.residual(self._aec.erle_db, self._aec.learned_seconds)
             if self._callbacks != seen or self._stream is None or self._restarting:
                 seen, since = self._callbacks, time.monotonic()
             elif time.monotonic() - since > self.stall_seconds:

@@ -62,6 +62,7 @@ async def _open(url: str) -> None:
 OPEN: Opener = _open  # tests replace it; nothing else places a call
 
 _calls: dict[str, Call] = {}
+last_started = 0.0  # time.time() of the last call started here (Scout plays no test sweep near one)
 _linked: dict[str, float] = {}
 _ids = itertools.count(1)
 _lock = threading.RLock()
@@ -143,6 +144,8 @@ async def start(a: dict[str, Any]) -> str:
         with _lock:
             c.started = False
         raise ToolError(f"The Mac couldn't start the call: {exc}") from None
+    global last_started
+    last_started = time.time()
     return (
         f"Calling {c.name} at {c.number}: the Mac shows its call prompt (click Call); the call "
         "goes through the iPhone."
