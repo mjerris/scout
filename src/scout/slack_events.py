@@ -32,7 +32,8 @@ had: a bad token, Socket Mode off, no network), with a heartbeat every HEARTBEAT
 
 Alerts: a DM or group DM from someone in `[slack] announce` is queued here (Alerts), and
 the Scout app takes the queue every few seconds (POST /v1/slack/alerts) and says who
-messaged (slack_alerts.py). The queue keeps only ids and names, never message text.
+messaged (slack_alerts.py). Your own messages are queued as a mark that you replied
+there (where and when). The queue keeps only ids and names, never message text.
 """
 
 from __future__ import annotations
@@ -310,7 +311,9 @@ async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
 class Alerts:
     """DMs to say out loud, waiting for the Scout app to take them (one taker). Each is
     {id, who, channel, ts, group}: the item's id (for "give me a link to that") and the
-    name to say, never the text. Ones not taken within KEEP_S are dropped: stale news."""
+    name to say, never the text; or {channel, ts, replied}: you wrote there (the app
+    doesn't announce a conversation you're in). Ones not taken within KEEP_S are
+    dropped: stale news."""
 
     KEEP_S = 600.0
 
@@ -319,8 +322,10 @@ class Alerts:
         self._items: list[dict[str, Any]] = []
 
     def add(self, alert: dict[str, Any], now: float | None = None) -> None:
-        with self._lock:
-            self._items.append({**alert, "at": time.time() if now is None else now})
+        now = time.time() if now is None else now
+        with self._lock:  # the stale ones go now too, so no taker means no growth
+            self._items = [a for a in self._items if now - float(a["at"]) <= self.KEEP_S]
+            self._items.append({**alert, "at": now})
 
     def take(self, now: float | None = None) -> list[dict[str, Any]]:
         now = time.time() if now is None else now

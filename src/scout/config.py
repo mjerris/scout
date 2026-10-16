@@ -456,6 +456,15 @@ class SlackConfig:
     # ("Luca mentioned you in #launch on Slack.").
     announce_dms: str = "listed"
     announce_mentions: bool = False
+    # How often it's said (src/scout/slack_alerts.py): one conversation's burst is said
+    # once, after announce_quiet_s with nothing new from it (at most announce_max_wait_s
+    # after its first); at most one Slack announcement every announce_min_gap_min, the
+    # rest merged into the next ("Slack messages from Joao, Len, and 2 others."); and a
+    # conversation you wrote in within announce_skip_if_replied_min isn't said at all.
+    announce_quiet_s: float = 45.0
+    announce_max_wait_s: float = 180.0
+    announce_min_gap_min: float = 5.0
+    announce_skip_if_replied_min: float = 5.0
 
 
 @dataclass
@@ -625,6 +634,16 @@ def _check(cfg: Config) -> None:
         log.warning("config slack.announce_dms = %r is not listed, all or off; using 'listed'",
                     cfg.slack.announce_dms)  # fmt: skip
         cfg.slack.announce_dms = "listed"
+    for key in (
+        "announce_quiet_s",
+        "announce_max_wait_s",
+        "announce_min_gap_min",
+        "announce_skip_if_replied_min",
+    ):
+        if getattr(cfg.slack, key) < 0:
+            default = getattr(SlackConfig(), key)
+            log.warning("config slack.%s = %r is negative; using %r", key, getattr(cfg.slack, key), default)
+            setattr(cfg.slack, key, default)
     if cfg.wake.follow_up not in ("strict", "open", "off"):
         log.warning("config wake.follow_up = %r is not strict, open or off; using 'strict'",
                     cfg.wake.follow_up)  # fmt: skip
