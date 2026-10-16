@@ -17,7 +17,7 @@ rel); this module holds the plain-code rules around them:
 - which journal turn a fact was told in (`says_remember`, `told_turn`), and a behavior
   rule (`says_rule`: behavior.py's).
 
-Which records are one person's (`same_person`, from a contact's person record) is
+Which people a record is with (`with`, `from`, `to`, `mentions`: record -> person) is
 people.py's.
 
 What a record's text points at (`mentions`, `discusses`: pasted links, GitHub items,
@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 
 RELS = (
     "found_in", "merged_from", "same_as", "based_on", "about", "told_in", "mentions", "discusses",
-    "same_person",
+    "same_person", "with", "from", "to",
 )  # fmt: skip
 # The cross-references (xref.py): made by the store's upkeep from what a record's text says.
 XREF_RELS = ("mentions", "discusses")

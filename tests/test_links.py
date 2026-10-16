@@ -170,7 +170,8 @@ def test_a_task_links_to_what_it_was_found_in_and_follows_its_file(store: index.
     }  # fmt: skip
     p.unlink()
     store.sync_file(p)
-    assert store.links(f"task:{n}") == [] and store.links("mail:7") == []
+    # The mail keeps only its link to its sender (people.py).
+    assert store.links(f"task:{n}") == [] and [x["rel"] for x in store.links("mail:7")] == ["from"]
 
 
 def test_tasks_from_before_links_get_them_once(store: index.Index, tmp_path: Path) -> None:

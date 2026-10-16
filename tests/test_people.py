@@ -1,7 +1,8 @@
-"""One person across sources (people.py; Index.put_people, link_person, person_search):
-contacts found by the email addresses the store has seen, joined with their Slack user,
-linked same_person to their mail, meetings and Slack messages; local_search's person,
-tasks_list's owner, and the record pages. Synthetic data; Contacts and Slack are fakes."""
+"""One person across sources (people.py; Index.put_people, person_search): contacts
+found by the email addresses the store has seen, joined with their Slack user and the
+records the store linked to each identity (tests/test_person_links.py covers the
+linking); local_search's person, tasks_list's owner, and the record pages. Synthetic
+data; Contacts and Slack are fakes."""
 
 from __future__ import annotations
 
@@ -81,10 +82,18 @@ def fill(s: index.Index) -> None:
     s.put("slack:C1:2.0", "slack", "#launch", "Sam Roe: lunch", "Sam Roe", NOW - 60)
 
 
+def relink(s: index.Index) -> None:
+    """The backfill run again: records stored before their people were known."""
+    s.restart_people_backfill()
+    while not s.backfill_people()["done"]:
+        pass
+
+
 def test_people_are_contacts_joined_with_their_slack_user_by_email() -> None:
     got = people.build(FOUND, SLACK)
-    assert [p["contact"] for p in got] == ["c1", "c3"]
-    pat, sam = got
+    assert [p["contact"] for p in got] == ["c1", "c3", ""]
+    pat, sam, other = got
+    assert other["slack"][0]["id"] == "U3" and other["emails"] == ["other@corp.example"]  # on their own
     assert pat["emails"] == ["pat@acme.example", "pat@home.example"]
     assert pat["slack"] == [
         {"id": "U1", "shown": "patd", "real": "Pat Doe"}
@@ -101,39 +110,47 @@ def test_people_are_contacts_joined_with_their_slack_user_by_email() -> None:
     assert "person" in links.PRIVATE_KINDS and "same_person" in links.RELS
 
 
-def test_the_store_links_a_person_to_what_is_theirs_and_keeps_it_current(store: index.Index) -> None:
+def theirs(s: index.Index, pid: str) -> set[str]:
+    return set(people.linked(s.links(pid)))
+
+
+def test_the_store_joins_a_contact_to_what_is_theirs_and_keeps_it_current(store: index.Index) -> None:
     fill(store)
-    assert store.people_candidates() == ["pat@acme.example", "pat@home.example", "billing@vendor.example",
-                                         "pat@elsewhere.example", "me@x.example", "pat.doe@other.example"]  # fmt: skip
+    assert store.people_candidates() == ["pat@acme.example", "pat@home.example", "pat@elsewhere.example",
+                                         "me@x.example", "pat.doe@other.example"]  # fmt: skip
     got = store.put_people(people.build(FOUND, SLACK))
-    assert got == {"people": 2, "removed": 0, "links": 7}
-    theirs = {x["id"] for x in store.links("person:c1") if x["rel"] == "same_person"}
-    assert theirs == {"mail:1", "mail:2", "granola:n1", "granola:n2", "slack:C1:1.0"}
-    assert {x["id"] for x in store.links("person:c3")} == {"granola:n2", "slack:C1:2.0"}
+    assert got == {"people": 2, "removed": 0, "links": 3}
+    # Both of Pat's addresses: their mail and the meeting that lists one. Not the mail
+    # from another address under Pat's name, nor the other Pat Doe's meeting.
+    assert theirs(store, "person:c1") == {"mail:1", "mail:2", "granola:n1"}
+    # Slack messages stored by name only (before Slack kept ids) join at the backfill.
+    relink(store)
+    assert theirs(store, "person:c1") == {"mail:1", "mail:2", "granola:n1", "slack:C1:1.0"}
+    assert theirs(store, "person:c3") == {"slack:C1:2.0", "granola:n2"}  # the one Sam Roe
+    # A meeting without addresses names "Pat Doe", whom two people go by: nobody's.
+    assert "granola:n2" not in theirs(store, "person:c1")
     again = store.put_people(people.build(FOUND, SLACK))  # idempotent
-    assert again == got and len(store.links("person:c1")) == 5
+    assert again == {**got, "links": 6} and theirs(store, "person:c1") == {
+        "mail:1",
+        "mail:2",
+        "granola:n1",
+        "slack:C1:1.0",
+    }
     assert store.person_items("person:c1").count("slack:C1:1.0#2") == 1  # its parts come along
-    # New mail from Pat joins at the next upkeep; nothing else moves.
+    # New mail from Pat joins as it's stored.
     store.put("mail:5", "mail", "Deck", "deck attached", "Pat Doe <pat@acme.example>", NOW)
-    store.link_people()
-    assert "mail:5" in {x["id"] for x in store.links("person:c1")}
-    # Pat's gone from Contacts: the next full list drops them, with their links.
+    assert "mail:5" in theirs(store, "person:c1")
+    # Pat's gone from Contacts: the next full list keeps them, by their addresses, without the contact.
     store.put_people(people.build({"sam@corp.example": FOUND["sam@corp.example"]}, SLACK))
-    assert store.get("person:c1") is None and store.links("mail:1") == []
-
-
-def test_each_source_is_bounded(store: index.Index, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(people, "LINKS_PER_SOURCE", 3)
-    for n in range(10):
-        store.put(f"mail:{n}", "mail", f"m{n}", "x", "pat@acme.example", NOW - n)
-    store.put_people(people.build({"pat@acme.example": FOUND["pat@acme.example"]}))
-    assert {x["id"] for x in store.links("person:c1")} == {"mail:0", "mail:1", "mail:2"}  # the newest
+    p = store.get("person:c1")
+    assert p is not None and not p.meta["contact"] and "mail:1" in theirs(store, "person:c1")
 
 
 def test_a_persons_search_is_only_theirs(store: index.Index) -> None:
     fill(store)
     store.put("mail:9", "mail", "Launch", "The launch is cancelled.", "billing@vendor.example", NOW)
     store.put_people(people.build(FOUND, SLACK))
+    relink(store)
     ids = [h.id for h in store.person_search("person:c1", "launch", limit=10)]
     assert "mail:9" not in ids and {"mail:1", "slack:C1:1.0"} <= set(ids)
     assert [h.id for h in store.person_search("person:c1", "", kinds=["mail"])] == ["mail:1", "mail:2"]
@@ -210,10 +227,10 @@ def test_record_pages_show_who_else_a_person_is(store: index.Index) -> None:
     page = recordpage.render(rec, store.get("person:c1"))
     assert "Also known as" in page and "pat@acme.example" in page and "patd" in page
     assert "&lt;b&gt;x&lt;/b&gt;" in page and "<b>x</b>" not in page
-    assert "Theirs" in page
+    assert "From them" in page
     mail = store.resolve("mail:1")
     assert mail is not None
-    assert "Same person" in recordpage.render(mail, store.get("mail:1"))
+    assert "From</span> Person" in recordpage.render(mail, store.get("mail:1"))
 
 
 def test_the_apps_pass_never_asks_and_counts_only(
@@ -232,7 +249,7 @@ def test_the_apps_pass_never_asks_and_counts_only(
     monkeypatch.setattr(people, "_resolve", resolve)
     monkeypatch.setattr(people, "_slack_users", slack_users)
     got = asyncio.run(people.refresh(store))
-    assert got == {"emails": 8, "people": 2, "removed": 0, "links": 7}
+    assert got == {"emails": 7, "people": 2, "removed": 0, "links": 3}
     assert "other@corp.example" in asked[0]  # Slack's addresses are asked about too
 
     async def none() -> None:
@@ -275,7 +292,9 @@ def test_people_over_the_memory_service(tmp_path: Any) -> None:
         try:
             assert "pat@acme.example" in await asyncio.to_thread(store.people_candidates, 10)
             got = await asyncio.to_thread(store.put_people, people.build(FOUND, SLACK), True)
-            assert got == {"people": 2, "removed": 0, "links": 7}
+            assert got == {"people": 2, "removed": 0, "links": 3}
+            named = await asyncio.to_thread(store.people_named, "Pat Doe")
+            assert named[0]["id"] == "person:c1"
             hits = await asyncio.to_thread(
                 store.person_search, "person:c1", "launch", ["mail"], None, 5, False
             )

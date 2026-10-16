@@ -208,6 +208,9 @@ class Store:
         )
         return {k: int(v) for k, v in out.items()}
 
+    def people_named(self, name: str) -> list[dict[str, Any]]:
+        return list(self.c.call("/v1/people/named", {"name": name})["people"])
+
     def person_search(
         self,
         person: str,

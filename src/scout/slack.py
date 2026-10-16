@@ -259,9 +259,11 @@ def documents(
     msgs: Sequence[dict[str, Any]],
     names: Callable[[str | None], str],
     team_url: str = "",
+    dm_user: str = "",
 ) -> list[dict[str, Any]]:
     """A message, or a thread (root first, then replies), as index items: one, or the
-    thread in chunks of about CHUNK_CHARS."""
+    thread in chunks of about CHUNK_CHARS. `dm_user`: a DM's other party (by user id:
+    the store links the DM to them, people.py)."""
     root = msgs[0]
     ts = str(root["ts"])
     thread = len(msgs) > 1 or bool(root.get("reply_count"))
@@ -285,11 +287,15 @@ def documents(
     labeled = [m.group(1) for x in msgs for m in _LINK.finditer(str(x.get("text") or "")) if m.group(2)]
     if labeled:
         meta["urls"] = list(dict.fromkeys(labeled))[:20]
+    if dm_user:
+        meta["dm_user"] = dm_user
     base = {"title": title, "who": ", ".join(people)[:300], "ts": float(ts)}
     lines = [line(m, names) for m in msgs]
     # Who wrote each line and whom it @-mentions, by id: the task farm's scope (taskfarm.py).
     by = [[str(m.get("user") or ""), list(dict.fromkeys(_MENTION.findall(str(m.get("text") or ""))))[:20]]
           for m in msgs]  # fmt: skip
+    # The names those ids went by when stored: a person keeps every name they've had (people.py).
+    meta["names"] = {u: names(u) for u in dict.fromkeys(u for b in by for u in [b[0], *b[1]] if u)}
     chunks: list[list[int]] = [[]]
     size = 0
     for i, said in enumerate(lines):
@@ -465,8 +471,13 @@ def sync_conversation(
                 continue  # next pass
             threads += 1
             msgs = thread_messages(get, cid, ts, root=m)
-        changed += store_docs(ix, documents(cid, title, msgs, names, team_url))
+        changed += store_docs(ix, documents(cid, title, msgs, names, team_url, dm_user(conv)))
     return seen, changed, newest
+
+
+def dm_user(conv: dict[str, Any]) -> str:
+    """A DM's other party (their user id); "" for anything else."""
+    return str(conv.get("user") or "") if conv.get("is_im") else ""
 
 
 def _conv_entry(c: dict[str, Any]) -> dict[str, Any]:
@@ -591,7 +602,9 @@ class Live:
         return dict(conv)
 
 
-def _store_message(ix: index.Store, live: Live, cid: str, title: str, m: dict[str, Any], names: Names) -> str:
+def _store_message(
+    ix: index.Store, live: Live, cid: str, title: str, m: dict[str, Any], names: Names, dm: str = ""
+) -> str:
     """A message as the poller stores it: on its own, or (a reply, or a root that has
     replies) its whole thread re-read. Returns the item's id."""
     ts = str(m["ts"])
@@ -599,9 +612,9 @@ def _store_message(ix: index.Store, live: Live, cid: str, title: str, m: dict[st
     if thread and (thread != ts or m.get("reply_count")):
         msgs = thread_messages(live.get, cid, thread)
         if msgs and msgs[0].get("subtype") not in SKIP_SUBTYPES:
-            store_docs(ix, documents(cid, title, msgs, names, live.team_url))
+            store_docs(ix, documents(cid, title, msgs, names, live.team_url, dm))
         return f"slack:{cid}:{thread}"
-    store_docs(ix, documents(cid, title, [m], names, live.team_url))
+    store_docs(ix, documents(cid, title, [m], names, live.team_url, dm))
     return f"slack:{cid}:{ts}"
 
 
@@ -626,7 +639,7 @@ def handle_event(
         if ev.get("hidden"):  # Slack's own bookkeeping (a parent's reply count): the reply came too
             return []
         if isinstance(m, dict) and m.get("ts") and m.get("subtype") not in SKIP_SUBTYPES:
-            _store_message(ix, live, cid, title, m, names)
+            _store_message(ix, live, cid, title, m, names, dm_user(conv))
         return []
     if sub == "message_deleted":
         gone, prev = str(ev.get("deleted_ts") or ""), ev.get("previous_message") or {}
@@ -634,14 +647,14 @@ def handle_event(
         if thread and thread != gone:  # a reply: its thread without it
             msgs = thread_messages(live.get, cid, thread)
             if msgs and msgs[0].get("subtype") not in SKIP_SUBTYPES:
-                store_docs(ix, documents(cid, title, msgs, names, live.team_url))
+                store_docs(ix, documents(cid, title, msgs, names, live.team_url, dm_user(conv)))
         elif gone:
             drop_item(ix, f"slack:{cid}:{gone}")
         return []
     ts = str(ev.get("ts") or "")
     if not ts or sub in SKIP_SUBTYPES or sub == "message_replied":
         return []
-    doc_id = _store_message(ix, live, cid, title, ev, names)
+    doc_id = _store_message(ix, live, cid, title, ev, names, dm_user(conv))
     live.state.advance(cid, ts)
     alert = _alert(live, conv, ev, doc_id, names, now)
     live.state.save()

@@ -343,9 +343,10 @@ SHARED = (
         "note...', 'what did we decide in the meeting about...'. kinds: any of memory, turn (past "
         "conversations), note, list, mail, meeting (Granola notes and transcripts), slack (Slack messages and threads) (empty = all); days: only the last N "
         "days (0 = any time); limit 1-20 (default 12). person: only what one person said, sent or "
-        "was in (their Slack messages, their email, meetings they attended), a name from Contacts "
-        "('what did Pat say about the launch': query 'the launch', person 'Pat'; query may be empty "
-        "then for their newest). Returns the best matches, best first: the right one is often not the first, so read them all.",
+        "was in (DMs and Slack messages with them, email from or to them, meetings they attended, "
+        "GitHub items), by name ('what did Pat say about the launch': query 'the launch', person "
+        "'Pat'; 'messages with Joao' or 'what did I talk about with Joao': person 'Joao', query "
+        "empty for their newest or the topic). Returns the best matches, best first: the right one is often not the first, so read them all.",
         _obj(
             {
                 "query": _STR,
@@ -618,8 +619,10 @@ async def _local_search(a: dict[str, Any]) -> str:
 async def _person_hits(
     who: str, query: str, kinds: list[str] | None, since: float | None, limit: int
 ) -> tuple[str, list[index.Hit]] | str:
-    """local_search's `person`: their records (people.py's same_person links), or, when
-    Contacts or the store doesn't know them yet, the words with their name."""
+    """local_search's `person`: the records linked to them (people.py: the DMs, mail,
+    meetings and Slack messages they're in). The person is the contact the name means,
+    else the one person Scout's records know by it; when neither has anything linked,
+    the words with their name."""
     from . import contacts_mac, people
 
     store = index.default()
@@ -632,16 +635,25 @@ async def _person_hits(
         if isinstance(p, str):
             return p
         note = ""
-    if p is not None:
+    pid, name = None, str(p.get("name") if p is not None else who)
+    if p is not None and await asyncio.to_thread(store.get, people.person_id(str(p.get("id")))) is not None:
         pid = people.person_id(str(p.get("id")))
+    else:  # not a contact, or a contact Scout hasn't joined to a record yet: by name
+        named = await asyncio.to_thread(store.people_named, name)
+        if len(named) > 1:
+            return (
+                f"More than one person in Scout's records goes by {name}: "
+                f"{'; '.join(str(x['title']) for x in named[:8])}. Ask the user which one, then call "
+                "local_search again with that full name. Nothing was done."
+            )
+        if named:
+            pid, name = str(named[0]["id"]), str(named[0]["title"])
+    if pid is not None:
         hits = await asyncio.to_thread(store.person_search, pid, query, kinds, since, limit)
         if hits:
-            return f"(what {p.get('name')} said, sent or was in)\n", hits
-        note = (
-            f"(Nothing in Scout's store is linked to {p.get('name')} yet: the people pass links "
-            "them by email address. Searching for the words and the name instead.)\n"
-        )
-    name = str(p.get("name") if p is not None else who)
+            return f"(what {name} said, sent or was in)\n", hits
+    if pid is not None or p is not None:
+        note = f"(Nothing in Scout's store is linked to {name} yet. Searching for the words and the name instead.)\n"
     return note, await store.asearch(f"{query} {name}".strip(), kinds=kinds, since=since, limit=limit)
 
 
