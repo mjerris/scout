@@ -179,11 +179,23 @@ never a person: `[tasks] me` (names and addresses), your Slack id, your GitHub l
 **Joined by the app's pass.** Every six hours (and two minutes after the app starts) the
 app reads Slack's members (`users.list`; a profile's email needs the `users:read.email`
 scope), asks Contacts which contacts have the addresses Scout has seen (the helper's
-`resolve`, 200 at a time, at most 800 a pass; it never asks for the permission) and hands
+`cards`, 200 at a time, at most 800 a pass; it never asks for the permission) and hands
 the store what it found. The store merges the records those identities join into one:
 `person:<contact id>` when it's a contact, else the Slack user's record; every link moves
 to it. A Slack user Scout has no record with makes no record. A contact no longer in
 Contacts' answer loses the contact and keeps the rest.
+
+**The whole card.** `cards` gives, for each address it finds, the card it's on: its id,
+name, and every email address and phone number on it. All of them become the person's
+keys at once (phones as E.164 where the country can be told: `+` numbers, and North
+American 10 digits; `contacts_mac.dial_number`), so mail from an address of theirs Scout
+has never seen links to them the moment it's stored, not after a later pass. An address or
+number on two cards (a shared office line) is neither's, and an address that is on two
+cards finds no one. Your own card ("My Card" in Contacts, which the helper marks `me`) is
+never a person, nor is any card with one of your addresses. The pass's log line counts the
+keys the cards gave: "people: N addresses, N people known, N links to them, N keys from
+their contact cards". A helper built before `cards` still answers with names (`resolve`)
+until the installer rebuilds it.
 
 **GitHub logins** (`github_people.py`, run by scout-memory's GitHub sync every six hours,
 the first time at its start; `people.slack_github` in the app's pass). A login joins the
@@ -244,7 +256,8 @@ different, 6 with no name to compare). 8 same-name suggestions; no address two l
 **The backfill.** scout-memory links what was stored before, at startup, in the
 background: 500 records a step from where the last step stopped (kept in the store's
 settings, so a restart resumes), in two passes (the second finds the people named only by
-name in the first), progress in the log as counts. It sets each record's links exactly,
+name in the first), progress in the log as counts, each line naming its pass ("people:
+backfill pass 2: 500 of 5108 records", each pass counting from 0). It sets each record's links exactly,
 so it's idempotent; its first step drops the `same_person` links the old matcher made.
 
 Where it's used:

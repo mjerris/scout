@@ -9,6 +9,9 @@
 //   scout-contacts get --id ID                    one contact, every field below
 //   scout-contacts groups                         contact groups, with member counts
 //   scout-contacts resolve --handle H [--handle H]...   phone numbers / emails to names
+//   scout-contacts cards --handle H [--handle H]...     the card each handle is on: its
+//                       id, name, and every phone number and email on it that no other
+//                       card has; "me": true for the user's own card
 //
 // --fixture FILE.json (before or after the command) reads people from a JSON file
 // instead of Contacts and never touches the Contacts store (the tests use it):
@@ -17,7 +20,7 @@
 //                  "emails": [...], "addresses": [{"label", "street", "city", "state",
 //                  "postal_code", "country"}], "birthday": {"year"?, "month", "day"},
 //                  "groups": ["group id"]}],
-//    "groups": [{"id", "name"}]}
+//    "groups": [{"id", "name"}], "me": "the user's own card's id"?}
 //
 // Search is fuzzy-ish: each word of the query must match a word of the person's name,
 // nickname or organization (exactly, as a prefix, as a common nickname: "Bob" finds
@@ -144,6 +147,7 @@ func personJSON(_ p: Person, groupNames: [String: String]) -> [String: Any] {
 protocol Source {
     func people() -> [Person]
     func groups() -> [(id: String, name: String)]
+    func meID() -> String?  // the user's own card ("My Card"), when there is one
 }
 
 struct FixtureSource: Source {
@@ -186,10 +190,16 @@ struct FixtureSource: Source {
     func groups() -> [(id: String, name: String)] {
         (obj["groups"] as? [[String: Any]] ?? []).map { ($0["id"] as? String ?? "", $0["name"] as? String ?? "") }
     }
+
+    func meID() -> String? { obj["me"] as? String }
 }
 
 final class StoreSource: Source {
     let store = CNContactStore()
+
+    func meID() -> String? {
+        (try? store.unifiedMeContactWithKeys(toFetch: [CNContactIdentifierKey as CNKeyDescriptor]))?.identifier
+    }
 
     func groups() -> [(id: String, name: String)] {
         ((try? store.groups(matching: nil)) ?? []).map { ($0.identifier, $0.name) }
@@ -373,7 +383,7 @@ if let i = argv.firstIndex(of: "--fixture") {
     argv.removeSubrange(i...(i + 1))
 }
 guard let command = argv.first else {
-    fail("usage: scout-contacts status|request|search|get|groups|resolve ...")
+    fail("usage: scout-contacts status|request|search|get|groups|resolve|cards ...")
 }
 let o = options(Array(argv.dropFirst()))
 
@@ -472,6 +482,41 @@ case "resolve":
     }
     emit(["names": out])
 
+case "cards":
+    let handles = o["handle"] ?? []
+    if handles.isEmpty { fail("--handle is required") }
+    if handles.count > 200 { fail("at most 200 handles") }
+    let src = source()
+    let all = src.people().filter { !$0.name.isEmpty }
+    var byKey: [String: Person] = [:]
+    var cardsWith: [String: Set<String>] = [:]  // handle key -> the cards it's on
+    for p in all {
+        for h in p.phones.map(\.value) + p.emails.map(\.value) {
+            let k = handleKey(h)
+            if byKey[k] == nil { byKey[k] = p }
+            cardsWith[k, default: []].insert(p.id)
+        }
+    }
+    let me = src.meID()
+    func only(_ xs: [Labeled]) -> [String] {
+        var seen: Set<String> = []
+        return xs.map(\.value).filter {
+            let k = handleKey($0)
+            return cardsWith[k]?.count == 1 && seen.insert(k).inserted
+        }
+    }
+    var out: [String: Any] = [:]
+    for h in handles {
+        // A handle on several cards (a shared office line) says no one in particular.
+        guard let p = byKey[handleKey(h)], cardsWith[handleKey(h)]?.count == 1 else { continue }
+        var card: [String: Any] = [
+            "id": p.id, "name": p.name, "emails": only(p.emails), "phones": only(p.phones),
+        ]
+        if p.id == me { card["me"] = true }
+        out[h] = card
+    }
+    emit(["cards": out])
+
 default:
-    fail("unknown command \(command); usage: scout-contacts status|request|search|get|groups|resolve")
+    fail("unknown command \(command); usage: scout-contacts status|request|search|get|groups|resolve|cards")
 }

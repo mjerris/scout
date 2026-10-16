@@ -113,6 +113,7 @@ def _identities(meta: dict[str, Any]) -> str:
     rows = [("contact", str(meta.get("contact") or ""))]
     rows += [("name", str(n)) for n in meta.get("names") or []]
     rows += [("email", str(x)) for x in meta.get("emails") or []]
+    rows += [("phone", str(x)) for x in meta.get("phones") or []]
     rows += [
         (
             "slack",

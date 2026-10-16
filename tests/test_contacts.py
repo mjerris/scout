@@ -211,6 +211,42 @@ def test_get_groups_and_resolve(binary: Path, fixture_file: Path) -> None:
     }
 
 
+def test_cards_give_every_handle_on_the_card_but_shared_ones(binary: Path) -> None:
+    f = _tmp() / "cards.json"
+    f.write_text(json.dumps({
+        "contacts": [
+            {"id": "c1", "given": "Pat", "family": "Lee",
+             "phones": [{"label": "mobile", "value": "+1 (555) 010-2000"}, {"label": "work", "value": "555-010-3000"}],
+             "emails": [{"value": "pat@acme.example"}, {"value": "pat@home.example"}, {"value": "Pat@Home.example"}]},
+            {"id": "c2", "given": "Sam", "family": "Roe", "phones": [{"label": "work", "value": "(555) 010-3000"}],
+             "emails": [{"value": "sam@acme.example"}]},
+            {"id": "c9", "given": "Me", "family": "Myself", "emails": [{"value": "me@self.example"}]},
+        ],
+        "me": "c9",
+    }))  # fmt: skip
+    _, got = _cli(
+        binary, f, "cards", "--handle", "PAT@acme.example", "--handle", "5550103000",
+        "--handle", "me@self.example", "--handle", "nobody@x.example",
+    )  # fmt: skip
+    assert got["cards"] == {
+        "PAT@acme.example": {
+            "id": "c1",
+            "name": "Pat Lee",
+            "emails": ["pat@acme.example", "pat@home.example"],  # once each
+            "phones": ["+1 (555) 010-2000"],  # the shared office line isn't Pat's alone
+        },
+        "me@self.example": {
+            "id": "c9",
+            "name": "Me Myself",
+            "emails": ["me@self.example"],
+            "phones": [],
+            "me": True,
+        },
+    }  # fmt: skip  (the shared line itself finds no one)
+    code, bad = _cli(binary, f, "cards")
+    assert code == 1 and "required" in bad["error"]
+
+
 def test_status_with_a_fixture_never_asks_macos(binary: Path, fixture_file: Path) -> None:
     assert _cli(binary, fixture_file, "status") == (0, {"status": "fixture"})
     assert _cli(binary, fixture_file, "request") == (0, {"granted": True, "status": "fixture"})
