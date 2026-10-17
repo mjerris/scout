@@ -1118,6 +1118,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         """An offline reference article, or an image or stylesheet it uses, as stored in its
         archive (/ref/<book>/<path>, reference.py): token-gated, with scripts blocked."""
         from . import reference
+        from .mac import ToolError
 
         if not authed(req, allow_query=True):
             return page_response(req, "", _REFERENCE_CSP)  # the 401 page, which says how
@@ -1126,6 +1127,10 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             got = await asyncio.to_thread(reference.library().content, book, path)
         except KeyError:
             raise web.HTTPNotFound() from None
+        except ToolError as exc:  # kiwix-serve isn't installed or isn't answering
+            return web.Response(
+                status=503, text=str(exc), headers={"Content-Security-Policy": _REFERENCE_CSP}
+            )
         except Exception as exc:  # a damaged archive
             log.warning("web: reference %s/%s not read: %s", book, path, exc)
             raise web.HTTPNotFound() from None

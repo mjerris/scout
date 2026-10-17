@@ -1286,42 +1286,6 @@ wheels = [
 ]
 
 [[package]]
-name = "libzim"
-version = "3.13.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/51/7f/348fd8a803401b3dc6d6ec57ab8272e3bf794e360fb236bfabdc31816b7d/libzim-3.13.1.tar.gz", hash = "sha256:46dd80e5dea14f14f5dcea8135989f230e4773a8cb26fd632fb7756c539b6516", size = 58564, upload-time = "2026-10-05T13:55:50.121Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/e5/6267af3229f5ce3539767a21384228c393a888698783184ff1581d1e6952/libzim-3.13.1-cp312-cp312-macosx_13_0_arm64.whl", hash = "sha256:cb104512c30bf26f4a6940fa771059f46d9133937944f8d310ffdf6edfcfc48f", size = 3262253, upload-time = "2026-10-05T13:54:53.955Z" },
-    { url = "https://files.pythonhosted.org/packages/d6/9b/f150028637d9ef95f45381db9d1b8b610b9a1c226755b083873608dd8542/libzim-3.13.1-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:e80a38b573c925f42f90b2be5737ce2ba2e8f280102a5791d902ec9d148b88d6", size = 3583252, upload-time = "2026-10-05T13:54:55.567Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/5d/d64d89aefc545bc80ba674fce7a960dd341b0e05ac77b7fd73903c06e563/libzim-3.13.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:53330a5562798627ef0544f804a60e2a168d5f5ffaa25fb59ae78f1e4e5a5873", size = 10430942, upload-time = "2026-10-05T13:54:57.205Z" },
-    { url = "https://files.pythonhosted.org/packages/ed/6b/ecad9a66d86f87f82806007f97d40a5de3c1781dc29e8de8b292651909ae/libzim-3.13.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1f313d5930021efdf1f45ccb4f294a01cfcebcdbba4ae8d1a1aadcea82e8682d", size = 10695335, upload-time = "2026-10-05T13:54:59.344Z" },
-    { url = "https://files.pythonhosted.org/packages/a1/e2/ccc5c37a8d78081e22dba18c107a6378338bd172e6ca7f28df887ffdeff6/libzim-3.13.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:8ed3764ac175fb866f194fc94a79e79ec421f802035d1574d36286353d2eeb9f", size = 11731793, upload-time = "2026-10-05T13:55:01.412Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/ba/4f336ecad72717d462296d005f5a7f54b2953b08187d6dee00f62de9fe54/libzim-3.13.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fcde4de64a84bac1ac809ce765e48fadade8d61246288532123c511a2cf36505", size = 12011823, upload-time = "2026-10-05T13:55:03.851Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/f4/a6091b73a7faf5d28713e7c1b06dee56c480291dab32abddaa8d3e7fe93a/libzim-3.13.1-cp312-cp312-win_amd64.whl", hash = "sha256:0bfb9f53158d87eba6c6a841f51cc2d5f6ee5fd2517052b49625252bb5d2254f", size = 15976115, upload-time = "2026-10-05T13:55:05.883Z" },
-    { url = "https://files.pythonhosted.org/packages/78/0e/79ac7e7de881929f752bafc80799e80ebf3ad2c82e4db0a24beb5594ed92/libzim-3.13.1-cp313-cp313-macosx_13_0_arm64.whl", hash = "sha256:3811491d4ebd2027e1afe1d9fbd52dcf8268b322c0fe8d16c7b6cc2b6b6ef044", size = 3261979, upload-time = "2026-10-05T13:55:07.682Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/c4/edbbf19505b67c0930ecaf47ea34d13d3d86d15b65b8ea5a455d61143477/libzim-3.13.1-cp313-cp313-macosx_13_0_x86_64.whl", hash = "sha256:888dcc5c4c2f298b49c15c8dcadc142ae60ca64ba560917c736f466a64db8a6c", size = 3583321, upload-time = "2026-10-05T13:55:09.156Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/5e/1f0b6d6d5d07b35235420343f7a75fa318a00e7d57bd58e32ea7d10053fc/libzim-3.13.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:49d671567d9b0526d62ecccad087f7787379faa9ec823e72e58d7dea5d3f9e6d", size = 10420473, upload-time = "2026-10-05T13:55:10.633Z" },
-    { url = "https://files.pythonhosted.org/packages/90/f3/3a437fe17dcf4296400ae50c7cb2b3f0aa20347cdc8c3af1c091d4bdc027/libzim-3.13.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:03a9ab549d0f14169a64991cab3d26e8923d215af36ae75cc18fb0ae914fa5c0", size = 10674874, upload-time = "2026-10-05T13:55:12.835Z" },
-    { url = "https://files.pythonhosted.org/packages/07/f0/993f92652386c289b06a5460ad97a48f087e3f5d03bcb3a9f5e913026e2b/libzim-3.13.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:4075365c0afdd7b0f7d8007a58b017a94296605fb8b02659c786371753874b4d", size = 11717403, upload-time = "2026-10-05T13:55:15.083Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/3c/4696b511431debce3441fad36770d68a5835522d139be53ad3bce1afc3a1/libzim-3.13.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:0f16b329c15dbdec915344752414b9a3c9b99bd42b6f2529f3e5a448517a21af", size = 11993083, upload-time = "2026-10-05T13:55:17.16Z" },
-    { url = "https://files.pythonhosted.org/packages/29/1c/9c8cda68479bd42fa8eaf523ffcc8fce83e480b4f5a632735a5a129dfd6b/libzim-3.13.1-cp313-cp313-win_amd64.whl", hash = "sha256:2687feb7c5aa935bc0f5a50b57b1d8b80638324ec7102e989b31e168170bde96", size = 15975727, upload-time = "2026-10-05T13:55:19.319Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/75/eb9448b26472e3b3f06288e1bc1131070ea8d872c60517182a6c9f87bf9f/libzim-3.13.1-cp314-cp314-macosx_13_0_arm64.whl", hash = "sha256:cb210fffc7e36d436fa00acd334104463547a48901107a7333041af8ccd6a147", size = 3269662, upload-time = "2026-10-05T13:55:21.337Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/2e/f0761a6f8faff4dd081be4cae6db6fc7ed19b044c748ce9589f68fd2af10/libzim-3.13.1-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:a44564079576523aa843e24e4874058a9e9cac5e7718f4ff21506873cc74611a", size = 3590767, upload-time = "2026-10-05T13:55:22.611Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/98/08ce16f4e3d6ec20a8c775272943efda63cd077ef9ebd0e64b83df544f9c/libzim-3.13.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:77864105f08cceaf8ad3c9d7d4a9cc682a33b4962ac0ee1c31976e5330b24dc8", size = 10423399, upload-time = "2026-10-05T13:55:24.271Z" },
-    { url = "https://files.pythonhosted.org/packages/31/f3/16820fa6041ecbf6c6b54d1b3dcc23e3489f71447870f36a3d2779092434/libzim-3.13.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bc29b54e91690de33706d765605d3ca9a63e066ce70175f51bf1169ba63bef70", size = 10672826, upload-time = "2026-10-05T13:55:26.537Z" },
-    { url = "https://files.pythonhosted.org/packages/40/0f/425deb64a6f79383ac06000ef4a4cfe5956b7a70cfbd27f38afdb1f45f08/libzim-3.13.1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:f5de787e8b6c6c9ac3cde405b7ba65b9efe056dbad095e915d10627da329b061", size = 11724356, upload-time = "2026-10-05T13:55:28.369Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/f8/a0378453e54b4e4e6e1221008d4d9a202e3d77614121773356ae63b9e7da/libzim-3.13.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:3422fd66f07862883ee16c74f9621fa0b5bb6b46d3bfbc75c55f8636cbc43e2b", size = 11991168, upload-time = "2026-10-05T13:55:30.502Z" },
-    { url = "https://files.pythonhosted.org/packages/62/21/244137a09868b1db573ce994442cd614e2181df3b538db67842476b68d09/libzim-3.13.1-cp314-cp314-win_amd64.whl", hash = "sha256:cef40e8f75e2ab81d774fb4814dee6102f1584edc3bf90f1d33f0043f6f2dc29", size = 16648347, upload-time = "2026-10-05T13:55:33.044Z" },
-    { url = "https://files.pythonhosted.org/packages/81/52/8481c561c927173cef2583790cdca92213df2bd8fee5c347d9ba4c1d5076/libzim-3.13.1-cp314-cp314t-macosx_13_0_arm64.whl", hash = "sha256:fad0e7f242e69899c61ea442dacda8dfba153baa45cd62e22494879cf1d18a53", size = 3277888, upload-time = "2026-10-05T13:55:34.836Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/18/db32f814af4354c0e75995a678ae7ec793df38b0fd6d76bd246a7ae846a5/libzim-3.13.1-cp314-cp314t-macosx_13_0_x86_64.whl", hash = "sha256:998091a942f45e99cfde4f273338c204242b4954b6c71bb5f3ec472921f62b1d", size = 3594010, upload-time = "2026-10-05T13:55:36.385Z" },
-    { url = "https://files.pythonhosted.org/packages/59/01/9f31a29bdb674a1c8236eaf5aaee16bf71e27d644461423f66ffd13acfb6/libzim-3.13.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5fa8f119b3938440b7836dfb77619d261c06c5ca354e73033e616d1ae849476a", size = 10429759, upload-time = "2026-10-05T13:55:37.882Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/14/fa6d6c0e7b9d3261daa365ba0db023388be16e91a211e64db86750ad716a/libzim-3.13.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:15acf962e01415ee540694edf138d0fc63090a4fb0103bb87afa0e20f26273c2", size = 10662279, upload-time = "2026-10-05T13:55:40.031Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/92/05f95b119ebf0179ea4b4cd06a44911f82d7deb1cc1e062f6eb487b0915c/libzim-3.13.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:cca9df8db88db520603d7633126b28a1471ea3658af44f8a7a36ab6e930bf1d4", size = 11722336, upload-time = "2026-10-05T13:55:42.389Z" },
-    { url = "https://files.pythonhosted.org/packages/24/83/2767c5c12b41af15bd690c063bbbcfeb69724b05ca3a2325ff020f5fd399/libzim-3.13.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:9cf80fa5193ed8e65b46ac2705588cee19f741eb7766ea229c1e0ebb981f496b", size = 11975085, upload-time = "2026-10-05T13:55:44.364Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/1d/98a892e5272ea5dd8fcdc8bfa06d157985cd174959c18e3ded04359a9089/libzim-3.13.1-cp314-cp314t-win_amd64.whl", hash = "sha256:5a92a50253497e947eaa4b827eb50f250de2b4771bf3f9227cc7e8f9598fa203", size = 16660551, upload-time = "2026-10-05T13:55:47.144Z" },
-]
-
-[[package]]
 name = "livekit"
 version = "1.1.20"
 source = { registry = "https://pypi.org/simple" }
@@ -3308,7 +3272,6 @@ dependencies = [
     { name = "grpcio" },
     { name = "grpcio-reflection" },
     { name = "kokoro-onnx" },
-    { name = "libzim" },
     { name = "livekit" },
     { name = "mlx-lm" },
     { name = "mlx-whisper" },
@@ -3337,7 +3300,6 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.84.0" },
     { name = "grpcio-reflection", specifier = ">=1.84.0" },
     { name = "kokoro-onnx", specifier = ">=0.6.1" },
-    { name = "libzim", specifier = ">=3.13.1" },
     { name = "livekit", specifier = ">=1.1.20" },
     { name = "mlx-lm", specifier = ">=0.28" },
     { name = "mlx-whisper", specifier = ">=0.4.3" },

@@ -1,5 +1,6 @@
 """The offline reference: Kiwix ZIM archives (Wikipedia, WikiMed, iFixit...) kept on this
-Mac and read in place with libzim, so "look up X" works with the internet down.
+Mac and read in place through kiwix-serve (kiwix.py), so "look up X" works with the
+internet down.
 
     Library.search(query)       -> the best articles, by the archive's own full-text index
     Library.article(book, path) -> one article cut into sections at its headings
@@ -8,11 +9,12 @@ Mac and read in place with libzim, so "look up X" works with the internet down.
     online()                    -> whether the internet is reachable (cheap, remembered)
 
 Nothing is copied into Scout's store: an archive is searched through the Xapian index
-inside it (the same index kiwix-serve uses), and only the sections a question needs
-are read, cut at their headings and stripped of boilerplate (references, navigation
-boxes, infoboxes), as Project NOMAD's zim_extraction_service does. An article's ref is
-zim:<book>/<path>; its link is its page on Scout's web UI, <web base>/ref/<book>/<path>
-(web.py), which serves the archive's own HTML with scripts blocked.
+inside it (kiwix-serve's /search) and its title index (/suggest), and only the sections
+a question needs are read, cut at their headings and stripped of boilerplate
+(references, navigation boxes, infoboxes), as Project NOMAD's zim_extraction_service
+does. An article's ref is zim:<book>/<path>; its link is its page on Scout's web UI,
+<web base>/ref/<book>/<path> (web.py), which serves the archive's own HTML (from
+kiwix-serve's /raw) with scripts blocked.
 
 The archives are public reference works, not the user's data: nothing here is private.
 """
@@ -35,16 +37,24 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from . import links, recall, refs
+from . import kiwix, links, recall, refs
 from .config import ReferenceConfig, load
 from .mac import ToolError
 
 log = logging.getLogger(__name__)
 
-ZIM_MAGIC = b"ZIM\x04"  # 72173914, little-endian: a corrupt file can abort libzim
-SCAN_S = 60.0  # the folder is looked at again after this long
+ZIM_MAGIC = b"ZIM\x04"  # 72173914, little-endian: anything else in the folder isn't served
+SCAN_S = 60.0  # the folder and kiwix-serve's catalog are looked at again after this long
+DOWN_S = 5.0  # ...or after this long, while there are none
 _DATED = re.compile(r"_\d{4}-\d{2}[a-z]?$")  # wikipedia_en_all_nopic_2026-06 -> wikipedia_en_all_nopic
 NO_BOOKS = "No offline reference archives are installed (see docs/reference.md)."
+NOT_INSTALLED = (
+    "The offline reference isn't installed: kiwix-serve, the program that reads the archives, "
+    "is missing (scripts/install-kiwix.sh; see docs/reference.md)."
+)
+NOT_RUNNING = (
+    "The offline reference isn't running right now (kiwix-serve isn't answering); try again in a minute."
+)
 _SAFE = "/-_.~,"  # kept as is in refs and links; everything else (parentheses too) is quoted
 
 
@@ -57,6 +67,7 @@ class Book:
     articles: int
     size: int
     fulltext: bool
+    id: str = ""  # its name in kiwix-serve's URLs: the file name without .zim
 
 
 @dataclass(frozen=True)
@@ -256,7 +267,22 @@ def sections(html: str) -> tuple[str, list[Section]]:
     return title, out
 
 
+def _summary(html: str, path: str) -> tuple[str, str]:
+    """(title, first lines) of an article page."""
+    title, secs = sections(html[:60_000])
+    text = " ".join(secs[0].text.split()) if secs else ""
+    snippet = text if len(text) <= 200 else text[:199].rsplit(" ", 1)[0] + "…"
+    return title or path.replace("_", " "), snippet
+
+
 # --- the archives ------------------------------------------------------------------------
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _is_zim(path: Path) -> bool:
@@ -265,20 +291,6 @@ def _is_zim(path: Path) -> bool:
             return fh.read(4) == ZIM_MAGIC
     except OSError:
         return False
-
-
-def _meta(archive: Any, key: str) -> str:
-    try:
-        return bytes(archive.get_metadata(key)).decode("utf-8", "replace").strip()
-    except (RuntimeError, KeyError):
-        return ""
-
-
-def _title(archive: Any, path: str) -> str:
-    try:
-        return str(archive.get_entry_by_path(path).title)
-    except (KeyError, RuntimeError):
-        return ""
 
 
 def _words(text: str) -> list[str]:
@@ -300,20 +312,21 @@ def query_words(text: str) -> list[str]:
 
 
 class Library:
-    """The archives in one folder (`names`: which ones; empty: all), opened as needed."""
+    """The archives in one folder (`names`: which ones; empty: all), read through
+    kiwix-serve (kiwix.py) on 127.0.0.1:`port`. The app runs kiwix-serve on `files()`;
+    any of Scout's processes can read through it."""
 
-    def __init__(self, folder: Path, names: Sequence[str] = ()) -> None:
+    def __init__(
+        self, folder: Path, names: Sequence[str] = (), port: int = 8769, exe: Path | None = None
+    ) -> None:
         self.folder, self.names = folder, [n.strip() for n in names if n.strip()]
+        self.client = kiwix.Client(port)
+        self.exe = exe or kiwix.program()
         self._lock = threading.Lock()
+        self._files: tuple[float, list[Path]] = (-math.inf, [])
         self._scanned: tuple[float, list[Book]] = (-math.inf, [])
-        self._archives: dict[Path, Any] = {}
-
-    def _open(self, file: Path) -> Any:
-        from libzim.reader import Archive
-
-        if file not in self._archives:
-            self._archives[file] = Archive(file)
-        return self._archives[file]
+        self.problem = ""  # why there are no books, when the archives are there
+        self._generation = 0  # counts changed(): a catalog read across one isn't kept
 
     def _wanted(self, files: list[Path]) -> list[Path]:
         if not self.names:
@@ -329,32 +342,64 @@ class Library:
                 log.info("reference: no archive %r in %s", n, self.folder)
         return list(dict.fromkeys(out))
 
+    def files(self) -> list[Path]:
+        """The archives to serve: the newest copy of each one wanted, ZIM files only (a
+        half-downloaded .part, or anything else, is left out)."""
+        with self._lock:
+            at, files = self._files
+            if time.monotonic() - at < SCAN_S:
+                return files
+            try:
+                found = [f for f in self.folder.glob("*.zim") if f.is_file()]
+            except OSError:
+                found = []
+            files = self._wanted(sorted(f for f in found if _is_zim(f)))
+            self._files = (time.monotonic(), files)
+            return files
+
+    def changed(self) -> None:
+        """kiwix-serve started or stopped: read its catalog again next time. (No lock: the
+        app's event loop calls this, and a reader may hold the lock through an HTTP call.)"""
+        self._scanned = (-math.inf, [])
+        self._generation += 1
+
     def books(self) -> list[Book]:
+        files = self.files()
         with self._lock:
             at, books = self._scanned
-            if time.monotonic() - at < SCAN_S:
+            if time.monotonic() - at < (SCAN_S if books else DOWN_S):
                 return books
-            try:
-                files = [f for f in self.folder.glob("*.zim") if f.is_file()]
-            except OSError:
-                files = []
-            books = []
-            for f in self._wanted([f for f in files if _is_zim(f)]):
+            books, self.problem, generation = [], "", self._generation
+            if files and not self.exe.is_file():
+                self.problem = NOT_INSTALLED
+            elif files:
                 try:
-                    a = self._open(f)
-                    books.append(Book(
-                        _DATED.sub("", f.stem), f, _meta(a, "Title") or f.stem, _meta(a, "Date"),
-                        a.article_count, a.filesize, a.has_fulltext_index,
-                    ))  # fmt: skip
-                except Exception as exc:  # a broken or half-downloaded archive: left out
-                    log.warning("reference: can't read %s: %s", f.name, exc)
-            self._scanned = (time.monotonic(), books)
+                    served = {e.id: e for e in self.client.catalog()}
+                except kiwix.Unavailable as exc:
+                    log.info("reference: %s", exc)
+                    served, self.problem = {}, NOT_RUNNING
+                for f in files:
+                    e = served.get(f.stem)
+                    if e is not None:
+                        books.append(Book(
+                            _DATED.sub("", f.stem), f, e.title or f.stem, e.date, e.articles,
+                            _file_size(f), e.fulltext, e.id,
+                        ))  # fmt: skip
+                    elif served:
+                        log.info("reference: kiwix-serve isn't serving %s yet", f.name)
+                if served and not books:
+                    self.problem = NOT_RUNNING
+            if generation == self._generation:
+                self._scanned = (time.monotonic(), books)
             return books
+
+    def _none(self) -> ToolError:
+        return ToolError(self.problem or NO_BOOKS)
 
     def book(self, name: str) -> Book:
         books = self.books()
         if not books:
-            raise ToolError(NO_BOOKS)
+            raise self._none()
         for b in books:
             if b.name == name:
                 return b
@@ -366,109 +411,114 @@ class Library:
         """The best articles for `query`, best first, taking turns between archives."""
         books = [self.book(book)] if book else self.books()
         if not books:
-            raise ToolError(NO_BOOKS)
+            raise self._none()
         words = query_words(query) or _words(query)[:8]
         if not words:
             return []
-        found = [self._search(b, words, limit) for b in books]
+        try:
+            found = [self._search(b, words, limit) for b in books]
+        except kiwix.Unavailable as exc:
+            self.changed()
+            raise ToolError(f"{NOT_RUNNING} ({exc})") from None
         out = [r for group in itertools.zip_longest(*found) for r in group if r is not None]
         return out[:limit]
 
-    def _paths(self, archive: Any, words: Sequence[str], limit: int) -> list[str]:
-        from libzim.search import Query, Searcher
+    def _fulltext(self, b: Book, words: list[str], limit: int) -> list[tuple[str, str]]:
+        """Articles (path, title) with all the words; failing that, with all the words some
+        article has (all of up to two, at least half of more), then with one of those left out."""
 
-        s = Searcher(archive)
-        return list(s.search(Query().set_query(" ".join(words))).getResults(0, limit))
+        def hits(ws: Sequence[str]) -> list[tuple[str, str]]:
+            return self.client.search(b.id, ws, limit)[1]
 
-    def _count(self, archive: Any, word: str) -> int:
-        from libzim.search import Query, Searcher
-
-        return Searcher(archive).search(Query().set_query(word)).getEstimatedMatches()
-
-    def _fulltext(self, archive: Any, words: list[str], limit: int) -> list[str]:
-        """Articles with all the words; failing that, with all the words some article has
-        (all of up to two, at least half of more), then with one of those left out."""
-        paths = self._paths(archive, words, limit)
-        if paths:
-            return paths
+        if found := hits(words):
+            return found
         need = len(words) if len(words) <= 2 else math.ceil(len(words) / 2)
-        counts = {w: self._count(archive, w) for w in words}
+        counts = {w: self.client.search(b.id, [w], 1)[0] for w in words}
         known = [w for w in words if counts[w]]
         if len(known) < need:
             return []
-        if len(known) < len(words) and (paths := self._paths(archive, known, limit)):
-            return paths
-        out: dict[str, None] = {}
+        if len(known) < len(words) and (found := hits(known)):
+            return found
+        out: dict[str, str] = {}
         if len(known) - 1 >= need:
             for drop in sorted(known, key=lambda w: -counts[w]):  # the commonest word first
-                out.update(dict.fromkeys(self._paths(archive, [w for w in known if w != drop], limit)))
+                out.update(hits([w for w in known if w != drop]))
                 if len(out) >= limit:
                     break
-        return list(out)[:limit]
+        return list(out.items())[:limit]
 
     def _search(self, b: Book, words: list[str], limit: int) -> list[Result]:
-        from libzim.suggestion import SuggestionSearcher
-
-        a = self._open(b.file)
         phrase = " ".join(words)
-        titled = list(SuggestionSearcher(a).suggest(phrase).getResults(0, 3)) if a.has_title_index else []
-        texts = self._fulltext(a, words, limit) if b.fulltext else []
-        exact = [p for p in titled if " ".join(_words(_title(a, p))) == phrase]
+        titled = self.client.suggest(b.id, phrase, 3)
+        texts = self._fulltext(b, words, limit) if b.fulltext else []
+        exact = [(p, t) for p, t in titled if " ".join(_words(t)) == phrase]
+        named = dict([*titled, *texts])  # the index's own titles
         out: dict[str, Result] = {}
-        for p in [*exact, *texts, *titled]:
+        for p, _ in [*exact, *texts, *titled]:
             try:
-                path, title = self._entry(a, p)
-                if path not in out:
-                    out[path] = Result(b.name, b.title, path, title, self._snippet(a, path))
-            except (KeyError, RuntimeError, ToolError) as exc:
+                path, html = self._page(b, p)
+            except (KeyError, ToolError) as exc:
                 log.info("reference: %s/%s not read: %s", b.name, p, exc)
+                continue
+            if path not in out:
+                title, snippet = _summary(html, path)
+                out[path] = Result(b.name, b.title, path, named.get(path) or title, snippet)
         return list(out.values())[:limit]
 
-    @staticmethod
-    def _entry(archive: Any, path: str) -> tuple[str, str]:
-        """(path, title) of the entry at `path`, redirects followed."""
-        e = archive.get_entry_by_path(path)
+    def _page(self, b: Book, path: str) -> tuple[str, str]:
+        """(path, HTML) of the article at `path`, redirects followed. KeyError when there's
+        no such entry; ToolError when it isn't an article."""
+        raw = self.client.raw(b.id, path)
         for _ in range(5):
-            if not e.is_redirect:
+            if not raw.redirect:
                 break
-            e = e.get_redirect_entry()
-        return e.path, e.title or e.path
+            path = raw.redirect
+            raw = self.client.raw(b.id, path)
+        if raw.redirect or not raw.mimetype.startswith("text/html"):
+            raise ToolError(f"{path!r} in {b.name} isn't an article")
+        return path, raw.data.decode("utf-8", "replace")
 
-    def _snippet(self, archive: Any, path: str) -> str:
-        item = archive.get_entry_by_path(path).get_item()
-        if not item.mimetype.startswith("text/html"):
-            return ""
-        _, secs = sections(bytes(item.content)[:60_000].decode("utf-8", "replace"))
-        text = " ".join(secs[0].text.split()) if secs else ""
-        return text if len(text) <= 200 else text[:199].rsplit(" ", 1)[0] + "…"
+    def entry(self, book: str, path: str) -> tuple[Book, str, str]:
+        """(book, path, title) of an article, redirects followed (refs.resolve)."""
+        b = self.book(book)
+        try:
+            final, html = self._page(b, path)
+        except KeyError:
+            raise ToolError(f"there's no article {path!r} in {book}") from None
+        except kiwix.Unavailable as exc:
+            self.changed()
+            raise ToolError(f"{NOT_RUNNING} ({exc})") from None
+        return b, final, _summary(html, final)[0]
 
     # --- reading ---------------------------------------------------------------------
 
     def article(self, book: str, path: str) -> Article:
         b = self.book(book)
-        a = self._open(b.file)
         try:
-            final, title = self._entry(a, path)
-            item = a.get_entry_by_path(final).get_item()
+            final, html = self._page(b, path)
         except KeyError:
             raise ToolError(f"there's no article {path!r} in {book}") from None
-        if not item.mimetype.startswith("text/html"):
-            raise ToolError(f"{path!r} in {book} isn't an article")
-        heading, secs = sections(bytes(item.content).decode("utf-8", "replace"))
-        return Article(b, final, title or heading, secs)
+        except kiwix.Unavailable as exc:
+            self.changed()
+            raise ToolError(f"{NOT_RUNNING} ({exc})") from None
+        heading, secs = sections(html)
+        return Article(b, final, heading or final.replace("_", " "), secs)
 
     def content(self, book: str, path: str) -> Content:
         """An entry as stored (an article's HTML, an image...), for the web UI. KeyError
-        when there's no such book or entry."""
+        when there's no such book or entry; ToolError when kiwix-serve isn't there."""
         try:
             b = self.book(book)
         except ToolError:
+            if self.problem:
+                raise
             raise KeyError(book) from None
-        e = self._open(b.file).get_entry_by_path(path)
-        if e.is_redirect:
-            return Content(b"", "", e.get_redirect_entry().path)
-        item = e.get_item()
-        return Content(bytes(item.content), item.mimetype)
+        try:
+            raw = self.client.raw(b.id, path)
+        except kiwix.Unavailable as exc:
+            self.changed()
+            raise ToolError(f"{NOT_RUNNING} ({exc})") from None
+        return Content(raw.data, raw.mimetype, raw.redirect)
 
     # --- passages for a local answer -------------------------------------------------
 
@@ -530,7 +580,7 @@ def library() -> Library:
     global _library
     if _library is None:
         cfg = load()
-        _library = Library(cfg.path(cfg.reference.dir), cfg.reference.archives)
+        _library = Library(cfg.path(cfg.reference.dir), cfg.reference.archives, cfg.reference.port)
     return _library
 
 
@@ -594,10 +644,8 @@ def resolve(ref: str) -> dict[str, Any] | None:
     """A reference article as refs.resolve gives a store record (index.Index.resolve)."""
     try:
         book, path = parse_ref(ref)
-        lib = library()
-        b = lib.book(book)
-        final, title = lib._entry(lib._open(b.file), path)
-    except (ToolError, KeyError, RuntimeError):
+        b, final, title = library().entry(book, path)
+    except ToolError:
         return None
     url = url_of(book, final)
     return {
@@ -768,11 +816,18 @@ def _size(n: int) -> str:
 def status_line(lib: Library | None = None) -> str:
     """One line for `scoutctl.sh status`."""
     lib = lib or library()
+    files = lib.files()
+    if not files:
+        return f"reference: no archives in {lib.folder} (docs/reference.md)"
     books = lib.books()
     if not books:
-        return f"reference: no archives in {lib.folder} (docs/reference.md)"
+        n = len(files)
+        return f"reference: {n} archive{'s' if n != 1 else ''} in {lib.folder}, not readable: {lib.problem}"
     items = "; ".join(f"{b.name} {b.date or '?'}, {_size(b.size)}" for b in books)
-    return f"reference: {len(books)} archive{'s' if len(books) != 1 else ''} ({items}) in {lib.folder}"
+    return (
+        f"reference: {len(books)} archive{'s' if len(books) != 1 else ''} ({items}) in {lib.folder}, "
+        f"through kiwix-serve on {lib.client.base.removeprefix('http://')}"
+    )
 
 
 def relative(path: str, target: str) -> str:

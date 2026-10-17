@@ -2,14 +2,26 @@
 
 Scout can keep reference works on the Mac (Wikipedia, WikiMed, iFixit, Wikivoyage) and
 answer "look up X" from them when Starlink is down. They are Kiwix ZIM archives, the
-same files the Kiwix apps and Project NOMAD use. The code is `src/scout/reference.py`.
+same files the Kiwix apps and Project NOMAD use. Scout reads them through kiwix-serve,
+Kiwix's own server, which it runs on 127.0.0.1. The code is `src/scout/reference.py`
+(search, sections, answers) and `src/scout/kiwix.py` (kiwix-serve).
 
 ## How it works
 
 **Read in place.** Each archive carries its own full-text index (Xapian) and title
-index. Scout searches those indexes and reads only the article sections a question
-needs. Nothing is copied into Scout's store: Wikipedia alone is 49 GB without
-pictures.
+index. Scout searches those indexes through kiwix-serve (`/search` and `/suggest`) and
+reads only the articles a question needs (`/raw/<book>/content/<path>`). Nothing is
+copied into Scout's store: Wikipedia alone is 49 GB without pictures.
+
+**kiwix-serve.** The app runs it as a child process: `kiwix-serve --address 127.0.0.1
+--port 8769 --attachToProcess <Scout's pid> --skipInvalid <archives>`, with the newest
+copy of each archive Scout uses. It looks at the folder every minute and restarts
+kiwix-serve when the archives change, starts it again if it exits (waiting 10 s, then
+30 s, 1 and 5 minutes while it keeps failing), and stops it when Scout stops;
+`--attachToProcess` makes it exit by itself if Scout is killed. Its output goes to
+`logs/kiwix-serve.log`. The phone service and the MCP server read through the same
+port. `voice_status` has a `reference` entry (running, not installed, no archives,
+failed; its version, address, pid and how many archives it serves).
 
 **Cut at headings.** An article is split at its h2 to h4 headings, as NOMAD's
 `zim_extraction_service` does. Boilerplate sections (See also, References, External
@@ -33,7 +45,9 @@ two tools. Neither asks for a yes: they only read.
   subsections; `query` picks the two sections that best match a few words.
 
 Claude's prompt says to use them for "look up X" and general-knowledge questions when
-the web is slow or down.
+the web is slow or down. Without kiwix-serve they say so: "The offline reference isn't
+installed: kiwix-serve, the program that reads the archives, is missing", or that it
+isn't running right now.
 
 **Answers on this Mac.** With the internet down, Claude can't be reached. Then a
 question ("what", "how", "why"...) or a "look up ..." that tiers 0 and 1 didn't
@@ -59,8 +73,9 @@ link in your Scout reminders list, and `open_link` and `send_link` take the ref.
 
 **The page.** The link is the article on Scout's web UI:
 `<web base>/ref/<book>/<path>`, on the Tailscale name like the record pages. It
-serves the archive's own HTML, images and styles, and needs the token like the rest
-of the web UI. The archive's pages run on Scout's origin, so scripts are blocked
+serves the archive's own HTML, images and styles (from kiwix-serve's `/raw`, so no
+Kiwix toolbar), and needs the token like the rest of the web UI. kiwix-serve itself
+listens only on 127.0.0.1. The archive's pages run on Scout's origin, so scripts are blocked
 (`script-src 'none'`, no fetches, no forms): a page's script could otherwise call
 Scout's API with the cookie. Wikipedia pages read fine without them. A redirect
 (`Bee_stings`) goes to its article with a relative link, so the links inside work.
@@ -70,7 +85,8 @@ Scout's API with the cookie. Wikipedia pages read fine without them. A redirect
 1. Pick archives (below) and download them into
    `~/Library/Application Support/Scout/reference/`. `scripts/fetch-reference.sh`
    does it: it finds the newest copy at download.kiwix.org, resumes a stopped
-   download, and checks Kiwix's sha256.
+   download, and checks Kiwix's sha256. Then it installs kiwix-serve
+   (`scripts/install-kiwix.sh`).
 
    ```sh
    scripts/fetch-reference.sh wikipedia_en_all_nopic wikipedia_en_medicine_maxi ifixit_en_all
@@ -83,14 +99,25 @@ Scout's API with the cookie. Wikipedia pages read fine without them. A redirect
    dir = "reference"           # in Scout's data folder
    archives = []               # names (newest copy) or file names; empty: every .zim in dir
    local_answers = "offline"   # answer from them on this Mac: offline, always, never
+   port = 8769                 # kiwix-serve listens on 127.0.0.1 here
    ```
 
-3. Restart Scout. `scoutctl.sh status` shows a line like
-   `reference: 2 archives (wikipedia_en_all_nopic 2026-06-01, 52.7 GB; ...)`.
+3. Within a minute Scout starts kiwix-serve on them (no restart needed).
+   `scoutctl.sh status` shows a line like `reference: 2 archives
+   (wikipedia_en_all_nopic 2026-06-01, 52.7 GB; ...) in ..., through kiwix-serve on
+   127.0.0.1:8769`.
 
-No program needs installing: libzim comes as a Python package. Scout uses the newest
-copy of each archive; delete old ones by hand. A file that isn't a ZIM, or a
-half-downloaded `.part`, is skipped.
+**kiwix-serve** comes from Kiwix's official kiwix-tools release for macOS on Apple
+silicon (`kiwix-tools_macos-arm64-3.8.2.tar.gz` at download.kiwix.org/release/kiwix-tools/;
+Homebrew has no kiwix-tools formula). `scripts/install-kiwix.sh` puts only `kiwix-serve`
+in Scout's `bin/` folder, never system-wide. It is pinned to 3.8.2 and checked against
+the tarball's sha256 in the script and the md5 Kiwix publishes beside it (Kiwix
+publishes no sha256 for kiwix-tools), then the binary's own sha256; an installed copy
+that matches is left alone. Scout's installer runs it once there are archives.
+
+Scout uses the newest copy of each archive; delete old ones by hand. A file that isn't
+a ZIM, or a half-downloaded `.part`, is skipped, and kiwix-serve skips one it can't
+read.
 
 ## Which archives
 
@@ -114,27 +141,32 @@ A good set for the RV: `wikipedia_en_all_nopic`, `wikipedia_en_medicine_maxi`,
 `ifixit_en_all` and `wikivoyage_en_all_nopic`, about 54 GB. A small one:
 `wikipedia_en_top_nopic` and `wikipedia_en_medicine_nopic`, about 3.6 GB.
 
-## Why in Scout's process, not kiwix-serve
+## Why kiwix-serve, not libzim in Scout's process
 
-kiwix-serve (Homebrew `kiwix-tools`) is a web server for ZIM files. Scout reads them
-with libzim, the library kiwix-serve is built on, so the search is the same: the same
-Xapian index inside the archive, the same title suggestions. What differs:
+Scout used to read the archives with libzim, the library kiwix-serve is built on, as a
+Python package in its own process. That saved running a server, but libzim is
+GPL-3.0-or-later, and a program that loads a GPL library into its own process is
+generally treated as one combined work under the GPL's terms. Scout's code is public
+and carries no license of its own, so it keeps GPL code out of its process: kiwix-serve
+is a separate program, run as it is and spoken to over HTTP, and libzim is gone from
+Scout's dependencies (only the test-archive and benchmark scripts use it, through
+`uv run --with`). What changed:
 
-- **Nothing to run.** No service to start, keep alive, or give a port, and no
-  Homebrew formula. libzim is a 10 MB Python wheel (`libzim` 3.13.1).
-- **Cheap.** Measured with `scripts/bench_reference.py` on synthetic archives
-  (Apple M6, 24 GB): a 200,000-article archive (789 MB) opens in 2.7 ms; a search
-  plus reading the top five articles takes 10.5 ms (16 ms at most); memory goes
-  from 24 MB after opening to 88 MB after 30 searches, and those are pages mapped
-  from the file, which macOS drops first. Ten times more articles changed the
-  search time from 8 to 10.5 ms.
-- **One web UI.** The pages come from Scout's web UI, behind its token and on its
-  Tailscale name. kiwix-serve has no sign-in, so it would need its own port kept off
-  the network.
-
-What it costs: libzim is native code in Scout's process. A damaged archive can abort
-libzim, so Scout checks the ZIM signature before opening a file and skips any it
-can't read. And libzim is GPL-3.0-or-later.
+- **The same search.** kiwix-serve searches the same Xapian index inside the archive
+  and the same title index, so results are the same. Scout still cuts articles at
+  their headings itself.
+- **A process to run.** The app starts, restarts and stops it (above), on a port only
+  this Mac can reach. kiwix-serve has no sign-in, so it never listens on the network:
+  pages reach other devices only through Scout's web UI, behind its token.
+- **What it costs.** Measured with `scripts/bench_reference.py` on synthetic archives
+  (Apple M6, 24 GB): kiwix-serve answers 27 to 40 ms after it starts; a search plus
+  reading the top five articles takes 16 to 17 ms (28 ms at most), against 8 to 10.5 ms
+  with libzim in Scout's process; kiwix-serve uses 13 to 17 MB after starting and about
+  70 MB after 30 searches, mostly pages mapped from the archive, which macOS drops
+  first. On the real WikiMed and Wikipedia top archives (3.8 GB together) a search of
+  both, with the articles' first lines, takes 70 to 90 ms.
+- **A damaged archive** can't take Scout down any more: kiwix-serve skips one it can't
+  read, and if it crashes, Scout starts it again.
 
 ## Maps (not built)
 

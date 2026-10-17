@@ -8,8 +8,8 @@ import itertools
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Awaitable, Callable, Collection
+from typing import Any, cast
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 SERVER = "voice_app"
 REQUESTS_FILE = DATA / "state" / "change-requests.jsonl"
+# Claude Code's _meta key for a tool that is always in the prompt, never deferred behind
+# ToolSearch (claude.always_load_tools).
+ALWAYS_LOAD = "anthropic/alwaysLoad"
 
 
 def _ok(text: str) -> dict[str, Any]:
@@ -97,9 +100,11 @@ def build_server(
     relay: Callable[[str, str], str] = lambda s, t: "relaying isn't available",
     memory: Memory | None = None,
     on_refs: Callable[[list[str]], None] | None = None,
+    always_load: Collection[str] = (),
 ) -> tuple[McpSdkServerConfig, list[str]]:
     """The tool server. `on_refs` gets the record ids each tool result was about
-    (refs.from_tool), so what the turn said can be linked to later."""
+    (refs.from_tool), so what the turn said can be linked to later. The `always_load`
+    tools are listed in the prompt from the start; the rest load through ToolSearch."""
 
     def wrap(
         fn: Callable[[dict[str, Any]], Awaitable[str]],
@@ -208,7 +213,30 @@ def build_server(
     tools += [
         tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in NOT_DESK if t.name not in own
     ]
-    return create_sdk_mcp_server(SERVER, tools=tools), [f"mcp__{SERVER}__{t.name}" for t in tools]
+    server = create_sdk_mcp_server(SERVER, tools=tools)
+    mark_always_load(server, set(always_load) & {t.name for t in tools})
+    if unknown := set(always_load) - {t.name for t in tools}:
+        log.warning("claude.always_load_tools: no tool %s", ", ".join(sorted(unknown)))
+    return server, [f"mcp__{SERVER}__{t.name}" for t in tools]
+
+
+def mark_always_load(server: McpSdkServerConfig, names: Collection[str]) -> None:
+    """List `names` with _meta {"anthropic/alwaysLoad": true}, which Claude Code reads
+    as "never defer this one": the SDK's tool() has no such option, so the server's
+    tools/list answer is marked on its way out."""
+    if not names:
+        return
+    instance = cast(Any, server["instance"])
+    entry = instance.get_request_handler("tools/list")
+
+    async def listed(ctx: Any, params: Any) -> Any:
+        result = await entry.handler(ctx, params)
+        for t in result.tools:
+            if t.name in names:
+                t.meta = {**(t.meta or {}), ALWAYS_LOAD: True}
+        return result
+
+    instance.add_request_handler("tools/list", entry.params_type, listed)
 
 
 def memory_tools(

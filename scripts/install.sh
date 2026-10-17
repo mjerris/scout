@@ -59,6 +59,14 @@ UV_PROJECT_ENVIRONMENT="$DATA/venv" uv sync --frozen --project "$DATA/current" -
 status installing "fetching models (first time: about 350 MB)"
 "$DATA/current/scripts/fetch-models.sh" >/dev/null
 
+# kiwix-serve reads the offline reference's archives (docs/reference.md): installed once
+# there are archives to read. Without it the reference tools say it isn't installed.
+if compgen -G "$DATA/reference/*.zim" >/dev/null; then
+    status installing "installing kiwix-serve for the offline reference"
+    "$DATA/current/scripts/install-kiwix.sh" >/dev/null ||
+        echo "kiwix-serve not installed; the offline reference stays off (scripts/install-kiwix.sh)"
+fi
+
 # Rebuild a helper only when its source changed, so macOS keeps its permissions.
 BUILT=""
 build_if_changed() {  # NAME SOURCE-DIR [BINARY-NAME]

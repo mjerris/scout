@@ -4,7 +4,7 @@
 # Large: see docs/reference.md for the sizes before choosing.
 #   fetch-reference.sh wikipedia_en_all_nopic wikipedia_en_medicine_maxi ifixit_en_all
 # A download that stops can be run again: it resumes. Older copies are left for you to
-# delete (Scout uses the newest).
+# delete (Scout uses the newest). It installs kiwix-serve too (install-kiwix.sh).
 set -eu
 DATA="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}"
 DEST="$DATA/reference"
@@ -48,3 +48,5 @@ for name in "$@"; do
   fi
   mv "$DEST/$file.part" "$DEST/$file"
 done
+# kiwix-serve reads them; Scout starts it (or restarts it with the new archives) within a minute.
+"$(dirname "$0")/install-kiwix.sh"

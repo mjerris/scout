@@ -27,6 +27,7 @@ from . import (
     extmcp,
     gate,
     index,
+    kiwix,
     ledger,
     local_intents,
     mail_mac,
@@ -222,9 +223,12 @@ class Assistant:
         self._turn_tool = ""  # the tool the current room turn is running, for the progress line
         self._phone_refs: list[str] = []  # ...and the phone's request's (asks run one at a time)
         self._turn_refs: list[str] = []  # records the room's Claude turn read about (its tools' results)
-        server, names = build_server(self.timers, self.relay, self.memory, self._turn_refs.extend)
+        server, names = build_server(
+            self.timers, self.relay, self.memory, self._turn_refs.extend, cfg.claude.always_load_tools
+        )
         # The user's own MCP servers (tools.toml): the room's session gets them by its rules.
         self.external = extmcp.External(cfg.claude.cwd, lambda: self.privacy.mode)
+        self.kiwix: kiwix.Server | None = None  # the offline reference's server (run)
         self.brain = Brain(cfg.claude, self._confirm, server, names, self.rules, self._notify, self.external)
         self.utterances: asyncio.Queue[Utterance] = asyncio.Queue()
         self.state = "idle"  # idle | listening | thinking | speaking | confirming | agent
@@ -481,6 +485,9 @@ class Assistant:
     # --- main loop ---------------------------------------------------------------
 
     async def run(self) -> None:
+        lib = reference.library()  # its archives, served by kiwix-serve (docs/reference.md)
+        self.kiwix = kiwix.Server(lib.files, self.cfg.reference.port, on_change=lib.changed)
+        self._spawn(self.kiwix.run())
         if self.external.catalog.servers or self.external.catalog.problems:
             self._spawn(self.external.watch())  # health, for scout status; reconnects failing ones
         if self.cfg.briefing.at:
@@ -1175,6 +1182,8 @@ class Assistant:
             "default_voice": self.speaker.voice,
             # The echo path measured for the speaker and mic in use (echo_cal.py).
             "echo_path": self.echo_stats().get("calibration"),
+            # The offline reference's kiwix-serve: running, not installed, no archives...
+            "reference": self.kiwix.status() if self.kiwix is not None else None,
         }
 
     # --- room turns ---------------------------------------------------------------------
@@ -2269,7 +2278,12 @@ class Assistant:
             return {"status": "ok", "text": said, "tier": tier}
         if self._phone_brain is None:
             # No relaying to sessions; the tools' records are collected for this request.
-            server, names = build_server(self.timers, memory=self.memory, on_refs=self._phone_refs.extend)
+            server, names = build_server(
+                self.timers,
+                memory=self.memory,
+                on_refs=self._phone_refs.extend,
+                always_load=self.cfg.claude.always_load_tools,
+            )
             self._phone_brain = PhoneBrain(self.cfg.claude, server, names, PHONE_TOOLS, self.rules)
         brain = self._phone_brain
         replies: list[str] = []
@@ -2430,6 +2444,8 @@ class Assistant:
     async def shutdown(self) -> None:
         self._silence_turn = True
         self.speaker.stop()
+        if self.kiwix is not None:
+            await self.kiwix.stop()
         self.answer_confirm(False)
         if self._listen is not None and not self._listen.fut.done():
             self._listen.fut.set_result("stop")

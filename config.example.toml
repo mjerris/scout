@@ -78,6 +78,7 @@ confirm_timeout_s = 30.0
 approval_policy = "strict"
 always_ask = ["Bash(git push:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)"]  # settings policies only
 remote_control = ""           # e.g. "scout" to show the session in Remote Control
+# always_load_tools = ["remember", "forget", "tasks_list", "reminder_add"]   # in the prompt from the start; the rest load via ToolSearch
 auto_allow_tools = ["Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "ToolSearch", "Task", "Agent", "BashOutput", "NotebookRead"]   # secrets stay unreadable
 auto_allow_commands = ["date", "cal", "uptime", "whoami", "pwd", "ls", "df", "du", "which", "sw_vers"]
 extra_system_prompt = ""
@@ -128,10 +129,12 @@ enabled = true
 
 [reference]
 # Offline reference (docs/reference.md): Kiwix .zim archives (Wikipedia, WikiMed, iFixit...),
-# searched in place. scripts/fetch-reference.sh downloads them (large: check the sizes first).
+# searched in place through kiwix-serve, which Scout runs (scripts/install-kiwix.sh installs it).
+# scripts/fetch-reference.sh downloads them (large: check the sizes first).
 # dir = "reference"                      # in Scout's data folder
 # archives = []                          # e.g. ["wikipedia_en_all_nopic", "ifixit_en_all"]; empty: all
 # local_answers = "offline"              # Scout answers from them itself: offline, always, never
+# port = 8769                            # kiwix-serve listens on 127.0.0.1 here
 
 [phone]
 # Talk to Scout from the paired phone app through SignalWire (docs/phone-design.md).
