@@ -567,3 +567,16 @@ def test_the_real_kiwix_serve_reads_the_test_archives(
 def test_a_count_of_thousands_is_read(fake: FakeKiwix, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fake, "scale", 2000)  # kiwix-serve says "2,000"
     assert kiwix.Client(fake.port).search("wikipedia_en_test_2026-06", ["sting"], 1)[0] == 2000
+
+
+def test_suggestions_are_unescaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # As kiwix-serve 3.8.2 answers /suggest for a title with "&" in it.
+    body = (
+        b'[{"value" : "Float like a butterfly &amp; sting like a bee", "label" : "x", "kind" : "path",'
+        b' "path" : "Float_like_a_butterfly_&amp;_sting_like_a_bee"}, {"value": "f ", "kind": "pattern"}]'
+    )
+    client = kiwix.Client(free_port())
+    monkeypatch.setattr(client, "_get", lambda path, query=None: (200, {}, body))
+    assert client.suggest("wikipedia_en_top_nopic_2026-09", "float like a butterfly", 3) == [
+        ("Float_like_a_butterfly_&_sting_like_a_bee", "Float like a butterfly & sting like a bee")
+    ]

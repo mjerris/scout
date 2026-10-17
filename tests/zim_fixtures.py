@@ -214,7 +214,12 @@ class FakeKiwix:
             return 404, {"Content-Type": "text/html"}, b"No such book"
         words = re.findall(r"[a-z0-9]+", term.lower())
         out = [
-            {"value": t, "label": t, "kind": "path", "path": p}
+            {
+                "value": html.escape(t, quote=False),
+                "label": t,
+                "kind": "path",
+                "path": html.escape(p, quote=False),
+            }
             for p, t, _, mime in self.books[book].pages
             if mime == "text/html" and words and all(any(tw.startswith(w) for tw in _text(t)) for w in words)
         ][:count]
