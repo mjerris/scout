@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import os
@@ -146,8 +147,9 @@ class Client:
             got = json.loads(body)
         except ValueError:
             return []
+        # kiwix-serve escapes the path and title as HTML inside the JSON ("&amp;").
         return [
-            (str(s["path"]), str(s.get("value") or s["path"]))
+            (html.unescape(str(s["path"])), html.unescape(str(s.get("value") or s["path"])))
             for s in got
             if isinstance(s, dict) and s.get("kind") == "path" and s.get("path")
         ][:count]
