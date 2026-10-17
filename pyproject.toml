@@ -13,7 +13,6 @@ dependencies = [
     "grpcio>=1.84.0",
     "grpcio-reflection>=1.84.0",
     "kokoro-onnx>=0.6.1",
-    "libzim>=3.13.1",
     "livekit>=1.1.20",
     "mlx-lm>=0.28",
     "mlx-whisper>=0.4.3",
@@ -70,8 +69,3 @@ files = ["src", "tests"]
 [[tool.mypy.overrides]]
 module = ["sounddevice", "soundfile", "webrtcvad", "mlx_whisper", "onnxruntime", "grpc", "grpc_reflection.*"]
 ignore_missing_imports = true
-
-# libzim ships .pyi stubs but no py.typed marker: use its stubs.
-[[tool.mypy.overrides]]
-module = ["libzim", "libzim.*"]
-follow_untyped_imports = true

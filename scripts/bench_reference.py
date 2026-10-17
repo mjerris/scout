@@ -1,25 +1,28 @@
-"""What reading ZIM archives in Scout's own process costs (reference.py): open time,
-memory, and search plus reading the top five articles, on synthetic archives written
-with libzim (full-text index included). Nothing is downloaded.
+"""What the offline reference costs through kiwix-serve (reference.py, kiwix.py): its start
+time and memory, and a search plus reading the top five articles, on synthetic archives
+written with libzim (full-text index included). Nothing is downloaded.
 
-    uv run python scripts/bench_reference.py 20000 200000
+libzim only writes the archives here; it isn't one of Scout's dependencies (GPL-3.0-or-later):
 
-Each archive is built once under .tmp/bench-reference/ and measured in a fresh process.
-Measured on the Mac mini (Apple M6, 24 GB), 2026-10-15, warm runs (a first run after
-building, with the file not yet cached, opened the 200,000 in 30 ms and searched in 24 ms):
+    uv run --with libzim==3.13.1 python scripts/bench_reference.py 20000 200000
 
-    articles  file    open    RSS after open  RSS after 30 searches  search+read5 p50 / max
-    20,000    79 MB   2.4 ms  23 MB           84 MB                  8 / 12 ms
-    200,000   789 MB  2.7 ms  24 MB           88 MB                  10.5 / 16 ms
+kiwix-serve is Scout's (scripts/install-kiwix.sh), or the one in $KIWIX_SERVE. Each archive
+is built once under .tmp/bench-reference/ and served on a free port while measured.
+Measured on the Mac mini (Apple M6, 24 GB), 2026-10-16, kiwix-serve 3.8.2, warm runs:
 
-Python alone is 14 MB. RSS includes the archive's pages the searches touched: they are
-mapped from the file, so macOS drops them first under memory pressure.
+    articles  file    ready   kiwix-serve RSS after start / 30 searches  search+read5 p50 / max
+    20,000    79 MB   40 ms   17 / 69 MB                                  16 / 27 ms
+    200,000   789 MB  27 ms   13 / 68 MB                                  17 / 28 ms
+
+In Scout's process with libzim (before 2026-10-16) the same searches took 8 / 12 and
+10.5 / 16 ms: the difference is six HTTP requests on 127.0.0.1 per search.
 """
 
 from __future__ import annotations
 
+import os
 import random
-import resource
+import socket
 import subprocess
 import sys
 import time
@@ -70,6 +73,7 @@ def build(path: Path, n: int) -> None:
         c.set_mainpath("A0")
         for key in ("Title", "Name", "Language", "Creator", "Publisher", "Date", "Description"):
             c.add_metadata(key, "eng" if key == "Language" else "bench")
+        c.add_metadata("Tags", "_ftindex:yes")
         for i in range(n):
             title = f"{rng.choice(words)} {rng.choice(words)} {i}"
             sections = "".join(f"<h2>Section {j}</h2>{para()}{para()}" for j in range(4))
@@ -77,42 +81,64 @@ def build(path: Path, n: int) -> None:
             c.add_item(Page(f"A{i}", title, body))
 
 
-def measure(path: Path) -> None:
-    def rss() -> float:
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # bytes on macOS
-
-    from libzim.reader import Archive
-    from libzim.search import Query, Searcher
-
-    t = time.perf_counter()
-    a = Archive(path)
-    opened, after_open = time.perf_counter() - t, rss()
-    s, rng, words = Searcher(a), random.Random(7), vocab()  # noqa: S311
-    times = []
-    for _ in range(30):
-        t = time.perf_counter()
-        for p in s.search(Query().set_query(rng.choice(words))).getResults(0, 5):
-            bytes(a.get_entry_by_path(p).get_item().content)
-        times.append(time.perf_counter() - t)
-    times.sort()
-    print(
-        f"{a.article_count:>9,} articles  {a.filesize / 1e6:6.0f} MB  open {opened * 1000:.1f} ms  "
-        f"RSS {after_open:.0f} MB after open, {rss():.0f} MB after 30 searches  "
-        f"search+read5 p50 {times[15] * 1000:.1f} ms, max {times[-1] * 1000:.1f} ms"
+def rss_mb(pid: int) -> float:
+    out = subprocess.run(  # noqa: S603
+        ["/bin/ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=False
     )
+    return int(out.stdout.strip() or 0) / 1024
+
+
+def measure(path: Path, exe: Path) -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    from scout import kiwix
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    client = kiwix.Client(port)
+    t = time.perf_counter()
+    proc = subprocess.Popen(  # noqa: S603
+        [str(exe), "--address", "127.0.0.1", "--port", str(port), str(path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        while True:
+            try:
+                (entry,) = client.catalog()
+                break
+            except kiwix.Unavailable:
+                time.sleep(0.01)
+        started, after_start = time.perf_counter() - t, rss_mb(proc.pid)
+        rng, words = random.Random(7), vocab()  # noqa: S311
+        times = []
+        for _ in range(30):
+            t = time.perf_counter()
+            for p, _ in client.search(entry.id, [rng.choice(words)], 5)[1]:
+                client.raw(entry.id, p)
+            times.append(time.perf_counter() - t)
+        times.sort()
+        print(
+            f"{entry.articles:>9,} articles  {path.stat().st_size / 1e6:6.0f} MB  ready in {started * 1000:.0f} ms  "
+            f"kiwix-serve RSS {after_start:.0f} MB after start, {rss_mb(proc.pid):.0f} MB after 30 searches  "
+            f"search+read5 p50 {times[15] * 1000:.1f} ms, max {times[-1] * 1000:.1f} ms"
+        )
+    finally:
+        proc.terminate()
+        proc.wait(5)
 
 
 def main() -> None:
-    if sys.argv[1:2] == ["--measure"]:
-        measure(Path(sys.argv[2]))
-        return
+    home = Path(os.environ.get("SCOUT_HOME") or Path.home() / "Library" / "Application Support" / "Scout")
+    exe = Path(os.environ.get("KIWIX_SERVE") or home / "bin" / "kiwix-serve")
+    if not exe.is_file():
+        sys.exit(f"no kiwix-serve at {exe} (scripts/install-kiwix.sh, or set KIWIX_SERVE)")
     for n in [int(x) for x in sys.argv[1:]] or [20000]:
         path = OUT / f"bench_{n}.zim"
         if not path.exists():
             t = time.perf_counter()
             build(path, n)
             print(f"built {path.name} in {time.perf_counter() - t:.0f} s")
-        subprocess.run([sys.executable, __file__, "--measure", str(path)], check=True)  # noqa: S603
+        measure(path, exe)
 
 
 if __name__ == "__main__":

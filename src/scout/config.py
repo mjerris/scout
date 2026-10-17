@@ -194,6 +194,11 @@ class ClaudeConfig:
     )
     # Show the voice session in Remote Control under this name ("" = off).
     remote_control: str = ""
+    # Scout's own tools always in the session's prompt (room and phone), so the commonest
+    # requests skip a ToolSearch round trip ("One moment."); the rest load on demand.
+    always_load_tools: list[str] = field(
+        default_factory=lambda: ["remember", "forget", "tasks_list", "reminder_add"]
+    )
     # Tools that run without asking under the strict policy.
     auto_allow_tools: list[str] = field(
         default_factory=lambda: [
@@ -369,7 +374,8 @@ class StarlinkConfig:
 @dataclass
 class ReferenceConfig:
     # The offline reference (src/scout/reference.py, docs/reference.md): Kiwix ZIM archives
-    # (Wikipedia, WikiMed, iFixit...) read in place, never copied into Scout's store.
+    # (Wikipedia, WikiMed, iFixit...) read in place through kiwix-serve, never copied into
+    # Scout's store.
     dir: str = "reference"  # where the .zim files are; relative to Scout's data folder
     # Which archives, by name ("wikipedia_en_all_nopic": its newest copy in dir) or file
     # name. Empty: every .zim in dir.
@@ -378,6 +384,8 @@ class ReferenceConfig:
     # (only when the internet is down; otherwise Claude answers, and can search them
     # too), "always", or "never".
     local_answers: str = "offline"
+    # kiwix-serve, which the app runs for them, listens on 127.0.0.1 at this port.
+    port: int = 8769
 
 
 @dataclass

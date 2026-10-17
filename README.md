@@ -122,7 +122,8 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
   can't be used to run arbitrary scripts. Timers live in memory and are lost
   on restart.
 - **Offline reference:** Wikipedia, WikiMed, iFixit and other Kiwix archives on
-  the Mac, searched in place: `reference_search` and `reference_read` for Claude,
+  the Mac, searched in place through Kiwix's kiwix-serve, which Scout runs on
+  127.0.0.1: `reference_search` and `reference_read` for Claude,
   and with the internet down Scout answers "look up X" from them itself, with a
   link to the article. [docs/reference.md](docs/reference.md).
 - **"Yes, always":** answer a prompt with "yes, always" (or "yes, don't ask me

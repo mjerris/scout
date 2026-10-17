@@ -1,13 +1,22 @@
-"""Tiny synthetic ZIM archives for the offline reference tests, written with libzim's
-own Creator (full-text and title indexes included), so search runs against a real
-Xapian index exactly as it would on a Kiwix download. Nothing is downloaded."""
+"""The offline reference tests' archives: tiny ZIM files (tests/data/zims/, written once by
+scripts/make-test-zims.py with libzim's own Creator, full-text and title indexes included)
+and a fake kiwix-serve that answers kiwix-serve's HTTP API (the catalog, /search,
+/suggest, /raw) from the same pages, so the unit tests need no binary and no network.
+The real kiwix-serve runs on the same files in test_reference's integration test."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import html
+import json
+import re
+import shutil
+import threading
+import urllib.parse
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from libzim.writer import Creator, Hint, Item, StringProvider
+DATA = Path(__file__).parent / "data" / "zims"
 
 # Shaped like mwoffliner's Wikipedia pages: a title, an infobox, sections under h2/h3,
 # reference marks, boilerplate sections, a script.
@@ -50,77 +59,164 @@ PUMP = """<html><head><title>Replace an RV water pump</title></head><body>
 <h2>Step 2</h2><p>Disconnect the two wires and loosen the hose clamps on the inlet and outlet.</p>
 </body></html>"""
 
-FRONT = Hint["FRONT_ARTICLE"]  # (the stub types Hint.FRONT_ARTICLE oddly for mypy)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 
 
-class _Page(Item):
-    def __init__(self, path: str, title: str, body: str | bytes, mimetype: str = "text/html") -> None:
-        super().__init__()
-        self.path, self.title, self.body, self.mimetype = path, title, body, mimetype
+@dataclass(frozen=True)
+class Book:
+    file: str
+    title: str
+    pages: list[tuple[str, str, str | bytes, str]]  # (path, title, content, mimetype)
+    redirects: list[tuple[str, str, str]] = field(default_factory=list)  # (path, title, target)
+    date: str = "2026-06-01"
 
-    def get_path(self) -> str:
-        return self.path
-
-    def get_title(self) -> str:
-        return self.title
-
-    def get_mimetype(self) -> str:
-        return self.mimetype
-
-    def get_contentprovider(self) -> StringProvider:
-        return StringProvider(self.body)
-
-    def get_hints(self) -> dict[Hint, int]:
-        return {FRONT: self.mimetype == "text/html"}
+    @property
+    def id(self) -> str:
+        return self.file.removesuffix(".zim")
 
 
-def build(
-    path: Path,
-    title: str,
-    pages: list[tuple[str, str, str | bytes, str]],
-    redirects: Sequence[tuple[str, str, str]] = (),
-) -> Path:
-    """A ZIM at `path` with `pages` (path, title, content, mimetype) and `redirects`
-    (path, title, target path)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with Creator(path).config_indexing(True, "eng") as c:
-        c.set_mainpath(pages[0][0])
-        for key, value in {
-            "Title": title, "Name": path.stem, "Language": "eng", "Creator": "test",
-            "Publisher": "test", "Date": "2026-06-01", "Description": f"{title} (test)",
-        }.items():  # fmt: skip
-            c.add_metadata(key, value)
-        for p, t, body, mime in pages:
-            c.add_item(_Page(p, t, body, mime))
-        for p, t, target in redirects:
-            c.add_redirection(p, t, target, {FRONT: True})
-    return path
+_WIKI_PAGES: list[tuple[str, str, str | bytes, str]] = [
+    ("Bee_sting", "Bee sting", BEE_STING, "text/html"),
+    ("Eiffel_Tower", "Eiffel Tower", EIFFEL, "text/html"),
+    ("Mercury_(planet)", "Mercury (planet)", MERCURY, "text/html"),
+    ("_assets_/tower.png", "", PNG, "image/png"),
+]
+BOOKS = [
+    Book(
+        "wikipedia_en_test_2026-06.zim", "Wikipedia", _WIKI_PAGES, [("Bee_stings", "Bee stings", "Bee_sting")]
+    ),
+    Book("wikipedia_en_test_2024-01.zim", "Old Wikipedia", _WIKI_PAGES[2:3]),
+    Book(
+        "ifixit_en_test_2025-12.zim",
+        "iFixit",
+        [("Replace_RV_pump", "Replace an RV water pump", PUMP, "text/html")],
+    ),
+]
 
 
 def library(folder: Path) -> Path:
     """The test reference folder: a Wikipedia-like archive in two dated copies (the newer
     is used), an iFixit-like one, a file that isn't a ZIM, and a note that isn't .zim."""
-    if (folder / "ifixit_en_test_2025-12.zim").exists():
-        return folder
-    pages: list[tuple[str, str, str | bytes, str]] = [
-        ("Bee_sting", "Bee sting", BEE_STING, "text/html"),
-        ("Eiffel_Tower", "Eiffel Tower", EIFFEL, "text/html"),
-        ("Mercury_(planet)", "Mercury (planet)", MERCURY, "text/html"),
-        ("_assets_/tower.png", "", PNG, "image/png"),
-    ]
-    build(
-        folder / "wikipedia_en_test_2026-06.zim",
-        "Wikipedia",
-        pages,
-        [("Bee_stings", "Bee stings", "Bee_sting")],
-    )
-    build(folder / "wikipedia_en_test_2024-01.zim", "Old Wikipedia", pages[2:3])
-    build(
-        folder / "ifixit_en_test_2025-12.zim",
-        "iFixit",
-        [("Replace_RV_pump", "Replace an RV water pump", PUMP, "text/html")],
-    )
+    folder.mkdir(parents=True, exist_ok=True)
+    for b in BOOKS:
+        if not (folder / b.file).exists():
+            shutil.copyfile(DATA / b.file, folder / b.file)
     (folder / "broken_en_2026-01.zim").write_bytes(b"not a zim file at all")
     (folder / "README.txt").write_text("not an archive")
     return folder
+
+
+# --- a fake kiwix-serve --------------------------------------------------------------------
+
+
+def _text(body: str | bytes) -> list[str]:
+    plain = re.sub(r"<[^>]+>", " ", body if isinstance(body, str) else "")
+    return re.findall(r"[a-z0-9]+", html.unescape(plain).lower())
+
+
+class FakeKiwix:
+    """kiwix-serve's API over the BOOKS, on 127.0.0.1 at `port`: a book matches a search
+    when its title and text have every word (as Xapian's AND does), and a title matches a
+    suggestion when each word starts one of its words. `books` are the ones it serves."""
+
+    def __init__(self, books: list[Book] | None = None, port: int = 0) -> None:
+        self.books = {b.id: b for b in (books if books is not None else [BOOKS[0], BOOKS[2]])}
+        self.requests: list[str] = []
+        self.scale = 1  # counts are this many times the hits, as a big archive's are
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                fake.requests.append(self.path)
+                status, headers, body = fake.answer(self.path)
+                self.send_response(status)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._http = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.port = self._http.server_address[1]
+        self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
+
+    def __enter__(self) -> FakeKiwix:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._http.shutdown()
+        self._http.server_close()
+
+    def answer(self, url: str) -> tuple[int, dict[str, str], bytes]:
+        parts = urllib.parse.urlsplit(url)
+        q = dict(urllib.parse.parse_qsl(parts.query))
+        path = urllib.parse.unquote(parts.path)
+        if path == "/catalog/v2/entries":
+            return (
+                200,
+                {"Content-Type": "application/atom+xml;profile=opds-catalog;kind=acquisition"},
+                self._catalog(),
+            )
+        if path == "/search":
+            return self._search(q.get("books.name") or q.get("content", ""), q.get("pattern", ""),
+                                int(q.get("pageLength") or 25))  # fmt: skip
+        if path == "/suggest":
+            return self._suggest(q.get("content", ""), q.get("term", ""), int(q.get("count") or 10))
+        m = re.fullmatch(r"/raw/([^/]+)/content/(.+)", path)
+        if m and m[1] in self.books:
+            book = self.books[m[1]]
+            for p, _, target in book.redirects:
+                if p == m[2]:
+                    return 302, {"Location": f"/content/{book.id}/{urllib.parse.quote(target)}"}, b""
+            for p, _, body, mime in book.pages:
+                if p == m[2]:
+                    return 200, {"Content-Type": mime}, body if isinstance(body, bytes) else body.encode()
+        return 404, {"Content-Type": "text/html; charset=utf-8"}, b"<h1>Not Found</h1>"
+
+    def _catalog(self) -> bytes:
+        entries = "".join(
+            f"""<entry><id>urn:uuid:{n}</id><title>{html.escape(b.title)}</title>
+<updated>{b.date}T00:00:00Z</updated><name>{b.id}</name>
+<tags>_ftindex:yes;_pictures:no</tags>
+<articleCount>{sum(m == "text/html" for *_, m in b.pages) + len(b.redirects)}</articleCount>
+<link type="text/html" href="/content/{b.id}" /></entry>"""
+            for n, b in enumerate(self.books.values())
+        )
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/">
+<title>All Entries</title>{entries}</feed>""".encode()
+
+    def _search(self, book: str, pattern: str, limit: int) -> tuple[int, dict[str, str], bytes]:
+        if book not in self.books:
+            return 400, {"Content-Type": "text/html"}, b"No such book"
+        words = re.findall(r"[a-z0-9]+", pattern.lower())
+        hits = [
+            (p, t) for p, t, body, mime in self.books[book].pages
+            if mime == "text/html" and words and set(words) <= set(_text(t) + _text(body))
+        ]  # fmt: skip
+        items = "".join(
+            f"<item><title>{html.escape(t)}</title><link>/content/{book}/{urllib.parse.quote(p)}</link>"
+            f"<description>...</description><book><title>x</title></book></item>"
+            for p, t in hits[:limit]
+        )
+        body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"><channel>
+<title>Search: {html.escape(pattern)}</title><link>/search</link>
+<opensearch:totalResults>{len(hits) * self.scale:,}</opensearch:totalResults>{items}</channel></rss>"""
+        return 200, {"Content-Type": "application/rss+xml; charset=utf-8"}, body.encode()
+
+    def _suggest(self, book: str, term: str, count: int) -> tuple[int, dict[str, str], bytes]:
+        if book not in self.books:
+            return 404, {"Content-Type": "text/html"}, b"No such book"
+        words = re.findall(r"[a-z0-9]+", term.lower())
+        out = [
+            {"value": t, "label": t, "kind": "path", "path": p}
+            for p, t, _, mime in self.books[book].pages
+            if mime == "text/html" and words and all(any(tw.startswith(w) for tw in _text(t)) for w in words)
+        ][:count]
+        out.append({"value": term + " ", "label": f"containing '{term}'...", "kind": "pattern"})
+        return 200, {"Content-Type": "application/json; charset=utf-8"}, json.dumps(out).encode()
