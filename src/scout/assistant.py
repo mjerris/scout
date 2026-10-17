@@ -498,19 +498,22 @@ class Assistant:
         def idle() -> bool:
             return self.state == "idle" and not self.busy
 
+        def active() -> bool:  # speaking or listening this instant: no background pass starts
+            return self.room_active()
+
         if self.cfg.pulse.enabled:
             p = self.cfg.pulse
             self._spawn(
                 pulse.run(
                     lambda text: self.announce(text, "pulse"),
-                    pulse.Pulse(p.event_lead_min, p.every_min),
+                    pulse.Pulse(p.event_lead_min, p.every_min, grace_min=self.cfg.sync.grace_min),
                     p.quiet_hours,
                 )
             )
         if self.cfg.index.mail:
-            self._spawn(mailindex.loop(idle))
+            self._spawn(mailindex.loop(idle, active=active))
         if self.cfg.tasks.farm:
-            self._spawn(taskfarm.loop(idle, lambda: self.tier1))
+            self._spawn(taskfarm.loop(idle, lambda: self.tier1, active=active))
         self._spawn(self._setup_watch(idle))  # a new install's walkthrough, new MCP servers (onboarding.py)
         if self.cfg.contacts.enabled:  # one person across mail, meetings and Slack (people.py)
             from . import people
@@ -1532,6 +1535,17 @@ class Assistant:
         finally:
             self._listen = None
         return None if not text or speech.is_stop(text) else text
+
+    def room_active(self) -> bool:
+        """Scout is speaking or listening right now: talking, a request or a reply being
+        listened for, or a yes-or-no question open. An overdue background pass waits for a
+        gap in this (syncstate.gap); Claude thinking isn't one. Speech Scout isn't listening
+        for (a TV, people talking among themselves) doesn't count, or a pass could wait forever."""
+        return (
+            self.speaker.busy
+            or self.state in ("listening", "speaking", "confirming")
+            or (self._listen is not None and not self._listen.fut.done())
+        )
 
     def _quiet_moment(self, idle: Callable[[], bool]) -> bool:
         """Nobody talking, nothing going on, not quiet hours: a moment to ask something."""

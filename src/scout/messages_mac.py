@@ -41,6 +41,13 @@ FDA_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Privacy_
 SETUP_EVERY_S = 300.0  # open System Settings and Finder at most this often
 WATCH_EVERY_S = 3.0  # while waiting for the grant, ask the helper this often
 WATCH_FOR_S = 900.0  # and give up after this long
+RESTART_EVERY_S = 300.0  # a helper that isn't answering is restarted at most this often
+RESTART_WAIT_S = 5.0  # and given this long to answer again
+LABEL = "com.local.scout.messages"  # its login item (scripts/messages-agent.sh)
+NOT_RUNNING = (
+    "The messages helper isn't running. It's installed with Scout "
+    "(scripts/build-messages.sh, then scripts/messages-agent.sh install)."
+)
 GOT_IT = "Got it. I can read your messages now."
 SETUP_TEXT = (
     "Reading your messages needs one switch on the Mac. I've opened System Settings at Full "
@@ -58,6 +65,20 @@ def _open_system(args: list[str]) -> None:
     )
 
 
+def _kickstart() -> None:
+    """Restart the helper's login item (launchctl kickstart -k). Never under pytest."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        raise RuntimeError("tests must not restart the real messages helper")
+    subprocess.Popen(  # noqa: S603  fixed program and arguments
+        ["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+
+
+class _NotRunning(Exception):
+    pass
+
+
 @dataclass
 class Helper:
     """Where the helper is, and what to do on first use; tests make their own."""
@@ -72,7 +93,11 @@ class Helper:
     watch_every_s: float = WATCH_EVERY_S
     watch_for_s: float = WATCH_FOR_S
     timeout_s: float = 20.0
+    restart: Callable[[], None] | None = _kickstart  # a helper that isn't answering: restart it
+    restart_every_s: float = RESTART_EVERY_S
+    restart_wait_s: float = RESTART_WAIT_S
     _setup_at: float | None = None
+    _restart_at: float | None = None
     _watch: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
@@ -114,14 +139,49 @@ async def mail(op: str, args: dict[str, Any] | None = None, helper: Helper | Non
 
 
 async def _send(h: Helper, op: str, args: dict[str, Any]) -> dict[str, Any]:
-    not_running = (
-        "The messages helper isn't running. It's installed with Scout "
-        "(scripts/build-messages.sh, then scripts/messages-agent.sh install)."
-    )
+    """One request; a helper that isn't answering is restarted first (at most every
+    restart_every_s) and asked again, and only then is the user told."""
+    try:
+        return await _send_once(h, op, args)
+    except _NotRunning:
+        if not _restart(h):
+            raise ToolError(NOT_RUNNING) from None
+    deadline = time.monotonic() + h.restart_wait_s
+    while True:
+        await asyncio.sleep(0.1)
+        try:
+            data = await _send_once(h, op, args)
+        except _NotRunning:
+            if time.monotonic() >= deadline:
+                log.warning("messages: the helper didn't answer after a restart")
+                raise ToolError(NOT_RUNNING) from None
+            continue
+        log.info("messages: the helper answers again after a restart")
+        return data
+
+
+def _restart(h: Helper) -> bool:
+    """Restart an installed helper that isn't answering; False when that isn't tried."""
+    now = h.clock()
+    if h.restart is None or not h.binary.is_file():
+        return False
+    if h._restart_at is not None and now - h._restart_at < h.restart_every_s:
+        return False
+    h._restart_at = now
+    log.info("messages: the helper isn't answering; restarting it")
+    try:
+        h.restart()
+    except Exception:
+        log.exception("messages: restarting the helper failed")
+        return False
+    return True
+
+
+async def _send_once(h: Helper, op: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         token = h.token.read_text().strip()
     except FileNotFoundError:
-        raise ToolError(not_running) from None
+        raise _NotRunning from None
     except OSError as exc:
         raise ToolError(f"can't read {h.token}: {exc}") from None
     line = json.dumps({"token": token, "op": op, "args": args}) + "\n"
@@ -130,7 +190,7 @@ async def _send(h: Helper, op: str, args: dict[str, Any]) -> dict[str, Any]:
             asyncio.open_unix_connection(str(h.socket), limit=4 * 1024 * 1024), 5
         )
     except (FileNotFoundError, ConnectionRefusedError, TimeoutError):
-        raise ToolError(not_running) from None
+        raise _NotRunning from None
     except OSError as exc:
         raise ToolError(f"can't reach the messages helper: {exc}") from None
     try:
@@ -174,8 +234,8 @@ async def _watch_for_grant(h: Helper) -> None:
     while h.clock() < deadline:
         await asyncio.sleep(h.watch_every_s)
         try:
-            status = await _send(h, "status", {})
-        except ToolError:
+            status = await _send_once(h, "status", {})  # no restart of ours: it restarts itself
+        except (ToolError, _NotRunning):
             continue  # restarting to pick up the grant, most likely
         if status.get("access") == "granted":
             log.info("messages: Full Disk Access granted")

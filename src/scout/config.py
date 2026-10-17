@@ -357,6 +357,17 @@ class PulseConfig:
 
 
 @dataclass
+class SyncConfig:
+    # Scout's background syncs heal themselves (syncstate.py): a pass held back by a busy
+    # room runs anyway once it is overdue_times its interval late, in the first gap of
+    # gap_s seconds with nobody speaking; a stalled sync is woken first, and spoken of only
+    # if it is still stalled grace_min later.
+    overdue_times: float = 3.0
+    gap_s: float = 3.0
+    grace_min: float = 10.0
+
+
+@dataclass
 class StarlinkConfig:
     # Read the Starlink dish's local API (no account, no sign-in): status, outages,
     # obstructions, data used. Off unless turned on.
@@ -557,6 +568,7 @@ class Config:
     tasks: TasksConfig = field(default_factory=TasksConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)
+    sync: SyncConfig = field(default_factory=SyncConfig)
     memory_service: MemoryServiceConfig = field(default_factory=MemoryServiceConfig)
     lists: ListsConfig = field(default_factory=ListsConfig)
     notes: NotesConfig = field(default_factory=NotesConfig)

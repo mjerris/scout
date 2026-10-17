@@ -276,12 +276,15 @@ def failing_mail(since: dt.datetime, now: dt.datetime) -> list[syncstate.Status]
     return syncstate.statuses(now=at(now), cfg=cfg())
 
 
+RETRIED = ", and retrying hasn't fixed it. Scout status shows the error."
+
+
 def test_the_pulse_says_a_long_failure_once_a_day() -> None:
     p = quiet_pulse(failing_mail(MORNING, NOON))
-    assert asyncio.run(p.check(NOON)) == ["Mail sync has been failing since 9 this morning."]
+    assert asyncio.run(p.check(NOON)) == ["Mail sync has been failing since 9 this morning" + RETRIED]
     assert asyncio.run(p.check(NOON + dt.timedelta(hours=2))) == []  # not again today
     tomorrow = NOON + dt.timedelta(days=1)
-    assert asyncio.run(p.check(tomorrow)) == ["Mail sync has been failing since yesterday morning."]
+    assert asyncio.run(p.check(tomorrow)) == ["Mail sync has been failing since yesterday morning" + RETRIED]
 
 
 def test_the_pulse_waits_out_a_short_failure() -> None:
@@ -289,11 +292,18 @@ def test_the_pulse_waits_out_a_short_failure() -> None:
     assert asyncio.run(p.check(NOON)) == []  # 20 minutes: not yet worth saying
 
 
-def test_the_pulse_says_a_stall() -> None:
+def test_the_pulse_wakes_a_stall_and_says_it_only_if_still_stalled() -> None:
     syncstate.record("granola", 1800, now=at(MORNING) - 3600)
+    woken: list[str] = []
     p = quiet_pulse(syncstate.statuses(now=at(NOON), cfg=cfg()))
-    assert asyncio.run(p.check(NOON)) == [
-        "Granola sync has stalled; its last good pass was at 8 this morning."
+    p.nudge = woken.append
+    assert asyncio.run(p.check(NOON)) == [] and woken == ["granola"]
+    syncstate.nudge("granola", now=at(NOON))
+    later = NOON + dt.timedelta(minutes=15)
+    p.sync = lambda: syncstate.statuses(now=at(later), cfg=cfg())
+    assert asyncio.run(p.check(later)) == [
+        "Granola sync has stalled; its last good pass was at 8 this morning, and waking it didn't help. "
+        "Try restarting Scout."
     ]
 
 
@@ -432,7 +442,7 @@ def test_sync_pass_counts_what_is_left() -> None:
 
 
 def test_the_farm_loop_reports_tasks_and_reminders(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def farm(store: Any, a: Any, b: Any) -> dict[str, int]:
+    async def farm(store: Any, a: Any, b: Any, **kw: Any) -> dict[str, int]:
         return {"read": 2, "added": 1, "merged": 1, "skipped": 0}
 
     async def n(k: int) -> int:
@@ -459,7 +469,7 @@ async def yes(v: bool) -> bool:
 
 
 def test_reminders_away_reports_failing_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def farm(store: Any, a: Any, b: Any) -> dict[str, int]:
+    async def farm(store: Any, a: Any, b: Any, **kw: Any) -> dict[str, int]:
         return {"read": 0, "added": 0, "merged": 0, "skipped": 0}
 
     monkeypatch.setattr(taskfarm, "farm_pass", farm)
@@ -474,7 +484,7 @@ def test_reminders_away_reports_failing_not_ok(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_a_failed_farm_pass_reports_failing(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def farm(store: Any, a: Any, b: Any) -> dict[str, int]:
+    async def farm(store: Any, a: Any, b: Any, **kw: Any) -> dict[str, int]:
         raise RuntimeError("model down")
 
     monkeypatch.setattr(taskfarm, "farm_pass", farm)
