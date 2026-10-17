@@ -1,7 +1,8 @@
 """Finding tasks in meetings, email and Slack (docs/tasks-design.md, "Finding tasks").
 
-Every farm_every_min minutes, while Scout is idle, items new to the store since the
-last pass are read once:
+Every farm_every_min minutes, while Scout is idle (or, once a pass is overdue, in the
+first gap in the talk: syncstate.may_run), items new to the store since the last pass
+are read once:
 
 1. Filter, no AI: mail from no-reply senders, newsletters and notifications, mail
    without an action cue, and mail that is also stored as a meeting summary, is
@@ -43,7 +44,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import index, ledger, privacy, reminders_mac, slack, syncstate, tasks, xref
-from .config import DATA, load
+from .config import DATA, SyncConfig, load
 from .mac import ToolError
 
 log = logging.getLogger(__name__)
@@ -616,9 +617,14 @@ async def farm_pass(
     mail_extract: Extract | None,
     now: float | None = None,
     state_path: Path = STATE,
+    pause: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, int]:
-    """One pass over what's new. Returns counts (read, added, merged, skipped)."""
+    """One pass over what's new. Returns counts (read, added, merged, skipped). `pause`:
+    awaited before each local-model read (mail_extract), so a pass run while the room is
+    in use reads only in gaps in the talk (loop)."""
     cfg = load().tasks
+    if pause is not None and mail_extract is not None:
+        mail_extract = _after(pause, mail_extract)
     now = time.time() if now is None else now
     state = load_state(state_path)
     seen = set(state.get("seen", []))
@@ -857,6 +863,17 @@ def _owner_is_me(t: dict[str, Any], me: SlackMe) -> bool:
     return tasks.is_me(owner) or owner.lower() in me.names
 
 
+def _after(pause: Callable[[], Awaitable[None]], extract: Extract) -> Extract:
+    async def run(system: str, text: str) -> str:
+        await pause()
+        return await extract(system, text)
+
+    return run
+
+
+FARM_SOURCES = ("tasks", "reminders")  # one loop: a nudge to either wakes it
+
+
 def _unmirrored(store: index.Store) -> int:
     """Open tasks with no reminder yet (sync status: the Reminders backlog)."""
     return sum(1 for t in tasks.all_tasks(store) if t.status == "open" and not t.fields.get("reminder"))
@@ -866,35 +883,52 @@ async def loop(
     idle: Callable[[], bool],
     local: Callable[[], Any],
     store: Callable[[], index.Store] = index.default,
+    active: Callable[[], bool] = lambda: False,
+    first_s: float = 60.0,
+    sync: SyncConfig | None = None,
 ) -> None:
-    """The farm, for the Scout app's life. `local()` is the local model when loaded."""
+    """The farm, for the Scout app's life. `local()` is the local model when loaded.
+    A pass waits for `idle()`, unless it's overdue or woken (syncstate.may_run): then it
+    runs in the first gap with nobody speaking or listened to (`active()` false), and its
+    local-model reads each wait for such a gap too, so a voice turn never queues behind one."""
+    sync = load().sync if sync is None else sync
     cfg = load().tasks
-    await asyncio.sleep(60)  # let the app settle
+    await asyncio.sleep(first_s)  # let the app settle
+    since = time.time()  # the last pass (or the start)
     while True:
+        every = max(1.0, cfg.farm_every_min) * 60
         try:
-            if idle():
-                every = max(1.0, cfg.farm_every_min) * 60
-                with syncstate.track("tasks", every) as p:
-                    c = await farm_pass(store(), claude_extract, local_extract(local()))
-                    p.added, p.updated = c["added"], c["merged"]
-                    await recheck_once(store(), slack_me())
-                if c["read"]:
-                    log.info(
-                        "tasks: farm read %d (%d added, %d merged, %d skipped)",
-                        c["read"],
-                        c["added"],
-                        c["merged"],
-                        c["skipped"],
-                    )
-                with syncstate.track("reminders", every) as p:
-                    if load().tasks.mirror and not await reminders_mac.available():
-                        p.failed = "Reminders isn't available"
-                    done = await tasks.sync_from_reminders(store())
-                    owners = await tasks.repair_owners(store())
-                    p.added = await tasks.mirror_missing(store())
-                    p.updated = done + owners + await tasks.link_reminders(store())
-                    p.updated += await tasks.github_followups(store())
-                    p.backlog = await asyncio.to_thread(_unmirrored, store()) if load().tasks.mirror else None
+            if not await syncstate.may_run(FARM_SOURCES, every, idle, active, since, sync):
+                await syncstate.sleep(FARM_SOURCES, syncstate.BUSY_RETRY_S)
+                continue
+            since = time.time()
+
+            async def pause() -> None:
+                if not idle():
+                    await syncstate.gap(active, sync.gap_s)
+
+            with syncstate.track("tasks", every) as p:
+                c = await farm_pass(store(), claude_extract, local_extract(local()), pause=pause)
+                p.added, p.updated = c["added"], c["merged"]
+                await recheck_once(store(), slack_me())
+            if c["read"]:
+                log.info(
+                    "tasks: farm read %d (%d added, %d merged, %d skipped)",
+                    c["read"],
+                    c["added"],
+                    c["merged"],
+                    c["skipped"],
+                )
+            with syncstate.track("reminders", every) as p:
+                if load().tasks.mirror and not await reminders_mac.available():
+                    p.failed = reminders_mac.refusal() or "Reminders isn't available"
+                done = await tasks.sync_from_reminders(store())
+                owners = await tasks.repair_owners(store())
+                p.added = await tasks.mirror_missing(store())
+                p.updated = done + owners + await tasks.link_reminders(store())
+                p.updated += await tasks.github_followups(store())
+                p.backlog = await asyncio.to_thread(_unmirrored, store()) if load().tasks.mirror else None
         except Exception:
             log.exception("tasks: farm pass failed")
-        await asyncio.sleep(max(1.0, cfg.farm_every_min) * 60)
+        wait = min(syncstate.retry_in(s, every) for s in FARM_SOURCES)
+        await syncstate.sleep(FARM_SOURCES, wait)

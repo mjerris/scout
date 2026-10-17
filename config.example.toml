@@ -166,6 +166,14 @@ enabled = true
 # backfill_days = 14                      # on the first run, read this far back
 # extract_model = "claude-haiku-5-5"      # reads meetings; mail and Slack stay with the local model
 
+[sync]
+# Background syncs heal themselves: a pass held back by a busy room runs anyway once it's
+# this many intervals late, in the first gap of gap_s seconds with nobody speaking; a
+# stalled sync is woken first and spoken of only if it's still stalled grace_min later.
+# overdue_times = 3
+# gap_s = 3
+# grace_min = 10
+
 [granola]
 # Granola meeting notes in local search and the task farm (a personal API key: Granola,
 # Settings, Connectors, API keys; Business plan or above). A secret: keep this file mode 600.

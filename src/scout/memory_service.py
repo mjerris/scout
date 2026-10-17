@@ -312,7 +312,8 @@ async def granola_loop(ix: index.Index, cfg: Any, state: Path = GRANOLA_STATE) -
             log.warning("granola: sync failed: %s", exc)
         except Exception:
             log.exception("granola: sync failed")
-        await asyncio.sleep(max(1.0, cfg.every_min) * 60)
+        every = max(1.0, cfg.every_min) * 60  # sooner after a failure; at once when woken
+        await syncstate.sleep(("granola",), syncstate.retry_in("granola", every))
 
 
 SLACK_STATE = DATA / "state" / "slack.json"
@@ -368,15 +369,20 @@ async def slack_loop(
         except Exception:
             log.exception("slack: sync failed")
         # The next pass: every_min from this one, or live_every_min while events have
-        # been flowing all along since this one began.
+        # been flowing all along since this one began; sooner after a failure (with
+        # backoff), and at once when woken (syncstate.nudge).
+        retry = syncstate.retry_in("slack", every)
         while True:
             waited = time.time() - started
             since = live()
             if waited >= live_every or (waited >= every and (since is None or since > started)):
                 break
-            await asyncio.sleep(
-                min(30.0, max(1.0, every - waited if waited < every else live_every - waited))
-            )
+            if retry < every and waited >= retry:
+                break
+            if await syncstate.sleep(
+                ("slack",), min(30.0, max(1.0, every - waited if waited < every else live_every - waited))
+            ):
+                break
 
 
 async def slack_events_loop(

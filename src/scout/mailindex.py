@@ -1,7 +1,7 @@
 """The inbox in Scout's local store, so mail search is local and fast and matches
 message text by words and meaning, not just subjects and senders.
 
-A background pass (while Scout is idle) asks Mail.app for the newest messages and
+A background pass (while Scout is idle, or overdue in a gap in the talk) asks Mail.app for the newest messages and
 reads the ones not yet stored, a few dozen at a time; old ones age out after
 `[index] mail_days`. It uses only the Mail access Scout already has. Searches use the
 index when it has mail and fall back to asking Mail.app when it finds nothing.
@@ -353,19 +353,34 @@ def search(query: str, count: int, days: int) -> dict[str, Any] | None:
     return {"messages": msgs, "days": days, "source": "Scout's local index"}
 
 
-async def loop(idle: Any, every_s: float = 1200.0) -> None:
-    """Keep the index current: a pass every `every_s` while Scout is idle."""
+MAIL_SOURCES = ("mail", "meetings_email")
+
+
+async def loop(
+    idle: Any,
+    every_s: float = 1200.0,
+    active: Any = lambda: False,
+    first_s: float = 90.0,
+    sync: Any = None,
+) -> None:
+    """Keep the index current: a pass every `every_s` while Scout is idle, or, overdue
+    or woken, in the first gap in the talk (syncstate.may_run)."""
     import asyncio
 
-    await asyncio.sleep(90)  # let startup finish first
+    sync = load().sync if sync is None else sync
+    await asyncio.sleep(first_s)  # let startup finish first
+    since = time.time()
     while True:
         try:
-            if idle():
-                with syncstate.track("mail", every_s) as p:
-                    out = await sync_pass(index.default())
-                    p.added, p.updated, p.backlog = out["stored"], out["message_ids"], out["left"]
-                with syncstate.track("meetings_email", every_s) as p:
-                    p.added = await backfill_meetings(index.default(), days=load().tasks.backfill_days)
+            if not await syncstate.may_run(MAIL_SOURCES, every_s, idle, active, since, sync):
+                await syncstate.sleep(MAIL_SOURCES, syncstate.BUSY_RETRY_S)
+                continue
+            since = time.time()
+            with syncstate.track("mail", every_s) as p:
+                out = await sync_pass(index.default())
+                p.added, p.updated, p.backlog = out["stored"], out["message_ids"], out["left"]
+            with syncstate.track("meetings_email", every_s) as p:
+                p.added = await backfill_meetings(index.default(), days=load().tasks.backfill_days)
         except Exception as exc:
             log.warning("mail index pass failed: %s", exc)
-        await asyncio.sleep(every_s)
+        await syncstate.sleep(MAIL_SOURCES, min(syncstate.retry_in(s, every_s) for s in MAIL_SOURCES))

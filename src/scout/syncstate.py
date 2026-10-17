@@ -19,13 +19,30 @@ From that, each source is in one state:
 
 The app and scout-memory both write state/sync_status.json, under a lock, each write
 keeping the other's sources. `python -m scout.syncstate` prints a line per source
-(scoutctl.sh status shows it), scout-memory serves it at GET /v1/sync, tier 0 answers
-"is everything syncing?", and the pulse says once a day when a source has been failing
-for an hour or has stalled.
+(scoutctl.sh status shows it), scout-memory serves it at GET /v1/sync, and tier 0 answers
+"is everything syncing?".
+
+Self-healing comes first, in plain code (no model decides anything here):
+
+    a pass held back    a loop that waits for an idle room runs its pass anyway once it
+                        is [sync] overdue_times intervals late (overdue), in the first
+                        gap of gap_s seconds with nobody speaking or being listened to
+                        (gap); a busy room is looked at again in BUSY_RETRY_S, not a
+                        whole interval later
+    a failed pass       retried sooner, with backoff (retry_in): 1, 2, 4... minutes up to
+                        the interval; an error only the user can fix waits the interval
+    a stalled source    the pulse wakes its loop (nudge; each loop sleeps with sleep(),
+                        which returns early on a nudge) and says nothing
+
+The pulse speaks (alerts) only when that didn't work or the user must act: an error only
+the user can fix (NEEDS_USER: Reminders or Mail access, a token a service no longer
+accepts), said with what to do; a failure that retrying hasn't fixed in an hour; a stall
+still there grace_min after its nudge. Each once a day per source.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import datetime as dt
@@ -36,12 +53,12 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import DATA, Config, load
+from .config import DATA, Config, SyncConfig, load
 from .mac import ToolError
 
 log = logging.getLogger(__name__)
@@ -51,8 +68,12 @@ PATH = DATA / "state" / "sync_status.json"
 GOOD = ("ok", "connected", "reconnecting")  # reconnecting that keeps failing is "failing"
 STALL_TIMES = 3  # no good pass in this many intervals: stalled
 STALL_FLOOR_S = 1800.0  # but never sooner than this (the vectors look every minute)
-SAY_AFTER_S = 3600.0  # the pulse speaks of a failure once it's lasted this long
+SAY_AFTER_S = 3600.0  # the pulse speaks of a failure retrying hasn't fixed in this long
 ERROR_CHARS = 160
+NUDGE_POLL_S = 5.0  # a sleeping loop looks for a nudge this often
+BUSY_RETRY_S = 30.0  # a pass held back by a busy room is looked at again this soon
+GAP_POLL_S = 0.5  # while waiting for a gap in the talk, look this often
+RETRY_FIRST_S = 60.0  # a failed pass is tried again after this, doubling up to its interval
 
 
 @dataclass(frozen=True)
@@ -91,11 +112,38 @@ def enabled(cfg: Config) -> dict[str, bool]:
         "slack": bool(cfg.slack.token),
         "slack_events": bool(cfg.slack.token and cfg.slack.app_token),
         "tasks": cfg.tasks.farm,
-        "reminders": cfg.tasks.farm and cfg.tasks.mirror,
+        "reminders": cfg.tasks.farm and cfg.tasks.mirror and cfg.lists.backend != "scout",
         "vectors": cfg.index.semantic and cfg.index.background_embed,
         "links": True,
         "github": cfg.github.enabled,
     }
+
+
+# Errors only the user can fix: (sources, what the error says, what to do), checked in
+# order. Fixed text, said as is; everything else is retried (retry_in) before it's said.
+NEEDS_USER: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+    (("reminders",), ("Reminders access", "access not granted"),
+     "Turn on Reminders access for Scout in System Settings, under Privacy and Security, Reminders."),
+    (("mail", "meetings_email"), ("Not allowed to control Mail",),
+     "Allow Scout to control Mail in System Settings, under Privacy and Security, Automation."),
+    (("mail", "meetings_email"), ("Mail isn't set up",), "Open Mail once and add an account."),
+    (("slack", "slack_events"), ("invalid_auth", "not_authed", "token_revoked", "account_inactive"),
+     "Slack no longer accepts Scout's token. Put a new one in Scout's config, in the slack section."),
+    (("github",), ("HTTP 401",),
+     "GitHub no longer accepts Scout's token. Run gh auth login, or put a new token in Scout's config."),
+    (("granola",), ("HTTP 401", "HTTP 403"),
+     "Granola no longer accepts Scout's API key. Put a new one in Scout's config, in the granola section."),
+)  # fmt: skip
+
+
+def needs_user(source: str, error: str | None) -> str | None:
+    """What the user must do about this error, or None when retrying may fix it."""
+    if not error:
+        return None
+    for sources, says, action in NEEDS_USER:
+        if source in sources and any(w in error for w in says):
+            return action
+    return None
 
 
 # --- recording ------------------------------------------------------------------------
@@ -175,6 +223,116 @@ def record(
         log.warning("sync status for %s not written: %s", source, exc)
 
 
+def nudge(source: str, now: float | None = None, path: Path | None = None) -> None:
+    """Wake `source`'s loop for a pass now (it sleeps with sleep()); the pulse does this
+    for a stalled source before saying anything. Never fails the caller."""
+    path = PATH if path is None else path
+    now = time.time() if now is None else now
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _lock, path.with_suffix(".lock").open("a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            data = _read(path)
+            e: dict[str, Any] = data[source] if isinstance(data.get(source), dict) else {}
+            e["nudged_at"] = now
+            data[source] = e
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+            tmp.replace(path)
+        log.info("sync: %s woken for a pass", source)
+    except OSError as exc:
+        log.warning("sync: %s not woken: %s", source, exc)
+
+
+def _entry(source: str, path: Path | None) -> dict[str, Any]:
+    e = _read(PATH if path is None else path).get(source)
+    return e if isinstance(e, dict) else {}
+
+
+def nudged(sources: tuple[str, ...], after: float, path: Path | None = None) -> bool:
+    """Whether any of `sources` was nudged after `after` (a time.time())."""
+    data = _read(PATH if path is None else path)
+    for name in sources:
+        e = data.get(name)
+        at = _num(e.get("nudged_at")) if isinstance(e, dict) else None
+        if at is not None and at > after:
+            return True
+    return False
+
+
+def overdue(
+    source: str,
+    every_s: float,
+    since: float,
+    times: float,
+    now: float | None = None,
+    path: Path | None = None,
+) -> bool:
+    """No pass tried for `times` intervals: since its last attempt, or since `since` (the
+    loop's start) when there's none."""
+    now = time.time() if now is None else now
+    e = _entry(source, path)
+    last = _num(e.get("last_attempt"))
+    return now - (since if last is None else last) > times * every_s
+
+
+def retry_in(source: str, every_s: float, path: Path | None = None) -> float:
+    """How long until the next pass: the interval, or after a failure sooner, with backoff
+    (RETRY_FIRST_S, doubling with each failure in a row, never past the interval). An error
+    only the user can fix waits the whole interval."""
+    e = _entry(source, path)
+    errors = int(e.get("errors") or 0)
+    if not errors or needs_user(source, e.get("last_error")):
+        return every_s
+    return float(min(every_s, RETRY_FIRST_S * 2.0 ** min(errors - 1, 16)))
+
+
+async def sleep(sources: tuple[str, ...], seconds: float, path: Path | None = None) -> bool:
+    """Sleep `seconds`, or until one of `sources` is nudged (True)."""
+    t0 = time.time()
+    end = t0 + seconds
+    while (left := end - time.time()) > 0:
+        await asyncio.sleep(min(left, NUDGE_POLL_S))
+        if nudged(sources, t0, path):
+            return True
+    return False
+
+
+async def gap(active: Callable[[], bool], gap_s: float) -> None:
+    """Return once nobody has been speaking or listened to for `gap_s` seconds in a row."""
+    quiet_since: float | None = None
+    while True:
+        if active():
+            quiet_since = None
+        elif quiet_since is None:
+            quiet_since = time.monotonic()
+        if quiet_since is not None and time.monotonic() - quiet_since >= gap_s:
+            return
+        await asyncio.sleep(min(GAP_POLL_S, max(0.01, gap_s / 4)))
+
+
+async def may_run(
+    sources: tuple[str, ...],
+    every_s: float,
+    idle: Callable[[], bool],
+    active: Callable[[], bool],
+    since: float,
+    cfg: SyncConfig,
+    path: Path | None = None,
+) -> bool:
+    """Whether an idle-only pass may run now: the room is idle; or the pass is overdue
+    (or nudged since `since`, the loop's last pass) and, after waiting for a gap in the
+    talk, runs anyway. False: look again in BUSY_RETRY_S."""
+    if idle():
+        return True
+    late = any(overdue(s, every_s, since, cfg.overdue_times, path=path) for s in sources)
+    if not late and not nudged(sources, since, path):
+        return False
+    log.info("sync: %s overdue with the room busy; running in the next gap", "/".join(sources))
+    await gap(active, cfg.gap_s)
+    return True
+
+
 @dataclass
 class Pass:
     """What a pass did, filled in by the loop inside track()."""
@@ -221,6 +379,8 @@ class Status:
     updated: int = 0
     backlog: int | None = None
     every_s: float = 0.0
+    nudged_at: float | None = None  # when the pulse last woke its loop
+    action: str | None = None  # failing with an error only the user can fix: what to do
 
 
 def _num(v: Any) -> float | None:
@@ -255,9 +415,17 @@ def statuses(now: float | None = None, path: Path | None = None, cfg: Config | N
                 name, src.label, src.spoken, state, errors, _num(e.get("failing_since")), first,
                 _num(e.get("last_attempt")), good, e.get("last_error"), int(e.get("added") or 0),
                 int(e.get("updated") or 0), int(backlog) if isinstance(backlog, int) else None, every,
+                _num(e.get("nudged_at")), needs_user(name, e.get("last_error")) if state == "failing" else None,
             )
         )  # fmt: skip
     return out
+
+
+def by_name(
+    now: float | None = None, path: Path | None = None, cfg: Config | None = None
+) -> dict[str, Status]:
+    """statuses() by source name."""
+    return {s.source: s for s in statuses(now, path, cfg)}
 
 
 def as_dicts(sts: list[Status]) -> list[dict[str, Any]]:
@@ -293,7 +461,10 @@ def when_words(ts: float, now: dt.datetime, at: bool = False) -> str:
 
 
 def problem(s: Status, now: dt.datetime) -> str:
-    """The sentence for a failing or stalled source."""
+    """The sentence for a failing or stalled source (with what to do, when it's the user's
+    to fix)."""
+    if s.action:
+        return f"{s.spoken} needs you. {s.action}"
     if s.state == "failing" and s.failing_since is not None:
         return f"{s.spoken} has been failing since {when_words(s.failing_since, now)}."
     if s.last_success is not None:
@@ -326,15 +497,42 @@ def speak(sts: list[Status], now: dt.datetime) -> str:
     return " ".join(parts)
 
 
-def alerts(sts: list[Status], now: dt.datetime) -> list[tuple[str, str]]:
-    """(source, sentence) for the pulse: failing for SAY_AFTER_S or more, or stalled."""
+def to_nudge(sts: list[Status], now: float, grace_s: float) -> list[str]:
+    """The stalled sources to wake: not woken since their last good pass, or woken
+    `grace_s` ago or more and still stalled (woken again)."""
+    out = []
+    for s in sts:
+        if s.state != "stalled":
+            continue
+        good = s.last_success or s.first_seen or 0.0
+        if s.nudged_at is None or s.nudged_at <= good or now - s.nudged_at >= grace_s:
+            out.append(s.source)
+    return out
+
+
+def alerts(sts: list[Status], now: dt.datetime, grace_s: float) -> list[tuple[str, str]]:
+    """(source, sentence) for the pulse, only when healing didn't work or the user must
+    act: an error only the user can fix (with what to do); a failure retrying hasn't
+    fixed in SAY_AFTER_S; a stall still there `grace_s` after its loop was woken."""
     t = now.timestamp()
-    return [
-        (s.source, problem(s, now))
-        for s in sts
-        if s.state == "stalled"
-        or (s.state == "failing" and s.failing_since is not None and t - s.failing_since >= SAY_AFTER_S)
-    ]
+    out = []
+    for s in sts:
+        if s.state == "failing" and s.action:
+            out.append((s.source, f"{s.spoken} needs you. {s.action}"))
+        elif s.state == "failing" and s.failing_since is not None and t - s.failing_since >= SAY_AFTER_S:
+            out.append((s.source, f"{s.spoken} has been failing since {when_words(s.failing_since, now)}, and "
+                                  "retrying hasn't fixed it. Scout status shows the error."))  # fmt: skip
+        elif s.state == "stalled" and _woken_in_vain(s, t, grace_s):
+            last = (f"its last good pass was {when_words(s.last_success, now, at=True)}"
+                    if s.last_success is not None else "it hasn't finished a pass yet")  # fmt: skip
+            out.append((s.source, f"{s.spoken} has stalled; {last}, and waking it didn't help. "
+                                  "Try restarting Scout."))  # fmt: skip
+    return out
+
+
+def _woken_in_vain(s: Status, now: float, grace_s: float) -> bool:
+    good = s.last_success or s.first_seen or 0.0
+    return s.nudged_at is not None and s.nudged_at > good and now - s.nudged_at >= grace_s
 
 
 # --- printing it ----------------------------------------------------------------------
@@ -373,6 +571,8 @@ def lines(sts: list[Status], now: dt.datetime) -> list[str]:
                 bits.append(f"+{s.added} added, {s.updated} updated")
             if s.backlog:
                 bits.append(f"backlog {_backlog(s)}")
+            if s.action:
+                bits.append(f"needs you: {s.action}")
             detail = "; ".join(bits) or "no good pass yet"
         out.append(f"{s.source:<15}{s.state:<9}{detail}")
     return out

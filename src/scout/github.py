@@ -340,7 +340,8 @@ async def loop(ix: index.Index, cfg: Any, state: Path = STATE) -> None:
             log.warning("github: sync failed: %s", exc)
         except Exception:
             log.exception("github: sync failed")
-        await asyncio.sleep(max(1.0, cfg.every_min) * 60)
+        every = max(1.0, cfg.every_min) * 60  # sooner after a failure; at once when woken
+        await syncstate.sleep(("github",), syncstate.retry_in("github", every))
 
 
 # --- saying it (tier 0, the pulse, the github_items tool) ---------------------------------

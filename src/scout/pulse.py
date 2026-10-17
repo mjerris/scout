@@ -7,12 +7,15 @@ needs the user. No AI, nothing sent anywhere.
     tasks due today              "Due today: send Pat the budget." (once, morning)
     what others owe, overdue     "Pat owes you the vendor quote, overdue since October 9;
                                   maybe follow up." (once a day)
-    a sync failing or stalled    "Mail sync has been failing since 9 this morning." (once a
-                                  day per source, after an hour of failing; syncstate.py)
+    a sync the user must fix     "Reminders mirroring needs you. Turn on Reminders access..."
+    a sync healing didn't fix    "Mail sync has been failing since 9 this morning, and retrying
+                                  hasn't fixed it..." (an hour of retries), or a stall still there
+                                  after its loop was woken (syncstate.py; once a day per source)
     a GitHub item you waited on  "PR 117 in api, Fix the jitter buffer, was merged. You were
                                   waiting on Luca for it." (once; the task notes it was said)
 
-Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
+A stalled sync is woken first (syncstate.nudge), silently: it's spoken of only if it's
+still stalled [sync] grace_min later. Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
 when they end (the morning's overlaps and tasks, an event just after) is said then.
 Checks that can't run (no calendar access) are skipped quietly.
 
@@ -83,6 +86,8 @@ class Pulse:
     sync: Syncs = syncstate.statuses
     record: Records = _record
     note: Note = _note
+    nudge: Callable[[str], None] = syncstate.nudge
+    grace_min: float = 10.0  # a woken sync still stalled this long after: said
     _said: set[str] = field(default_factory=set)
     _conflicts_day: dt.date | None = None
     _tasks_day: dt.date | None = None
@@ -148,12 +153,20 @@ class Pulse:
         return out
 
     def _syncs(self, now: dt.datetime) -> list[str]:
-        """A sync failing for an hour or stalled: said once a day per source."""
+        """Heal first: a stalled sync's loop is woken, silently. Said (once a day per
+        source) only what healing didn't fix or the user must fix (syncstate.alerts)."""
+        grace = self.grace_min * 60
         try:
-            found = syncstate.alerts(self.sync(), now)
+            sts = self.sync()
+            found = syncstate.alerts(sts, now, grace)
         except Exception as exc:  # an unreadable status file: nothing to say
             log.info("pulse: sync status skipped (%s)", exc)
             return []
+        for source in syncstate.to_nudge(sts, now.timestamp(), grace):
+            try:
+                self.nudge(source)
+            except Exception as exc:
+                log.info("pulse: %s not woken (%s)", source, exc)
         return [text for source, text in found if self._once(f"sync:{source}:{now.date()}")]
 
     def wait(self, now: dt.datetime) -> float:

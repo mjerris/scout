@@ -770,9 +770,17 @@ Each source is ok, failing (its last pass failed), stalled (no good pass in 3 ti
 interval, 30 minutes at least), off (not set up) or waiting (no pass yet).
 `scripts/scoutctl.sh status` prints a line for each, scout-memory serves them at
 `GET /v1/sync`, and "is everything syncing?" or "what's the sync status?" gets a spoken
-answer. The pulse says it once a day when a source has failed for an hour or stalled:
-"Mail sync has been failing since 9 this morning." Messages has no sync to report:
-Scout reads it live.
+answer. Messages has no sync to report: Scout reads it live.
+
+Syncs heal themselves first, in plain code. A pass that waits for a quiet room (the task
+farm, Reminders mirroring, the mail index) runs anyway once it's 3 intervals late, in the
+first few seconds with nobody speaking or being listened to; a failed pass is retried
+after 1, 2, 4... minutes; a stalled source's loop is woken, silently. The pulse speaks
+(once a day per source) only when that didn't work or you have to act, and says what to
+do: "Reminders mirroring needs you. Turn on Reminders access for Scout in System
+Settings...", "Mail sync has been failing since 9 this morning, and retrying hasn't
+fixed it...", or a stall still there 10 minutes after its loop was woken. A Messages
+helper that stops answering is restarted before you're told. `[sync]` tunes it.
 
 ## Links: "give me a link to that"
 

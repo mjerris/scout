@@ -88,6 +88,12 @@ _LIMIT = 100
 _IDS_PER_CALL = 100  # reminder-get ids per helper call
 
 
+def refusal(helper: Path | None = None) -> str:
+    """Why Reminders last refused access (its words, with what to do), or "" when it
+    hasn't: the task farm records it, so the pulse can say what to turn on."""
+    return _access.get(_helper_key(helper), (0.0, ""))[1]
+
+
 async def available(helper: Path | None = None) -> bool:
     """Whether the Mac's Reminders (not Scout's own lists) answers right now."""
     try:
