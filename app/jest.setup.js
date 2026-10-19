@@ -23,7 +23,7 @@ jest.mock('react-native-incall-manager', () => ({
     chooseAudioRoute: jest.fn(async () => ({})),
   },
 }));
-jest.mock('react-native-callkeep', () => {
+jest.mock('@signalwire/react-native-callkeep', () => {
   const listeners = new Map();
   const RNCallKeep = {
     setup: jest.fn(async () => true),
@@ -33,6 +33,12 @@ jest.mock('react-native-callkeep', () => {
     setMutedCall: jest.fn(),
     reportConnectedOutgoingCallWithUUID: jest.fn(),
     reportEndCallWithUUID: jest.fn(),
+    setCurrentCallActive: jest.fn(),
+    backToForeground: jest.fn(),
+    updateDisplay: jest.fn(),
+    clearInitialEvents: jest.fn(),
+    getInitialEvents: jest.fn(async () => []),
+    setOnHold: jest.fn(),
     displayIncomingCall: jest.fn(),
     answerIncomingCall: jest.fn(),
     rejectCall: jest.fn(),
@@ -44,7 +50,11 @@ jest.mock('react-native-callkeep', () => {
     removeEventListener: jest.fn((type) => listeners.delete(type)),
     __emit: (type, data) => listeners.get(type)?.forEach((fn) => fn(data)),
   };
-  return { __esModule: true, default: RNCallKeep, CONSTANTS: { END_CALL_REASONS: { MISSED: 6, REMOTE_ENDED: 2 } } };
+  return { __esModule: true, default: RNCallKeep, CONSTANTS: {
+      END_CALL_REASONS: { FAILED: 1, REMOTE_ENDED: 2, UNANSWERED: 3, ANSWERED_ELSEWHERE: 4, DECLINED_ELSEWHERE: 5, MISSED: 6 },
+    }, };
 });
 // What index.ts does first, so @signalwire/js can load.
 require('@signalwire/react-native/polyfills');
+// The wrapper checks that callkeep's and WebRTC's native modules are linked.
+Object.assign(require('react-native').NativeModules, { RNCallKeep: { setup: jest.fn() }, WebRTCModule: {} });

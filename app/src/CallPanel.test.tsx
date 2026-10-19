@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import RNCallKeep from 'react-native-callkeep';
+import RNCallKeep from '@signalwire/react-native-callkeep';
 import { BehaviorSubject, Subject } from 'rxjs';
 
 import { getCallKit } from '@signalwire/react-native/callkit';
@@ -34,7 +34,7 @@ function fakeCall() {
     self$: new BehaviorSubject(self),
     self,
     errors$: new Subject(),
-    hangup: jest.fn(async () => status$.next('disconnected')),
+    hangup: jest.fn(async () => status$.next('destroyed')),
   };
 }
 jest.mock('@signalwire/js', () => {
@@ -121,12 +121,18 @@ test('dials the agent with signed userVariables, as a voice call named Scout in 
   fireEvent.press(screen.getByTestId('mute'));
   expect(RNCallKeep.setMutedCall).toHaveBeenCalledWith(uuid, true);
 
-  // Hang up through CallKit; the call ending puts the panel back.
+  // An ICE blip (Wi-Fi to cellular) is not the end of the call.
+  await act(async () => mockSw.call!.status$.next('disconnected'));
+  expect(screen.getByTestId('hangup')).toBeTruthy();
+  await act(async () => mockSw.call!.status$.next('connected'));
+
+  // Hang up through CallKit: its end action reaches the bridge, which hangs the call up,
+  // and the call ending puts the panel back.
   fireEvent.press(screen.getByTestId('hangup'));
   expect(RNCallKeep.endCall).toHaveBeenCalledWith(uuid);
-  await act(async () => mockSw.call!.status$.next('disconnected'));
+  await act(async () => (RNCallKeep as unknown as { __emit(t: string, d: unknown): void }).__emit('endCall', { callUUID: uuid }));
   await waitFor(() => expect(screen.getByTestId('call')).toBeTruthy());
-  expect(RNCallKeep.reportEndCallWithUUID).toHaveBeenCalledWith(uuid, expect.any(Number));
+  expect(mockSw.call!.hangup).toHaveBeenCalled();
 });
 
 test('a call asked for from Recents is placed, once', async () => {

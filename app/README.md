@@ -5,14 +5,24 @@ React Native app for talking to Scout by phone (docs/phone-design.md, phase 5), 
 
 **Why Expo (prebuild) and not bare React Native:** the library is built and verified on
 Expo SDK 54 with a generated native project, and every native piece it needs (WebRTC,
-CallKit through react-native-callkeep, InCallManager) autolinks as an ordinary module.
+CallKit through SignalWire's react-native-callkeep fork, InCallManager, the library's own
+iOS code) autolinks as an ordinary module. The app runs on React Native's New
+Architecture, which the library requires.
 With continuous native generation the iOS project is not committed: `app.config.js` and
 the plugins in `plugins/` say everything that differs from the template, so upgrading
 React Native is a regeneration rather than a merge. No Expo services are used.
 
-**The library is vendored** (`vendor/`, TypeScript sources at `vendor/UPSTREAM_COMMIT`),
-because it isn't published to npm. `scripts/vendor-signalwire.sh <checkout>` refreshes
-it and re-applies our patches in `vendor/patches/` (each one is also an upstream PR).
+**The library is vendored** (`vendor/`), because it isn't published to npm yet: the two
+tarballs `npm pack` makes of `@signalwire/react` and `@signalwire/react-native` at
+`vendor/UPSTREAM_COMMIT` (the `combined/all` branch of SignalWire's fork, PR #54 on
+lpradovera/signalwire-react-native-unofficial). A tarball is what npm will publish: the
+built JavaScript, the iOS and Android code, the podspec and the Expo config plugin, which
+TypeScript sources alone no longer cover. npm installs it as an ordinary copy, so Metro
+needs no symlink settings, and moving to the npm package later is a one-line change.
+`scripts/vendor-signalwire.sh <checkout> [commit]` builds and packs a clean checkout;
+`--check <checkout>` rebuilds `UPSTREAM_COMMIT` and compares (the build is reproducible).
+callkeep is SignalWire's fork, `@signalwire/react-native-callkeep` 4.4.1, from GitHub at a
+fixed commit until it is on npm.
 
 ## Run
 
@@ -51,25 +61,34 @@ Finding Scout uses react-native-zeroconf 0.14.0 (MIT, a small Objective-C module
 NSNetServiceBrowser) and the Local Network permission (asked the first time); a build
 without the module just finds nothing.
 
-## Patches (each drafted as an upstream PR)
+## Patches (patch-package, applied on install)
 
-- `vendor/patches/01-…`: a voice call starts in voice mode (receiver, or a connected
-  Bluetooth headset or car), not on the loudspeaker; the mode follows the call's own media
-  instead of the app's `supportsVideo`.
-- `vendor/patches/02-…`: the CallKit observer takes a display name, so the call screen and
-  Recents say "Scout", not the agent's address.
-- `vendor/patches/03-…`: Bluetooth and earpiece routes on iOS (route failures were
-  unhandled rejections; "Phone" couldn't take a call off Bluetooth).
-- `vendor/patches/04-…`: the audio-session fallback timer is cleared once CallKit
-  activates the session.
-- `patches/react-native-incall-manager+4.2.2.patch` (patch-package, applied on install):
-  iOS `chooseAudioRoute`, `getAudioDeviceStatus` and the `onAudioDeviceChanged` event,
-  which until now were Android-only.
+- `patches/@signalwire+js+4.0.0-rc.5.patch`: our SDK fixes that are open upstream
+  (signalwire/signalwire-typescript-web #142 a dial that times out after its invite went out
+  is hung up; #143 hold stops local media, with `hold()`, `unhold()` and `held$`; #144 no
+  ICE-restart recovery on a held call; #145 a call whose first ICE gathering finds no
+  candidates fails; #146 a session whose token expired connects fresh instead of resuming),
+  built from rc.5 with the five PRs merged (they merge cleanly; a plain rc.5 build is
+  byte-identical to npm's dist, so the patch is exactly the PRs). It replaces the library's
+  own hold patch, which #143 and #144 cover, plus a small shim (`_holdState`,
+  `_pauseLocalMediaForHold`) the library's hold code reads. Drop it once rc.6 has them.
+- `patches/react-native-incall-manager+4.3.0.patch`: iOS `chooseAudioRoute`,
+  `getAudioDeviceStatus` and `onAudioDeviceChanged` (proposed upstream), the library's
+  `docs/patches` copy. The library's route control and `useAudioDevices` use them.
+
+The four patches the app used to carry on the library (voice calls start on the receiver,
+"Scout" in CallKit and Recents, Bluetooth and earpiece routes, the audio-session timer)
+are all in the library now.
+
+Text fields are uncontrolled (`defaultValue`): on the New Architecture a controlled field
+can drop keys typed while its JS echo is applied (react-native#58904), and building React
+Native from source for the fix isn't worth it for three pairing fields nothing rewrites.
 
 ## Simulator
 
-The Simulator can't place a call (no SignalWire config, and CallKit doesn't run calls
-there), but everything up to it runs against a stand-in for Scout:
+Everything up to the call runs against a stand-in for Scout (the iOS 27 Simulator also
+runs a CallKit call, given a stand-in that mints a real SignalWire token, and the Mac's
+microphone):
 
     node scripts/mock-scout.mjs          # prints a scout://pair link with a one-time code
     xcrun simctl launch booted com.example.scoutphone -ScoutTestLink '<that link>' -ScoutTestPair 1

@@ -49,7 +49,12 @@ export function Button(props: {
   );
 }
 
-export function Field(props: TextInputProps & { label: string }) {
+/**
+ * A labelled text field. Uncontrolled (give it `defaultValue`, read `onChangeText`): on
+ * the New Architecture a controlled field's JS echo of each change can drop keys typed
+ * while it is applied (react-native#58904), and nothing here rewrites what is typed.
+ */
+export function Field(props: Omit<TextInputProps, 'value'> & { label: string }) {
   const t = useTheme();
   const { label, style, ...rest } = props;
   return (
@@ -103,5 +108,5 @@ const styles = StyleSheet.create({
   input: { fontSize: 16, borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 9 },
   muted: { fontSize: 13, lineHeight: 18 },
   error: { fontSize: 14 },
-  row: { flexDirection: 'row', gap: 8 },
+  row: { flexDirection: 'row', gap: 8, alignItems: 'center' },
 });

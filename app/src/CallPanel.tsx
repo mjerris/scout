@@ -1,15 +1,13 @@
 import type { Call, CredentialProvider, SignalWireOptions } from '@signalwire/js';
 import { SignalWireProvider, useCall, useSignalWire } from '@signalwire/react-native';
-import { useAudioRoute } from '@signalwire/react-native/audio';
-import type { AudioRoute } from '@signalwire/react-native/audio';
+import { AudioRoutePickerButton, useAudioDevices, useAudioRoute } from '@signalwire/react-native/audio';
+import type { AudioDeviceName, AudioRoute } from '@signalwire/react-native/audio';
 import { getCallKit } from '@signalwire/react-native/callkit';
 import type { CallKitObserverOptions } from '@signalwire/react-native/callkit';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Text } from 'react-native';
-import RNCallKeep from 'react-native-callkeep';
+import RNCallKeep from '@signalwire/react-native-callkeep';
 
-import { useAudioDevices } from './audioDevices';
-import type { DeviceName } from './audioDevices';
 import { scoutCredentials } from './credentials';
 import { takeCallRequests, usePendingCallRequests } from './startRequests';
 import type { Pairing } from './pairing';
@@ -24,7 +22,10 @@ import { Button, ErrorText, Muted, Row, Section } from './ui';
 const SW_OPTIONS: SignalWireOptions = { skipRegister: true, skipDeviceMonitoring: true };
 // CallKit shows the call (and Recents lists it) as "Scout", not the agent's address.
 const CALLKIT: CallKitObserverOptions = { displayName: () => 'Scout' };
-const ENDED = new Set(['disconnected', 'failed', 'destroyed']);
+// How a call ends, as the CallKit bridge reads it: 'disconnected' is not an end, but what
+// an ICE blip (Wi-Fi to cellular) looks like while the SDK recovers the media; a hangup
+// from either side reaches 'destroyed'.
+const ENDED = new Set(['ended', 'failed', 'destroyed']);
 const HANGUP_WAIT_MS = 5000;
 
 interface Session {
@@ -193,7 +194,7 @@ function ActiveCall({
   );
 }
 
-const ROUTES: { route: AudioRoute; device: DeviceName; title: string }[] = [
+const ROUTES: { route: AudioRoute; device: AudioDeviceName; title: string }[] = [
   { route: 'earpiece', device: 'EARPIECE', title: 'Phone' },
   { route: 'speaker', device: 'SPEAKER_PHONE', title: 'Speaker' },
   { route: 'bluetooth', device: 'BLUETOOTH', title: 'Bluetooth' },
@@ -202,7 +203,8 @@ const ROUTES: { route: AudioRoute; device: DeviceName; title: string }[] = [
 /** Where the call plays: the phone, its speaker, or Bluetooth (a headset, the car). */
 export function RoutePicker({ active }: { active: boolean }) {
   const { route, setRoute } = useAudioRoute();
-  const devices = useAudioDevices(active);
+  // What iOS is playing the call through (incall-manager's iOS routes, patches/).
+  const devices = useAudioDevices();
   const known = devices.available.length > 0;
   const current = devices.selected || ROUTES.find((r) => r.route === route)?.device;
   return (
@@ -219,7 +221,11 @@ export function RoutePicker({ active }: { active: boolean }) {
           />
         ))}
       </Row>
-      {active && devices.selectedName ? <Muted>Playing through {devices.selectedName}</Muted> : null}
+      <Row>
+        {/* iOS's own output menu: every headset and car by name (nothing where unavailable). */}
+        <AudioRoutePickerButton testID="route-menu" />
+        {active && devices.selectedName ? <Muted>Playing through {devices.selectedName}</Muted> : null}
+      </Row>
     </>
   );
 }

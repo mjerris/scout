@@ -151,7 +151,7 @@ export function PairScreen({
     setAsking(null);
   }
 
-  const nameField = <Field label="Name for this phone" testID="name" value={name} onChangeText={setName} maxLength={64} />;
+  const nameField = <Field label="Name for this phone" testID="name" defaultValue={name} onChangeText={setName} maxLength={64} />;
 
   if (link) {
     return (
@@ -217,7 +217,7 @@ export function PairScreen({
         <Field
           label="Scout's address"
           testID="server"
-          value={server}
+          defaultValue={server}
           onChangeText={setServer}
           placeholder={ADDRESS_EXAMPLE}
           keyboardType="url"
@@ -229,7 +229,7 @@ export function PairScreen({
         <Field
           label="Pairing code"
           testID="code"
-          value={code}
+          defaultValue={code}
           onChangeText={setCode}
           placeholder="ABCD-EFGH, or paste the scout:// link"
           autoCapitalize="characters"

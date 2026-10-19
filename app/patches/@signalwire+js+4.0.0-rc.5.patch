@@ -1,0 +1,1262 @@
+diff --git a/node_modules/@signalwire/js/dist/index.cjs b/node_modules/@signalwire/js/dist/index.cjs
+index b3e1f39..8ef382b 100644
+--- a/node_modules/@signalwire/js/dist/index.cjs
++++ b/node_modules/@signalwire/js/dist/index.cjs
+@@ -4550,18 +4550,21 @@ var ICEGatheringController = class extends Destroyable {
+ 		this.onicecandidateHandler = (event) => {
+ 			logger$21.debug("[ICEGatheringController] ICE candidate event received:", event.candidate);
+ 			this.removeTimer("iceCandidateTimer");
+-			if (event.candidate) this.iceCandidateTimer = setTimeout(() => {
+-				if (this.peerConnection.iceGatheringState !== "complete") {
+-					logger$21.warn("[ICEGatheringController] ICE candidate timeout, using current SDP");
+-					this.handleICECandidateTimeout();
+-				}
+-			}, this.iceCandidateTimeout);
+-			else {
++			if (event.candidate) {
++				this._candidateCount += 1;
++				this.iceCandidateTimer = setTimeout(() => {
++					if (this.peerConnection.iceGatheringState !== "complete") {
++						logger$21.warn("[ICEGatheringController] ICE candidate timeout, using current SDP");
++						this.handleICECandidateTimeout();
++					}
++				}, this.iceCandidateTimeout);
++			} else {
+ 				logger$21.debug("[ICEGatheringController] ICE gathering completed: null candidate received");
+ 				this.removeTimer("iceGatheringTimer");
+ 				this.handleICEGatheringComplete();
+ 			}
+ 		};
++		this._candidateCount = 0;
+ 		this._iceCandidatesState = this.createBehaviorSubject({
+ 			state: "new",
+ 			validSDP: false
+@@ -4572,6 +4575,7 @@ var ICEGatheringController = class extends Destroyable {
+ 		this.setupEventListeners();
+ 		this.subscribeTo(this.peerConnectionControllerNegotiating$.pipe((0, rxjs.filter)((isNegotiating) => isNegotiating)), (isNegotiating) => {
+ 			if (isNegotiating) {
++				this._candidateCount = 0;
+ 				this.setupEventListeners();
+ 				this.iceGatheringTimer = setTimeout(() => {
+ 					if (this.peerConnection.iceGatheringState !== "complete") {
+@@ -4595,6 +4599,10 @@ var ICEGatheringController = class extends Destroyable {
+ 		const sdp = this.peerConnection.localDescription?.sdp;
+ 		return isValidLocalDescription(sdp ?? "");
+ 	}
++	/** How many candidates were gathered since the current negotiation started. */
++	get candidateCount() {
++		return this._candidateCount;
++	}
+ 	get isRelayOnly() {
+ 		return this.relayOnly;
+ 	}
+@@ -4645,6 +4653,7 @@ var ICEGatheringController = class extends Destroyable {
+ 	restartICEGatheringWithRelayOnly() {
+ 		logger$21.debug("[ICEGatheringController] Restarting ICE gathering with relay-only candidates");
+ 		this.relayOnly = true;
++		this._candidateCount = 0;
+ 		this.peerConnection.setConfiguration({
+ 			...this.peerConnection.getConfiguration(),
+ 			iceTransportPolicy: "relay"
+@@ -5308,8 +5317,9 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		this.options = options;
+ 		this.firstSDPExchangeCompleted = false;
+ 		this.negotiationNeeded$ = this.createSubject();
+-		this.localDescription$ = (0, rxjs.defer)(() => (0, rxjs.from)(this.init())).pipe((0, rxjs.switchMap)(() => this.iceGatheringController.iceCandidatesState$.pipe((0, rxjs.filter)((iceCandidateState) => !["new", "gathering"].includes(iceCandidateState)), (0, rxjs.tap)(() => {
++		this.localDescription$ = (0, rxjs.defer)(() => (0, rxjs.from)(this.init())).pipe((0, rxjs.switchMap)(() => this.iceGatheringController.iceCandidatesState$.pipe((0, rxjs.filter)((iceCandidateState) => !["new", "gathering"].includes(iceCandidateState)), (0, rxjs.tap)((iceCandidateState) => {
+ 			this.negotiationEnded();
++			this.failFirstExchangeWithoutCandidates(iceCandidateState);
+ 		}), (0, rxjs.filter)(() => this.shouldEmitLocalDescription), (0, rxjs.map)(() => this.peerConnection?.localDescription), require_operators.filterNull(), (0, rxjs.tap)((desc) => {
+ 			if (desc.type === "answer") this._type = "offer";
+ 		}))), (0, rxjs.shareReplay)(1), (0, rxjs.takeUntil)(this.destroyed$));
+@@ -5375,6 +5385,7 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		this._connectionState$ = this.createReplaySubject(1);
+ 		this._signalingState$ = this.createReplaySubject(1);
+ 		this._iceGatheringState$ = this.createReplaySubject(1);
++		this._pausedEncodings = /* @__PURE__ */ new Map();
+ 		this._errors$ = this.createReplaySubject(1);
+ 		this._iceCandidates$ = this.createReplaySubject(1);
+ 		this._localMediaSettled$ = this.createReplaySubject(1);
+@@ -5419,6 +5430,21 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		if (!this._iceGatheringController) throw new require_operators.DependencyError("ICEGatheringController is not initialized");
+ 		return this._iceGatheringController;
+ 	}
++	/**
++	* Gathering for the first offer or answer ended without a single candidate,
++	* as when the device found no network at all. That SDP is never sent (see
++	* {@link shouldEmitLocalDescription}), and nothing else would end the call:
++	* an answered inbound call stayed ringing for the caller, and a dial waited
++	* out the create timeout. Report it instead, so the call fails and sends its
++	* bye. A later renegotiation is left to call recovery.
++	*/
++	failFirstExchangeWithoutCandidates(iceCandidateState) {
++		const localDescription = this.peerConnection?.localDescription;
++		if (this.firstSDPExchangeCompleted || !localDescription || this.iceGatheringController.candidateCount > 0 || localDescription.sdp.includes("a=candidate:")) return;
++		const error = new require_operators.IceGatheringError(localDescription.type, iceCandidateState);
++		logger$17.error("[RTCPeerConnectionController] ICE gathering produced no candidates", { sdp: localDescription.sdp });
++		this._errors$.next(error);
++	}
+ 	get shouldEmitLocalDescription() {
+ 		if (!this.peerConnection) return false;
+ 		const { localDescription, signalingState } = this.peerConnection;
+@@ -6041,6 +6067,39 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		};
+ 		await this.transceiverController?.setupRemoteTransceivers(this.type);
+ 	}
++	/**
++	* Stop or restart RTP on every sender of this connection, without renegotiating.
++	*
++	* Used for hold: `verto.modify` hold stops the server's media to the call, but
++	* not ours. Clearing `RTCRtpEncodingParameters.active` stops the packets;
++	* `replaceTrack(null)` is not enough, because an audio sender with no track
++	* still sends silence. Each encoding's own `active` flag is restored on
++	* resume, so an encoding that was off before the pause stays off.
++	*/
++	async setSendingPaused(paused) {
++		const senders = this.peerConnection?.getSenders() ?? [];
++		for (const sender of senders) try {
++			const parameters = sender.getParameters();
++			if (!parameters.encodings.length) continue;
++			if (paused) {
++				if (!this._pausedEncodings.has(sender)) this._pausedEncodings.set(sender, parameters.encodings.map((encoding) => encoding.active !== false));
++				parameters.encodings = parameters.encodings.map((encoding) => ({
++					...encoding,
++					active: false
++				}));
++			} else {
++				const previous = this._pausedEncodings.get(sender);
++				parameters.encodings = parameters.encodings.map((encoding, index) => ({
++					...encoding,
++					active: previous?.[index] ?? true
++				}));
++				this._pausedEncodings.delete(sender);
++			}
++			await sender.setParameters(parameters);
++		} catch (error) {
++			logger$17.warn(`[RTCPeerConnectionController] Failed to ${paused ? "pause" : "resume"} a ${sender.track?.kind ?? "track-less"} sender:`, error);
++		}
++	}
+ 	async restoreTrackSender(kind) {
+ 		const audioCovered = kind === "audio" || kind === "both";
+ 		if (audioCovered && this._localAudioPipeline) await this.restoreRawAudioInputForPipeline();
+@@ -6458,6 +6517,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 		this._screenShareStatus$ = this.createBehaviorSubject("none");
+ 		this._rtcPeerConnectionsMap = /* @__PURE__ */ new Map();
+ 		this._lastVertoPings = /* @__PURE__ */ new Map();
++		this._mainInviteSent = false;
+ 		this._legErrors$ = this.createSubject();
+ 		this._nodeId$ = this.createBehaviorSubject(options.nodeId ?? null);
+ 		this.onError = options.onError;
+@@ -6477,6 +6537,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			logger$16.warn("[WebRTCManager] Call might already be disconnected, error sending Verto hold:", error);
+ 			throw error;
+ 		}
++		await this.mainPeerConnection.setSendingPaused(true);
+ 	}
+ 	async unhold() {
+ 		const vertoModifyMessage = VertoModify({
+@@ -6490,6 +6551,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			logger$16.warn("[WebRTCManager] Call might already be disconnected, error sending Verto unhold:", error);
+ 			throw error;
+ 		}
++		await this.mainPeerConnection.setSendingPaused(false);
+ 	}
+ 	get mediaDirections() {
+ 		return this.mainPeerConnection.mediaDirections;
+@@ -6886,6 +6948,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 	async sendLocalDescription(message, rtcPeerConnController) {
+ 		const vertoMethod = message.method;
+ 		const optionalsParams = this.getSendLocalSDPOptionalParams(rtcPeerConnController, message);
++		if (vertoMethod === "verto.invite" && rtcPeerConnController.isMainDevice) this._mainInviteSent = true;
+ 		try {
+ 			const response = await this.executeVerto(message, optionalsParams);
+ 			switch (vertoMethod) {
+@@ -6948,6 +7011,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			rtcPeerConnController.setMemberId(memberId);
+ 			rtcPeerConnController.setNodeId(nodeId);
+ 			if (rtcPeerConnController.isMainDevice) {
++				this._mainInviteSent = true;
+ 				this._selfId$.next(memberId);
+ 				this._nodeId$.next(nodeId);
+ 				this.attachManager.attach(this.buildAttachableCall(callId, nodeId ?? void 0));
+@@ -7324,7 +7388,8 @@ var WebRTCVertoManager = class extends VertoManager {
+ 	async bye(cause) {
+ 		this.attachManager.detach(this.buildAttachableCall());
+ 		const rtcPeerConnController = this._rtcPeerConnectionsMap.get(this.webRtcCallSession.id);
+-		if (rtcPeerConnController) await this.executeVertoBye(rtcPeerConnController, cause);
++		const hasServerLeg = this.webRtcCallSession.direction === "inbound" || this._mainInviteSent;
++		if (rtcPeerConnController && hasServerLeg) await this.executeVertoBye(rtcPeerConnController, cause);
+ 	}
+ 	async sendDigits(dtmf) {
+ 		const vertoInfoMessage = VertoInfo({
+@@ -8264,7 +8329,8 @@ var WebRTCCall = class extends Destroyable {
+ 		this._errors$ = this.createReplaySubject(1);
+ 		this._lastMergedStatus = "new";
+ 		this._answered$ = this.createReplaySubject();
+-		this._holdState = false;
++		this._held$ = this.createBehaviorSubject(false);
++		this._holdQueue = Promise.resolve();
+ 		this._userVariables$ = this.createBehaviorSubject({ ...PreferencesContainer.instance.userVariables });
+ 		this._networkIssues$ = this.createBehaviorSubject([]);
+ 		this._networkMetrics$ = this.createBehaviorSubject([]);
+@@ -8384,14 +8450,69 @@ var WebRTCCall = class extends Destroyable {
+ 		await this.executeMethod(this.callSelf, method, {});
+ 	}
+ 	/**
+-	* Toggles the hold state of the call (pauses/resumes local media transmission).
++	* Puts the call on hold: the server stops its media to the call, and the
++	* call stops sending local media. Resolves at once if the call is already held.
+ 	*
+ 	* Distinct from {@link Participant.toggleMute} which mutes individual tracks.
+ 	*/
++	async hold() {
++		return this.queueHoldChange(() => true);
++	}
++	/** Takes the call off hold and resumes local media. Resolves at once if the call is not held. */
++	async unhold() {
++		return this.queueHoldChange(() => false);
++	}
++	/**
++	* Toggles the hold state of the call (see {@link hold} and {@link unhold}).
++	*
++	* A toggle made while another hold change is in flight applies after it, to
++	* the state it left.
++	*/
+ 	async toggleHold() {
+-		if (this._holdState) await this.vertoManager.unhold();
+-		else await this.vertoManager.hold();
+-		this._holdState = !this._holdState;
++		return this.queueHoldChange((held) => !held);
++	}
++	/** Whether the call is on hold. Emits the current state on subscribe. */
++	get held$() {
++		return this.deferEmission(this._held$.asObservable()).pipe((0, rxjs.takeUntil)(this._destroyed$));
++	}
++	/** Whether the call is on hold. */
++	get held() {
++		return this._held$.value;
++	}
++	/**
++	* A held call receives no media by design, so the stats monitor reports
++	* `no_inbound_audio` for it. That is not a broken connection, and an ICE
++	* restart cannot fix it. The same holds just after unhold, until the
++	* server's media resumes.
++	*/
++	isSilenceExpectedFromHold() {
++		return this._held$.value || this._holdReleasedAt !== void 0 && Date.now() - this._holdReleasedAt < require_operators.HOLD_RELEASE_GRACE_MS;
++	}
++	/**
++	* [@signalwire/react-native patch: hold compat] The React Native wrapper's
++	* CallHoldState (packages/react/src/callHold.ts) reads the hold state from
++	* `_holdState`, and looks for `_pauseLocalMediaForHold` to tell whether the
++	* SDK stops local media on hold (the wrapper's earlier rc.5 patch). Both now
++	* come from hold()/unhold()/held$ (signalwire-typescript-web #143).
++	*/
++	get _holdState() {
++		return this._held$.value;
++	}
++	/** [@signalwire/react-native patch: hold compat] See `_holdState`. */
++	async _pauseLocalMediaForHold(paused) {
++		await this.vertoManager.mainPeerConnection.setSendingPaused(paused);
++	}
++	async queueHoldChange(target) {
++		const change = this._holdQueue.then(async () => {
++			const held = target(this._held$.value);
++			if (held === this._held$.value) return;
++			if (held) await this.vertoManager.hold();
++			else await this.vertoManager.unhold();
++			this._held$.next(held);
++			if (!held) this._holdReleasedAt = Date.now();
++		});
++		this._holdQueue = change.catch(() => void 0);
++		return change;
+ 	}
+ 	/** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link recording$}. */
+ 	async startRecording() {
+@@ -8816,6 +8937,10 @@ var WebRTCCall = class extends Destroyable {
+ 				}
+ 			});
+ 			this.subscribeTo(this._statsMonitor.criticalIssue$, (issue) => {
++				if (issue.type === "no_inbound_audio" && this.isSilenceExpectedFromHold()) {
++					logger$12.debug("[Call] No inbound audio on a held call; not starting recovery");
++					return;
++				}
+ 				this._recoveryManager?.pushTrigger({
+ 					source: "stats",
+ 					detail: `${issue.type}: ${issue.severity}`,
+@@ -10218,6 +10343,7 @@ var ClientSessionManager = class extends Destroyable {
+ 				logger$9.error("[Session] Re-authentication RPC failed:", err);
+ 				throw err;
+ 			})));
++			this._sessionTokenExpiresAt = options?.expiresAt;
+ 			if (options?.clientBound) this._wasClientBound = true;
+ 			logger$9.debug("[Session] Re-authentication successful, updating stored auth state");
+ 		} catch (error) {
+@@ -10226,6 +10352,10 @@ var ClientSessionManager = class extends Destroyable {
+ 			throw error;
+ 		}
+ 	}
++	/** Whether the token the server holds for this session is known to have expired. */
++	get sessionTokenExpired() {
++		return this._sessionTokenExpiresAt !== void 0 && this._sessionTokenExpiresAt <= Date.now();
++	}
+ 	async authenticate() {
+ 		logger$9.debug("[Session] Starting authentication process");
+ 		this._lastFreshConnectReminted = false;
+@@ -10237,7 +10367,12 @@ var ClientSessionManager = class extends Destroyable {
+ 			protocol: persistedParams.protocol,
+ 			authStateLength: persistedParams.authorization_state?.length
+ 		});
+-		const hasReconnectState = persistedParams.authorization_state && persistedParams.protocol;
++		let hasReconnectState = Boolean(persistedParams.authorization_state && persistedParams.protocol);
++		if (hasReconnectState && this.sessionTokenExpired) {
++			logger$9.debug("[Session] Session token expired, connecting fresh instead of resuming");
++			await this.cleanupStoredConnectionParams();
++			hasReconnectState = false;
++		}
+ 		const storedToken = this.getCredential().token;
+ 		const isReconnect = hasReconnectState && storedToken;
+ 		let dpopToken;
+@@ -10288,6 +10423,8 @@ var ClientSessionManager = class extends Destroyable {
+ 		});
+ 		if (response.protocol) await this.transport.setProtocol(response.protocol);
+ 		this._authorization$.next(response.authorization);
++		const expiresAtSec = response.authorization.fabric_subscriber?.expires_at;
++		this._sessionTokenExpiresAt = expiresAtSec ? expiresAtSec * 1e3 : this.getCredential().expiry_at ?? void 0;
+ 		if (response.authorization.cnf?.jkt) this._wasClientBound = true;
+ 		this._iceServers$.next(response.ice_servers ?? []);
+ 		this.transport.setAuthenticated();
+@@ -10364,12 +10501,33 @@ var ClientSessionManager = class extends Destroyable {
+ 			return callSession;
+ 		} catch (error) {
+ 			logger$9.error("[Session] Error creating outbound call:", error);
+-			callSession?.destroy();
++			if (callSession) await this.endFailedOutboundCall(callSession);
+ 			const callError = new require_operators.CallCreateError(error instanceof rxjs.TimeoutError ? "Call create timeout" : "Call creation failed", error, "outbound");
+ 			this._errors$.next(callError);
+ 			throw callError;
+ 		}
+ 	}
++	/**
++	* End a dial that failed before `dial()` could hand the call to the app.
++	*
++	* The call is not in `calls$` and `dial()` rejects without it, so nothing
++	* else can hang it up. Once the invite has gone out the server holds a leg
++	* for it, and destroying the call locally would leave that leg up and
++	* billed. So hang up: the bye releases the leg, then the call is destroyed.
++	* `hangup()` sends no bye when no invite went out. A fatal call error has
++	* already sent its own bye and destroyed the call.
++	*/
++	async endFailedOutboundCall(callSession) {
++		if (callSession.status === "destroyed" || callSession.status === "failed") {
++			callSession.destroy();
++			return;
++		}
++		try {
++			await callSession.hangup();
++		} catch (error) {
++			logger$9.warn("[Session] Hanging up the failed outbound call failed:", error);
++		}
++	}
+ 	async createCall(options = {}) {
+ 		try {
+ 			const addressURI = getAddressSearchURI(options);
+@@ -12023,7 +12181,7 @@ var SignalWire = class extends Destroyable {
+ 	async reauthenticateLiveSession(credential) {
+ 		if (!this.isConnected || !this._clientSession.authenticated || !credential.token) return;
+ 		try {
+-			await this._clientSession.reauthenticate(credential.token);
++			await this._clientSession.reauthenticate(credential.token, void 0, { expiresAt: credential.expiry_at });
+ 			logger$1.info("[SignalWire] Session refreshed with new credentials.");
+ 		} catch (error) {
+ 			logger$1.error("[SignalWire] Failed to refresh session with new credentials:", error);
+@@ -12094,7 +12252,7 @@ var SignalWire = class extends Destroyable {
+ 				logger$1.warn("[SignalWire] Re-minted credential has no token; keeping the current one.");
+ 				return false;
+ 			}
+-			await this._clientSession.reauthenticate(newCredentials.token);
++			await this._clientSession.reauthenticate(newCredentials.token, void 0, { expiresAt: newCredentials.expiry_at });
+ 			this._deps.credential = newCredentials;
+ 			this.persistCredential(newCredentials);
+ 			if (newCredentials.expiry_at && provider.refresh) this._refreshCoordinator?.scheduleDeveloperRefresh(provider, newCredentials.expiry_at);
+@@ -13076,6 +13234,7 @@ exports.CollectionFetchError = require_operators.CollectionFetchError;
+ exports.DPoPInitError = require_operators.DPoPInitError;
+ exports.DeviceTokenError = require_operators.DeviceTokenError;
+ exports.EmbedTokenCredentialProvider = EmbedTokenCredentialProvider;
++exports.IceGatheringError = require_operators.IceGatheringError;
+ exports.InvalidCredentialsError = require_operators.InvalidCredentialsError;
+ exports.MediaAccessError = require_operators.MediaAccessError;
+ exports.MediaTrackError = require_operators.MediaTrackError;
+diff --git a/node_modules/@signalwire/js/dist/index.d.cts b/node_modules/@signalwire/js/dist/index.d.cts
+index 82dc6d7..72f15b7 100644
+--- a/node_modules/@signalwire/js/dist/index.d.cts
++++ b/node_modules/@signalwire/js/dist/index.d.cts
+@@ -1233,6 +1233,21 @@ declare class AuxiliaryLegCancelledError extends Error {
+   readonly leg: RTCPeerConnectionPropose;
+   constructor(leg: RTCPeerConnectionPropose);
+ }
++/**
++ * ICE gathering for a call's first offer or answer ended without a single
++ * candidate, as when the device has no usable network, so there is nothing the
++ * far end could connect to. Fatal for the main leg: the SDP is never sent, and
++ * waiting would stall the call forever.
++ */
++declare class IceGatheringError extends Error {
++  /** Whether the SDP was an `'offer'` (outbound) or an `'answer'` (inbound). */
++  readonly sdpType: RTCSdpType;
++  /** How gathering ended: `'complete'` or `'timeout'`. */
++  readonly gatheringState: string;
++  constructor(/** Whether the SDP was an `'offer'` (outbound) or an `'answer'` (inbound). */
++  sdpType: RTCSdpType, /** How gathering ended: `'complete'` or `'timeout'`. */
++  gatheringState: string);
++}
+ declare class MediaTrackError extends Error {
+   operation: string;
+   kind: string;
+@@ -2420,6 +2435,9 @@ interface CallState {
+   readonly raiseHandPriority: boolean;
+   readonly locked$: Observable<boolean>;
+   readonly locked: boolean;
++  /** Whether the call is on hold (see {@link Call.hold}). */
++  readonly held$: Observable<boolean>;
++  readonly held: boolean;
+   readonly meta$: Observable<Record<string, unknown>>;
+   readonly meta: Record<string, unknown>;
+   readonly participants$: Observable<CallParticipant[]>;
+@@ -2483,6 +2501,8 @@ interface Call extends CallState {
+   subscribe(eventType: string): Observable<Record<string, unknown>>;
+   hangup(): Promise<void>;
+   toggleLock(): Promise<void>;
++  hold(): Promise<void>;
++  unhold(): Promise<void>;
+   toggleHold(): Promise<void>;
+   setLayout(layout: string, positions: Record<string, VideoPosition>): Promise<void>;
+   startRecording(): Promise<void>;
+@@ -3223,6 +3243,8 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private _connectionState$;
+   private _signalingState$;
+   private _iceGatheringState$;
++  /** Each paused sender's encoding `active` flags from before the pause. */
++  private _pausedEncodings;
+   private _errors$;
+   private _iceCandidates$;
+   /**
+@@ -3239,6 +3261,15 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private _localAudioPipeline;
+   constructor(options?: RTCPeerConnectionControllerOptionsPartial, remoteSessionDescription?: string, deviceController?: DeviceController);
+   private get iceGatheringController();
++  /**
++   * Gathering for the first offer or answer ended without a single candidate,
++   * as when the device found no network at all. That SDP is never sent (see
++   * {@link shouldEmitLocalDescription}), and nothing else would end the call:
++   * an answered inbound call stayed ringing for the caller, and a dial waited
++   * out the create timeout. Report it instead, so the call fails and sends its
++   * bye. A later renegotiation is left to call recovery.
++   */
++  private failFirstExchangeWithoutCandidates;
+   private get shouldEmitLocalDescription();
+   private removeConnectionTimer;
+   setMemberId(memberId: string | null): void;
+@@ -3382,6 +3413,16 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private getUserMedia;
+   private getDisplayMedia;
+   private setupRemoteTracks;
++  /**
++   * Stop or restart RTP on every sender of this connection, without renegotiating.
++   *
++   * Used for hold: `verto.modify` hold stops the server's media to the call, but
++   * not ours. Clearing `RTCRtpEncodingParameters.active` stops the packets;
++   * `replaceTrack(null)` is not enough, because an audio sender with no track
++   * still sends silence. Each encoding's own `active` flag is restored on
++   * resume, so an encoding that was off before the pause stays off.
++   */
++  setSendingPaused(paused: boolean): Promise<void>;
+   restoreTrackSender(kind: 'audio' | 'video' | 'both'): Promise<void>;
+   private restoreRawAudioInputForPipeline;
+   /**
+@@ -3634,7 +3675,11 @@ declare class WebRTCCall extends Destroyable implements CallManager, Call {
+   private _lastMergedStatus;
+   private _answered$;
+   private _answerMediaOptions?;
+-  private _holdState;
++  private _held$;
++  /** Hold requests run one at a time, in order, each from the state the last one left. */
++  private _holdQueue;
++  /** When the call last came off hold, for the recovery grace period. */
++  private _holdReleasedAt?;
+   private _userVariables$;
+   private _statsMonitor?;
+   private _recoveryManager?;
+@@ -3686,11 +3731,33 @@ declare class WebRTCCall extends Destroyable implements CallManager, Call {
+   /** Toggles the call lock state, preventing or allowing new participants from joining. */
+   toggleLock(): Promise<void>;
+   /**
+-   * Toggles the hold state of the call (pauses/resumes local media transmission).
++   * Puts the call on hold: the server stops its media to the call, and the
++   * call stops sending local media. Resolves at once if the call is already held.
+    *
+    * Distinct from {@link Participant.toggleMute} which mutes individual tracks.
+    */
++  hold(): Promise<void>;
++  /** Takes the call off hold and resumes local media. Resolves at once if the call is not held. */
++  unhold(): Promise<void>;
++  /**
++   * Toggles the hold state of the call (see {@link hold} and {@link unhold}).
++   *
++   * A toggle made while another hold change is in flight applies after it, to
++   * the state it left.
++   */
+   toggleHold(): Promise<void>;
++  /** Whether the call is on hold. Emits the current state on subscribe. */
++  get held$(): Observable<boolean>;
++  /** Whether the call is on hold. */
++  get held(): boolean;
++  /**
++   * A held call receives no media by design, so the stats monitor reports
++   * `no_inbound_audio` for it. That is not a broken connection, and an ICE
++   * restart cannot fix it. The same holds just after unhold, until the
++   * server's media resumes.
++   */
++  private isSilenceExpectedFromHold;
++  private queueHoldChange;
+   /** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link recording$}. */
+   startRecording(): Promise<void>;
+   /** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link streaming$}. */
+@@ -4296,6 +4363,12 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+   /** Sticky flag — once true, stays true for the session lifetime. */
+   private _wasClientBound;
+   private _lastFreshConnectReminted;
++  /**
++   * When the token the server holds for this session expires (ms since epoch),
++   * if known: from the connect result, or as stated by the caller of
++   * `reauthenticate()`. A session whose token has expired cannot be resumed.
++   */
++  private _sessionTokenExpiresAt?;
+   private _remintBeforeNextFreshConnect;
+   private _userInfo$;
+   private _calls$;
+@@ -4534,7 +4607,10 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+   protected updateAuthState(authorization_state: string): Promise<void>;
+   reauthenticate(token: string, dpopToken?: string, options?: {
+     clientBound?: boolean;
++    expiresAt?: number;
+   }): Promise<void>;
++  /** Whether the token the server holds for this session is known to have expired. */
++  private get sessionTokenExpired();
+   private authenticate;
+   disconnect(): Promise<void>;
+   private createInboundCall;
+@@ -4549,6 +4625,17 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+    */
+   private handleVertoAttach;
+   createOutboundCall(destination: string | Address, options?: CallOptions): Promise<Call>;
++  /**
++   * End a dial that failed before `dial()` could hand the call to the app.
++   *
++   * The call is not in `calls$` and `dial()` rejects without it, so nothing
++   * else can hang it up. Once the invite has gone out the server holds a leg
++   * for it, and destroying the call locally would leave that leg up and
++   * billed. So hang up: the bye releases the leg, then the call is destroyed.
++   * `hangup()` sends no bye when no invite went out. A fatal call error has
++   * already sent its own bye and destroyed the call.
++   */
++  private endFailedOutboundCall;
+   private createCall;
+   destroy(): void;
+ }
+@@ -5471,5 +5558,5 @@ declare const version: string;
+  */
+ declare const ready: boolean;
+ //#endregion
+-export { Address, type AddressHistory, type AudioConstraintsEvent, type AuthenticateContext, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, type Call, type CallAddress, type CallCapabilitiesState, CallCreateError, type CallDiagnosticSummary, type CallDirection, type CallError, type CallErrorKind, type NetworkIssue as CallNetworkIssue, type NetworkIssue, type NetworkMetrics as CallNetworkMetrics, type NetworkMetrics, CallNotReadyError, type CallOptions, type CallParticipant, type CallSelfParticipant, type CallState, type CallStatus, type Capability, ClientPreferences, CollectionFetchError, type ConstraintFallbackEvent, type CredentialNoRefreshHandlerWarning, type CredentialProvider, type CredentialRefreshFallbackReason, type CredentialRefreshFallbackWarning, DPoPInitError, type DebugOptions, type DeviceController, type DeviceRecoveryEvent, DeviceTokenError, type DiagnosticEvent, type DialOptions, type Directory, EmbedTokenCredentialProvider, type ExecuteMethod, InvalidCredentialsError, type JSONRPCErrorResponse, type JSONRPCRequest, type JSONRPCResponse, type JSONRPCSuccessResponse, type LayoutLayer, type LogLevel, MediaAccessError, type MediaDirection, type MediaDirections, type MediaOptions, type MediaParamsEvent, MediaTrackError, type MemberCapabilities, MessageParseError, type NodeSocketAdapter, type OnOffCapability, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, type PendingRPCOptions, type PermissionResult, type PlatformCapabilities, PreflightError, type PreflightOptions, type PreflightResult, type QualityLevel, RecoveryError, type RecoveryEvent, type RecoveryState, type ResilienceCallStatus, type SATClaims, type SDKCredential, type SDKLogger, type SDKWarning, ScreenShareAlreadyActiveError, type ScreenShareOptions, type ScreenShareStatus, type SelectDeviceOptions, SelfCapabilities, SelfParticipant, type SessionDiagnostics, type SessionState, SignalWire, type SignalWireOptions, StaticCredentialProvider, type Storage, type StoredDevicePreference, type TextMessage, TokenRefreshError, type TransferOptions, UnexpectedError, User, type UserPresence, VertoPongError, type VideoPosition, type WebRTCApiProvider, WebRTCCall, type WebRTCMediaDevices, type WebSocketAdapter, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
++export { Address, type AddressHistory, type AudioConstraintsEvent, type AuthenticateContext, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, type Call, type CallAddress, type CallCapabilitiesState, CallCreateError, type CallDiagnosticSummary, type CallDirection, type CallError, type CallErrorKind, type NetworkIssue as CallNetworkIssue, type NetworkIssue, type NetworkMetrics as CallNetworkMetrics, type NetworkMetrics, CallNotReadyError, type CallOptions, type CallParticipant, type CallSelfParticipant, type CallState, type CallStatus, type Capability, ClientPreferences, CollectionFetchError, type ConstraintFallbackEvent, type CredentialNoRefreshHandlerWarning, type CredentialProvider, type CredentialRefreshFallbackReason, type CredentialRefreshFallbackWarning, DPoPInitError, type DebugOptions, type DeviceController, type DeviceRecoveryEvent, DeviceTokenError, type DiagnosticEvent, type DialOptions, type Directory, EmbedTokenCredentialProvider, type ExecuteMethod, IceGatheringError, InvalidCredentialsError, type JSONRPCErrorResponse, type JSONRPCRequest, type JSONRPCResponse, type JSONRPCSuccessResponse, type LayoutLayer, type LogLevel, MediaAccessError, type MediaDirection, type MediaDirections, type MediaOptions, type MediaParamsEvent, MediaTrackError, type MemberCapabilities, MessageParseError, type NodeSocketAdapter, type OnOffCapability, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, type PendingRPCOptions, type PermissionResult, type PlatformCapabilities, PreflightError, type PreflightOptions, type PreflightResult, type QualityLevel, RecoveryError, type RecoveryEvent, type RecoveryState, type ResilienceCallStatus, type SATClaims, type SDKCredential, type SDKLogger, type SDKWarning, ScreenShareAlreadyActiveError, type ScreenShareOptions, type ScreenShareStatus, type SelectDeviceOptions, SelfCapabilities, SelfParticipant, type SessionDiagnostics, type SessionState, SignalWire, type SignalWireOptions, StaticCredentialProvider, type Storage, type StoredDevicePreference, type TextMessage, TokenRefreshError, type TransferOptions, UnexpectedError, User, type UserPresence, VertoPongError, type VideoPosition, type WebRTCApiProvider, WebRTCCall, type WebRTCMediaDevices, type WebSocketAdapter, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
+ //# sourceMappingURL=index.d.cts.map
+\ No newline at end of file
+diff --git a/node_modules/@signalwire/js/dist/index.d.mts b/node_modules/@signalwire/js/dist/index.d.mts
+index 0ca7da8..144794d 100644
+--- a/node_modules/@signalwire/js/dist/index.d.mts
++++ b/node_modules/@signalwire/js/dist/index.d.mts
+@@ -1233,6 +1233,21 @@ declare class AuxiliaryLegCancelledError extends Error {
+   readonly leg: RTCPeerConnectionPropose;
+   constructor(leg: RTCPeerConnectionPropose);
+ }
++/**
++ * ICE gathering for a call's first offer or answer ended without a single
++ * candidate, as when the device has no usable network, so there is nothing the
++ * far end could connect to. Fatal for the main leg: the SDP is never sent, and
++ * waiting would stall the call forever.
++ */
++declare class IceGatheringError extends Error {
++  /** Whether the SDP was an `'offer'` (outbound) or an `'answer'` (inbound). */
++  readonly sdpType: RTCSdpType;
++  /** How gathering ended: `'complete'` or `'timeout'`. */
++  readonly gatheringState: string;
++  constructor(/** Whether the SDP was an `'offer'` (outbound) or an `'answer'` (inbound). */
++  sdpType: RTCSdpType, /** How gathering ended: `'complete'` or `'timeout'`. */
++  gatheringState: string);
++}
+ declare class MediaTrackError extends Error {
+   operation: string;
+   kind: string;
+@@ -2420,6 +2435,9 @@ interface CallState {
+   readonly raiseHandPriority: boolean;
+   readonly locked$: Observable<boolean>;
+   readonly locked: boolean;
++  /** Whether the call is on hold (see {@link Call.hold}). */
++  readonly held$: Observable<boolean>;
++  readonly held: boolean;
+   readonly meta$: Observable<Record<string, unknown>>;
+   readonly meta: Record<string, unknown>;
+   readonly participants$: Observable<CallParticipant[]>;
+@@ -2483,6 +2501,8 @@ interface Call extends CallState {
+   subscribe(eventType: string): Observable<Record<string, unknown>>;
+   hangup(): Promise<void>;
+   toggleLock(): Promise<void>;
++  hold(): Promise<void>;
++  unhold(): Promise<void>;
+   toggleHold(): Promise<void>;
+   setLayout(layout: string, positions: Record<string, VideoPosition>): Promise<void>;
+   startRecording(): Promise<void>;
+@@ -3223,6 +3243,8 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private _connectionState$;
+   private _signalingState$;
+   private _iceGatheringState$;
++  /** Each paused sender's encoding `active` flags from before the pause. */
++  private _pausedEncodings;
+   private _errors$;
+   private _iceCandidates$;
+   /**
+@@ -3239,6 +3261,15 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private _localAudioPipeline;
+   constructor(options?: RTCPeerConnectionControllerOptionsPartial, remoteSessionDescription?: string, deviceController?: DeviceController);
+   private get iceGatheringController();
++  /**
++   * Gathering for the first offer or answer ended without a single candidate,
++   * as when the device found no network at all. That SDP is never sent (see
++   * {@link shouldEmitLocalDescription}), and nothing else would end the call:
++   * an answered inbound call stayed ringing for the caller, and a dial waited
++   * out the create timeout. Report it instead, so the call fails and sends its
++   * bye. A later renegotiation is left to call recovery.
++   */
++  private failFirstExchangeWithoutCandidates;
+   private get shouldEmitLocalDescription();
+   private removeConnectionTimer;
+   setMemberId(memberId: string | null): void;
+@@ -3382,6 +3413,16 @@ declare class RTCPeerConnectionController extends Destroyable {
+   private getUserMedia;
+   private getDisplayMedia;
+   private setupRemoteTracks;
++  /**
++   * Stop or restart RTP on every sender of this connection, without renegotiating.
++   *
++   * Used for hold: `verto.modify` hold stops the server's media to the call, but
++   * not ours. Clearing `RTCRtpEncodingParameters.active` stops the packets;
++   * `replaceTrack(null)` is not enough, because an audio sender with no track
++   * still sends silence. Each encoding's own `active` flag is restored on
++   * resume, so an encoding that was off before the pause stays off.
++   */
++  setSendingPaused(paused: boolean): Promise<void>;
+   restoreTrackSender(kind: 'audio' | 'video' | 'both'): Promise<void>;
+   private restoreRawAudioInputForPipeline;
+   /**
+@@ -3634,7 +3675,11 @@ declare class WebRTCCall extends Destroyable implements CallManager, Call {
+   private _lastMergedStatus;
+   private _answered$;
+   private _answerMediaOptions?;
+-  private _holdState;
++  private _held$;
++  /** Hold requests run one at a time, in order, each from the state the last one left. */
++  private _holdQueue;
++  /** When the call last came off hold, for the recovery grace period. */
++  private _holdReleasedAt?;
+   private _userVariables$;
+   private _statsMonitor?;
+   private _recoveryManager?;
+@@ -3686,11 +3731,33 @@ declare class WebRTCCall extends Destroyable implements CallManager, Call {
+   /** Toggles the call lock state, preventing or allowing new participants from joining. */
+   toggleLock(): Promise<void>;
+   /**
+-   * Toggles the hold state of the call (pauses/resumes local media transmission).
++   * Puts the call on hold: the server stops its media to the call, and the
++   * call stops sending local media. Resolves at once if the call is already held.
+    *
+    * Distinct from {@link Participant.toggleMute} which mutes individual tracks.
+    */
++  hold(): Promise<void>;
++  /** Takes the call off hold and resumes local media. Resolves at once if the call is not held. */
++  unhold(): Promise<void>;
++  /**
++   * Toggles the hold state of the call (see {@link hold} and {@link unhold}).
++   *
++   * A toggle made while another hold change is in flight applies after it, to
++   * the state it left.
++   */
+   toggleHold(): Promise<void>;
++  /** Whether the call is on hold. Emits the current state on subscribe. */
++  get held$(): Observable<boolean>;
++  /** Whether the call is on hold. */
++  get held(): boolean;
++  /**
++   * A held call receives no media by design, so the stats monitor reports
++   * `no_inbound_audio` for it. That is not a broken connection, and an ICE
++   * restart cannot fix it. The same holds just after unhold, until the
++   * server's media resumes.
++   */
++  private isSilenceExpectedFromHold;
++  private queueHoldChange;
+   /** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link recording$}. */
+   startRecording(): Promise<void>;
+   /** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link streaming$}. */
+@@ -4296,6 +4363,12 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+   /** Sticky flag — once true, stays true for the session lifetime. */
+   private _wasClientBound;
+   private _lastFreshConnectReminted;
++  /**
++   * When the token the server holds for this session expires (ms since epoch),
++   * if known: from the connect result, or as stated by the caller of
++   * `reauthenticate()`. A session whose token has expired cannot be resumed.
++   */
++  private _sessionTokenExpiresAt?;
+   private _remintBeforeNextFreshConnect;
+   private _userInfo$;
+   private _calls$;
+@@ -4534,7 +4607,10 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+   protected updateAuthState(authorization_state: string): Promise<void>;
+   reauthenticate(token: string, dpopToken?: string, options?: {
+     clientBound?: boolean;
++    expiresAt?: number;
+   }): Promise<void>;
++  /** Whether the token the server holds for this session is known to have expired. */
++  private get sessionTokenExpired();
+   private authenticate;
+   disconnect(): Promise<void>;
+   private createInboundCall;
+@@ -4549,6 +4625,17 @@ declare class ClientSessionManager extends Destroyable implements SessionState {
+    */
+   private handleVertoAttach;
+   createOutboundCall(destination: string | Address, options?: CallOptions): Promise<Call>;
++  /**
++   * End a dial that failed before `dial()` could hand the call to the app.
++   *
++   * The call is not in `calls$` and `dial()` rejects without it, so nothing
++   * else can hang it up. Once the invite has gone out the server holds a leg
++   * for it, and destroying the call locally would leave that leg up and
++   * billed. So hang up: the bye releases the leg, then the call is destroyed.
++   * `hangup()` sends no bye when no invite went out. A fatal call error has
++   * already sent its own bye and destroyed the call.
++   */
++  private endFailedOutboundCall;
+   private createCall;
+   destroy(): void;
+ }
+@@ -5471,5 +5558,5 @@ declare const version: string;
+  */
+ declare const ready: boolean;
+ //#endregion
+-export { Address, type AddressHistory, type AudioConstraintsEvent, type AuthenticateContext, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, type Call, type CallAddress, type CallCapabilitiesState, CallCreateError, type CallDiagnosticSummary, type CallDirection, type CallError, type CallErrorKind, type NetworkIssue as CallNetworkIssue, type NetworkIssue, type NetworkMetrics as CallNetworkMetrics, type NetworkMetrics, CallNotReadyError, type CallOptions, type CallParticipant, type CallSelfParticipant, type CallState, type CallStatus, type Capability, ClientPreferences, CollectionFetchError, type ConstraintFallbackEvent, type CredentialNoRefreshHandlerWarning, type CredentialProvider, type CredentialRefreshFallbackReason, type CredentialRefreshFallbackWarning, DPoPInitError, type DebugOptions, type DeviceController, type DeviceRecoveryEvent, DeviceTokenError, type DiagnosticEvent, type DialOptions, type Directory, EmbedTokenCredentialProvider, type ExecuteMethod, InvalidCredentialsError, type JSONRPCErrorResponse, type JSONRPCRequest, type JSONRPCResponse, type JSONRPCSuccessResponse, type LayoutLayer, type LogLevel, MediaAccessError, type MediaDirection, type MediaDirections, type MediaOptions, type MediaParamsEvent, MediaTrackError, type MemberCapabilities, MessageParseError, type NodeSocketAdapter, type OnOffCapability, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, type PendingRPCOptions, type PermissionResult, type PlatformCapabilities, PreflightError, type PreflightOptions, type PreflightResult, type QualityLevel, RecoveryError, type RecoveryEvent, type RecoveryState, type ResilienceCallStatus, type SATClaims, type SDKCredential, type SDKLogger, type SDKWarning, ScreenShareAlreadyActiveError, type ScreenShareOptions, type ScreenShareStatus, type SelectDeviceOptions, SelfCapabilities, SelfParticipant, type SessionDiagnostics, type SessionState, SignalWire, type SignalWireOptions, StaticCredentialProvider, type Storage, type StoredDevicePreference, type TextMessage, TokenRefreshError, type TransferOptions, UnexpectedError, User, type UserPresence, VertoPongError, type VideoPosition, type WebRTCApiProvider, WebRTCCall, type WebRTCMediaDevices, type WebSocketAdapter, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
++export { Address, type AddressHistory, type AudioConstraintsEvent, type AuthenticateContext, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, type Call, type CallAddress, type CallCapabilitiesState, CallCreateError, type CallDiagnosticSummary, type CallDirection, type CallError, type CallErrorKind, type NetworkIssue as CallNetworkIssue, type NetworkIssue, type NetworkMetrics as CallNetworkMetrics, type NetworkMetrics, CallNotReadyError, type CallOptions, type CallParticipant, type CallSelfParticipant, type CallState, type CallStatus, type Capability, ClientPreferences, CollectionFetchError, type ConstraintFallbackEvent, type CredentialNoRefreshHandlerWarning, type CredentialProvider, type CredentialRefreshFallbackReason, type CredentialRefreshFallbackWarning, DPoPInitError, type DebugOptions, type DeviceController, type DeviceRecoveryEvent, DeviceTokenError, type DiagnosticEvent, type DialOptions, type Directory, EmbedTokenCredentialProvider, type ExecuteMethod, IceGatheringError, InvalidCredentialsError, type JSONRPCErrorResponse, type JSONRPCRequest, type JSONRPCResponse, type JSONRPCSuccessResponse, type LayoutLayer, type LogLevel, MediaAccessError, type MediaDirection, type MediaDirections, type MediaOptions, type MediaParamsEvent, MediaTrackError, type MemberCapabilities, MessageParseError, type NodeSocketAdapter, type OnOffCapability, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, type PendingRPCOptions, type PermissionResult, type PlatformCapabilities, PreflightError, type PreflightOptions, type PreflightResult, type QualityLevel, RecoveryError, type RecoveryEvent, type RecoveryState, type ResilienceCallStatus, type SATClaims, type SDKCredential, type SDKLogger, type SDKWarning, ScreenShareAlreadyActiveError, type ScreenShareOptions, type ScreenShareStatus, type SelectDeviceOptions, SelfCapabilities, SelfParticipant, type SessionDiagnostics, type SessionState, SignalWire, type SignalWireOptions, StaticCredentialProvider, type Storage, type StoredDevicePreference, type TextMessage, TokenRefreshError, type TransferOptions, UnexpectedError, User, type UserPresence, VertoPongError, type VideoPosition, type WebRTCApiProvider, WebRTCCall, type WebRTCMediaDevices, type WebSocketAdapter, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
+ //# sourceMappingURL=index.d.mts.map
+\ No newline at end of file
+diff --git a/node_modules/@signalwire/js/dist/index.mjs b/node_modules/@signalwire/js/dist/index.mjs
+index 911a321..a32ada2 100644
+--- a/node_modules/@signalwire/js/dist/index.mjs
++++ b/node_modules/@signalwire/js/dist/index.mjs
+@@ -1,4 +1,4 @@
+-import { $ as CREDENTIAL_REFRESH_BUFFER_MS, $t as ICE_GATHERING_COMPLETE_TIMEOUT_MS, A as RPCTimeoutError, At as DEFAULT_REFRESH_DEVICES_ON_VISIBLE, B as TransportConnectionError, Bt as DEFAULT_STATS_RTT_SPIKE_MULTIPLIER, C as JSONRPCError, Ct as DEFAULT_MAX_RECOVERY_ATTEMPTS, D as OverconstrainedFallbackError, Dt as DEFAULT_RECONNECT_DELAY_MIN_MS, E as MessageParseError, Et as DEFAULT_RECONNECT_DELAY_MAX_MS, F as SerializationError, Ft as DEFAULT_STATS_HISTORY_SIZE, G as VertoInviteHandlerError, Gt as DEVICE_STORAGE_KEY_AUDIO_INPUT, H as UnimplementedError, Ht as DEFAULT_STEREO_MAX_AVERAGE_BITRATE, I as StorageNotAvailableError, It as DEFAULT_STATS_JITTER_SPIKE_MULTIPLIER, J as WebSocketTimeoutError, Jt as DEVICE_TOKEN_DEFAULT_EXPIRE_IN, K as VertoPongError, Kt as DEVICE_STORAGE_KEY_AUDIO_OUTPUT, L as StorageReadError, Lt as DEFAULT_STATS_NO_PACKET_THRESHOLD_MS, M as RequestError, Mt as DEFAULT_REINVITE_MAX_ATTEMPTS, N as RequestTimeoutError, Nt as DEFAULT_REINVITE_TIMEOUT_MS, O as ParticipantNotReadyError, Ot as DEFAULT_RECOVERY_COOLDOWN_MS, P as ScreenShareAlreadyActiveError, Pt as DEFAULT_STATS_BASELINE_SAMPLES, Q as CREDENTIAL_EXPIRY_SKEW_MS, Qt as DEVICE_TOKEN_REFRESH_RETRY_BASE_MS, R as StorageWriteError, Rt as DEFAULT_STATS_PACKET_LOSS_THRESHOLD, S as InvalidParams, St as DEFAULT_KEYFRAME_MAX_BURST$1, T as MediaTrackError, Tt as DEFAULT_RECONNECT_CALLS_TIMEOUT_MS, U as ValidationError, Ut as DEFAULT_SYNC_DEVICES_TO_ACTIVE_CALLS, V as UnexpectedError, Vt as DEFAULT_STEREO_AUDIO, W as VertoAttachHandlerError, Wt as DEVICE_REFRESH_ENDPOINT, X as AUDIO_LEVEL_POLL_INTERVAL_MS, Xt as DEVICE_TOKEN_REFRESH_BUFFER_MS, Y as isMediaDeviceInUse, Yt as DEVICE_TOKEN_ENDPOINT, Z as CREDENTIAL_ACTIVATE_TIMEOUT_MS, Zt as DEVICE_TOKEN_REFRESH_MAX_RETRIES, _ as DPoPInitError, _t as DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS, a as filterNull, an as RPC_ERROR_INVALID_PARAMS, at as DEFAULT_CALL_SIGNALING_TIMEOUT_MS, b as DeviceTokenError, bt as DEFAULT_KEYFRAME_BURST_WINDOW_MS$1, c as setLogLevel, cn as SERVER_PING_PROBE_TIMEOUT_MS, ct as DEFAULT_DEGRADATION_BITRATE_THRESHOLD_KBPS, d as AuxiliaryLegCancelledError, dn as VAD_THRESHOLD, dt as DEFAULT_DEVICE_POLLING_INTERVAL_MS, en as INVITE_VERSION, et as CREDENTIAL_REFRESH_MAX_DELAY_MS, f as AuxiliaryLegTimeoutError, ft as DEFAULT_ENABLE_AUTO_DEGRADATION, g as ConversationError, gt as DEFAULT_ICE_CANDIDATE_TIMEOUT_MS, h as CollectionFetchError, ht as DEFAULT_ENABLE_SERVER_HANGUP_INTERCEPTION, i as getValueFrom, in as RPC_ERROR_AUTHENTICATION_FAILED, it as DEFAULT_AUX_LEG_CONNECT_TIMEOUT_MS, j as RecoveryError, jt as DEFAULT_REINVITE_DEBOUNCE_TIME_MS, k as PreflightError, kt as DEFAULT_RECOVERY_DEBOUNCE_TIME_MS, l as setLogger, ln as SERVER_PING_TIMEOUT_MS, lt as DEFAULT_DEGRADATION_RECOVERY_THRESHOLD_KBPS, m as CallNotReadyError, mt as DEFAULT_ENABLE_RELAY_FALLBACK, n as filterAs, nn as PEER_CONNECTION_RECOVERY_WAIT_MS, nt as CREDENTIAL_REFRESH_RETRY_BASE_MS, o as getLogger, on as RPC_ERROR_REQUESTER_VALIDATION_FAILED, ot as DEFAULT_CHECK_CONNECTION_ON_VISIBLE, p as CallCreateError, pt as DEFAULT_ENABLE_NETWORK_CHANGE_DETECTION, q as WebSocketConnectionError, qt as DEVICE_STORAGE_KEY_VIDEO_INPUT, rn as PREFERENCES_STORAGE_KEY, rt as DEFAULT_AUTO_MUTE_VIDEO_ON_HIDDEN, s as setDebugOptions, sn as SAT_REFRESH_SCOPE, st as DEFAULT_CONNECTION_TIMEOUT_MS, t as throwOnRPCError, tn as PEER_CONNECTION_RECOVERY_POLL_MS, tt as CREDENTIAL_REFRESH_MAX_RETRIES, u as AuthStateHandlerError, un as VAD_HOLD_MS, ut as DEFAULT_DEVICE_DEBOUNCE_TIME_MS, v as DependencyError, vt as DEFAULT_ICE_GATHERING_TIMEOUT_MS, w as MediaAccessError, wt as DEFAULT_PERSIST_DEVICE_SELECTION, x as InvalidCredentialsError, xt as DEFAULT_KEYFRAME_COOLDOWN_MS$1, y as DeserializationError, yt as DEFAULT_ICE_RESTART_TIMEOUT_MS$1, z as TokenRefreshError, zt as DEFAULT_STATS_POLLING_INTERVAL_MS } from "./operators-CTNnvDcG.mjs";
++import { $ as CREDENTIAL_EXPIRY_SKEW_MS, $t as DEVICE_TOKEN_REFRESH_RETRY_BASE_MS, A as PreflightError, At as DEFAULT_RECOVERY_DEBOUNCE_TIME_MS, B as TokenRefreshError, Bt as DEFAULT_STATS_POLLING_INTERVAL_MS, C as InvalidParams, Ct as DEFAULT_KEYFRAME_MAX_BURST$1, D as MessageParseError, Dt as DEFAULT_RECONNECT_DELAY_MAX_MS, E as MediaTrackError, Et as DEFAULT_RECONNECT_CALLS_TIMEOUT_MS, F as ScreenShareAlreadyActiveError, Ft as DEFAULT_STATS_BASELINE_SAMPLES, G as VertoAttachHandlerError, Gt as DEVICE_REFRESH_ENDPOINT, H as UnexpectedError, Ht as DEFAULT_STEREO_AUDIO, I as SerializationError, It as DEFAULT_STATS_HISTORY_SIZE, J as WebSocketConnectionError, Jt as DEVICE_STORAGE_KEY_VIDEO_INPUT, K as VertoInviteHandlerError, Kt as DEVICE_STORAGE_KEY_AUDIO_INPUT, L as StorageNotAvailableError, Lt as DEFAULT_STATS_JITTER_SPIKE_MULTIPLIER, M as RecoveryError, Mt as DEFAULT_REINVITE_DEBOUNCE_TIME_MS, N as RequestError, Nt as DEFAULT_REINVITE_MAX_ATTEMPTS, O as OverconstrainedFallbackError, Ot as DEFAULT_RECONNECT_DELAY_MIN_MS, P as RequestTimeoutError, Pt as DEFAULT_REINVITE_TIMEOUT_MS, Q as CREDENTIAL_ACTIVATE_TIMEOUT_MS, Qt as DEVICE_TOKEN_REFRESH_MAX_RETRIES, R as StorageReadError, Rt as DEFAULT_STATS_NO_PACKET_THRESHOLD_MS, S as InvalidCredentialsError, St as DEFAULT_KEYFRAME_COOLDOWN_MS$1, T as MediaAccessError, Tt as DEFAULT_PERSIST_DEVICE_SELECTION, U as UnimplementedError, Ut as DEFAULT_STEREO_MAX_AVERAGE_BITRATE, V as TransportConnectionError, Vt as DEFAULT_STATS_RTT_SPIKE_MULTIPLIER, W as ValidationError, Wt as DEFAULT_SYNC_DEVICES_TO_ACTIVE_CALLS, X as isMediaDeviceInUse, Xt as DEVICE_TOKEN_ENDPOINT, Y as WebSocketTimeoutError, Yt as DEVICE_TOKEN_DEFAULT_EXPIRE_IN, Z as AUDIO_LEVEL_POLL_INTERVAL_MS, Zt as DEVICE_TOKEN_REFRESH_BUFFER_MS, _ as DPoPInitError, _t as DEFAULT_ICE_CANDIDATE_TIMEOUT_MS, a as filterNull, an as PREFERENCES_STORAGE_KEY, at as DEFAULT_AUX_LEG_CONNECT_TIMEOUT_MS, b as DeviceTokenError, bt as DEFAULT_ICE_RESTART_TIMEOUT_MS$1, c as setLogLevel, cn as RPC_ERROR_REQUESTER_VALIDATION_FAILED, ct as DEFAULT_CONNECTION_TIMEOUT_MS, d as AuxiliaryLegCancelledError, dn as SERVER_PING_TIMEOUT_MS, dt as DEFAULT_DEVICE_DEBOUNCE_TIME_MS, en as HOLD_RELEASE_GRACE_MS, et as CREDENTIAL_REFRESH_BUFFER_MS, f as AuxiliaryLegTimeoutError, fn as VAD_HOLD_MS, ft as DEFAULT_DEVICE_POLLING_INTERVAL_MS, g as ConversationError, gt as DEFAULT_ENABLE_SERVER_HANGUP_INTERCEPTION, h as CollectionFetchError, ht as DEFAULT_ENABLE_RELAY_FALLBACK, i as getValueFrom, in as PEER_CONNECTION_RECOVERY_WAIT_MS, it as DEFAULT_AUTO_MUTE_VIDEO_ON_HIDDEN, j as RPCTimeoutError, jt as DEFAULT_REFRESH_DEVICES_ON_VISIBLE, k as ParticipantNotReadyError, kt as DEFAULT_RECOVERY_COOLDOWN_MS, l as setLogger, ln as SAT_REFRESH_SCOPE, lt as DEFAULT_DEGRADATION_BITRATE_THRESHOLD_KBPS, m as CallNotReadyError, mt as DEFAULT_ENABLE_NETWORK_CHANGE_DETECTION, n as filterAs, nn as INVITE_VERSION, nt as CREDENTIAL_REFRESH_MAX_RETRIES, o as getLogger, on as RPC_ERROR_AUTHENTICATION_FAILED, ot as DEFAULT_CALL_SIGNALING_TIMEOUT_MS, p as CallCreateError, pn as VAD_THRESHOLD, pt as DEFAULT_ENABLE_AUTO_DEGRADATION, q as VertoPongError, qt as DEVICE_STORAGE_KEY_AUDIO_OUTPUT, rn as PEER_CONNECTION_RECOVERY_POLL_MS, rt as CREDENTIAL_REFRESH_RETRY_BASE_MS, s as setDebugOptions, sn as RPC_ERROR_INVALID_PARAMS, st as DEFAULT_CHECK_CONNECTION_ON_VISIBLE, t as throwOnRPCError, tn as ICE_GATHERING_COMPLETE_TIMEOUT_MS, tt as CREDENTIAL_REFRESH_MAX_DELAY_MS, u as AuthStateHandlerError, un as SERVER_PING_PROBE_TIMEOUT_MS, ut as DEFAULT_DEGRADATION_RECOVERY_THRESHOLD_KBPS, v as DependencyError, vt as DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS, w as JSONRPCError, wt as DEFAULT_MAX_RECOVERY_ATTEMPTS, x as IceGatheringError, xt as DEFAULT_KEYFRAME_BURST_WINDOW_MS$1, y as DeserializationError, yt as DEFAULT_ICE_GATHERING_TIMEOUT_MS, z as StorageWriteError, zt as DEFAULT_STATS_PACKET_LOSS_THRESHOLD } from "./operators-CTNnvDcG.mjs";
+ import { jwtDecode } from "jwt-decode";
+ import { BehaviorSubject, EMPTY, EmptyError, NEVER, Observable, ReplaySubject, Subject, TimeoutError, animationFrameScheduler, asapScheduler, auditTime, catchError, combineLatest, debounceTime, defer, distinctUntilChanged, exhaustMap, filter, first, firstValueFrom, from, interval, lastValueFrom, map, merge, mergeMap, observeOn, of, pipe, race, scan, share, shareReplay, skip, skipWhile, startWith, switchMap, take, takeUntil, tap, throwError, timeout, timer, toArray, withLatestFrom } from "rxjs";
+ import { v4 } from "uuid";
+@@ -4550,18 +4550,21 @@ var ICEGatheringController = class extends Destroyable {
+ 		this.onicecandidateHandler = (event) => {
+ 			logger$21.debug("[ICEGatheringController] ICE candidate event received:", event.candidate);
+ 			this.removeTimer("iceCandidateTimer");
+-			if (event.candidate) this.iceCandidateTimer = setTimeout(() => {
+-				if (this.peerConnection.iceGatheringState !== "complete") {
+-					logger$21.warn("[ICEGatheringController] ICE candidate timeout, using current SDP");
+-					this.handleICECandidateTimeout();
+-				}
+-			}, this.iceCandidateTimeout);
+-			else {
++			if (event.candidate) {
++				this._candidateCount += 1;
++				this.iceCandidateTimer = setTimeout(() => {
++					if (this.peerConnection.iceGatheringState !== "complete") {
++						logger$21.warn("[ICEGatheringController] ICE candidate timeout, using current SDP");
++						this.handleICECandidateTimeout();
++					}
++				}, this.iceCandidateTimeout);
++			} else {
+ 				logger$21.debug("[ICEGatheringController] ICE gathering completed: null candidate received");
+ 				this.removeTimer("iceGatheringTimer");
+ 				this.handleICEGatheringComplete();
+ 			}
+ 		};
++		this._candidateCount = 0;
+ 		this._iceCandidatesState = this.createBehaviorSubject({
+ 			state: "new",
+ 			validSDP: false
+@@ -4572,6 +4575,7 @@ var ICEGatheringController = class extends Destroyable {
+ 		this.setupEventListeners();
+ 		this.subscribeTo(this.peerConnectionControllerNegotiating$.pipe(filter((isNegotiating) => isNegotiating)), (isNegotiating) => {
+ 			if (isNegotiating) {
++				this._candidateCount = 0;
+ 				this.setupEventListeners();
+ 				this.iceGatheringTimer = setTimeout(() => {
+ 					if (this.peerConnection.iceGatheringState !== "complete") {
+@@ -4595,6 +4599,10 @@ var ICEGatheringController = class extends Destroyable {
+ 		const sdp = this.peerConnection.localDescription?.sdp;
+ 		return isValidLocalDescription(sdp ?? "");
+ 	}
++	/** How many candidates were gathered since the current negotiation started. */
++	get candidateCount() {
++		return this._candidateCount;
++	}
+ 	get isRelayOnly() {
+ 		return this.relayOnly;
+ 	}
+@@ -4645,6 +4653,7 @@ var ICEGatheringController = class extends Destroyable {
+ 	restartICEGatheringWithRelayOnly() {
+ 		logger$21.debug("[ICEGatheringController] Restarting ICE gathering with relay-only candidates");
+ 		this.relayOnly = true;
++		this._candidateCount = 0;
+ 		this.peerConnection.setConfiguration({
+ 			...this.peerConnection.getConfiguration(),
+ 			iceTransportPolicy: "relay"
+@@ -5308,8 +5317,9 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		this.options = options;
+ 		this.firstSDPExchangeCompleted = false;
+ 		this.negotiationNeeded$ = this.createSubject();
+-		this.localDescription$ = defer(() => from(this.init())).pipe(switchMap(() => this.iceGatheringController.iceCandidatesState$.pipe(filter((iceCandidateState) => !["new", "gathering"].includes(iceCandidateState)), tap(() => {
++		this.localDescription$ = defer(() => from(this.init())).pipe(switchMap(() => this.iceGatheringController.iceCandidatesState$.pipe(filter((iceCandidateState) => !["new", "gathering"].includes(iceCandidateState)), tap((iceCandidateState) => {
+ 			this.negotiationEnded();
++			this.failFirstExchangeWithoutCandidates(iceCandidateState);
+ 		}), filter(() => this.shouldEmitLocalDescription), map(() => this.peerConnection?.localDescription), filterNull(), tap((desc) => {
+ 			if (desc.type === "answer") this._type = "offer";
+ 		}))), shareReplay(1), takeUntil(this.destroyed$));
+@@ -5375,6 +5385,7 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		this._connectionState$ = this.createReplaySubject(1);
+ 		this._signalingState$ = this.createReplaySubject(1);
+ 		this._iceGatheringState$ = this.createReplaySubject(1);
++		this._pausedEncodings = /* @__PURE__ */ new Map();
+ 		this._errors$ = this.createReplaySubject(1);
+ 		this._iceCandidates$ = this.createReplaySubject(1);
+ 		this._localMediaSettled$ = this.createReplaySubject(1);
+@@ -5419,6 +5430,21 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		if (!this._iceGatheringController) throw new DependencyError("ICEGatheringController is not initialized");
+ 		return this._iceGatheringController;
+ 	}
++	/**
++	* Gathering for the first offer or answer ended without a single candidate,
++	* as when the device found no network at all. That SDP is never sent (see
++	* {@link shouldEmitLocalDescription}), and nothing else would end the call:
++	* an answered inbound call stayed ringing for the caller, and a dial waited
++	* out the create timeout. Report it instead, so the call fails and sends its
++	* bye. A later renegotiation is left to call recovery.
++	*/
++	failFirstExchangeWithoutCandidates(iceCandidateState) {
++		const localDescription = this.peerConnection?.localDescription;
++		if (this.firstSDPExchangeCompleted || !localDescription || this.iceGatheringController.candidateCount > 0 || localDescription.sdp.includes("a=candidate:")) return;
++		const error = new IceGatheringError(localDescription.type, iceCandidateState);
++		logger$17.error("[RTCPeerConnectionController] ICE gathering produced no candidates", { sdp: localDescription.sdp });
++		this._errors$.next(error);
++	}
+ 	get shouldEmitLocalDescription() {
+ 		if (!this.peerConnection) return false;
+ 		const { localDescription, signalingState } = this.peerConnection;
+@@ -6041,6 +6067,39 @@ var RTCPeerConnectionController = class extends Destroyable {
+ 		};
+ 		await this.transceiverController?.setupRemoteTransceivers(this.type);
+ 	}
++	/**
++	* Stop or restart RTP on every sender of this connection, without renegotiating.
++	*
++	* Used for hold: `verto.modify` hold stops the server's media to the call, but
++	* not ours. Clearing `RTCRtpEncodingParameters.active` stops the packets;
++	* `replaceTrack(null)` is not enough, because an audio sender with no track
++	* still sends silence. Each encoding's own `active` flag is restored on
++	* resume, so an encoding that was off before the pause stays off.
++	*/
++	async setSendingPaused(paused) {
++		const senders = this.peerConnection?.getSenders() ?? [];
++		for (const sender of senders) try {
++			const parameters = sender.getParameters();
++			if (!parameters.encodings.length) continue;
++			if (paused) {
++				if (!this._pausedEncodings.has(sender)) this._pausedEncodings.set(sender, parameters.encodings.map((encoding) => encoding.active !== false));
++				parameters.encodings = parameters.encodings.map((encoding) => ({
++					...encoding,
++					active: false
++				}));
++			} else {
++				const previous = this._pausedEncodings.get(sender);
++				parameters.encodings = parameters.encodings.map((encoding, index) => ({
++					...encoding,
++					active: previous?.[index] ?? true
++				}));
++				this._pausedEncodings.delete(sender);
++			}
++			await sender.setParameters(parameters);
++		} catch (error) {
++			logger$17.warn(`[RTCPeerConnectionController] Failed to ${paused ? "pause" : "resume"} a ${sender.track?.kind ?? "track-less"} sender:`, error);
++		}
++	}
+ 	async restoreTrackSender(kind) {
+ 		const audioCovered = kind === "audio" || kind === "both";
+ 		if (audioCovered && this._localAudioPipeline) await this.restoreRawAudioInputForPipeline();
+@@ -6458,6 +6517,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 		this._screenShareStatus$ = this.createBehaviorSubject("none");
+ 		this._rtcPeerConnectionsMap = /* @__PURE__ */ new Map();
+ 		this._lastVertoPings = /* @__PURE__ */ new Map();
++		this._mainInviteSent = false;
+ 		this._legErrors$ = this.createSubject();
+ 		this._nodeId$ = this.createBehaviorSubject(options.nodeId ?? null);
+ 		this.onError = options.onError;
+@@ -6477,6 +6537,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			logger$16.warn("[WebRTCManager] Call might already be disconnected, error sending Verto hold:", error);
+ 			throw error;
+ 		}
++		await this.mainPeerConnection.setSendingPaused(true);
+ 	}
+ 	async unhold() {
+ 		const vertoModifyMessage = VertoModify({
+@@ -6490,6 +6551,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			logger$16.warn("[WebRTCManager] Call might already be disconnected, error sending Verto unhold:", error);
+ 			throw error;
+ 		}
++		await this.mainPeerConnection.setSendingPaused(false);
+ 	}
+ 	get mediaDirections() {
+ 		return this.mainPeerConnection.mediaDirections;
+@@ -6886,6 +6948,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 	async sendLocalDescription(message, rtcPeerConnController) {
+ 		const vertoMethod = message.method;
+ 		const optionalsParams = this.getSendLocalSDPOptionalParams(rtcPeerConnController, message);
++		if (vertoMethod === "verto.invite" && rtcPeerConnController.isMainDevice) this._mainInviteSent = true;
+ 		try {
+ 			const response = await this.executeVerto(message, optionalsParams);
+ 			switch (vertoMethod) {
+@@ -6948,6 +7011,7 @@ var WebRTCVertoManager = class extends VertoManager {
+ 			rtcPeerConnController.setMemberId(memberId);
+ 			rtcPeerConnController.setNodeId(nodeId);
+ 			if (rtcPeerConnController.isMainDevice) {
++				this._mainInviteSent = true;
+ 				this._selfId$.next(memberId);
+ 				this._nodeId$.next(nodeId);
+ 				this.attachManager.attach(this.buildAttachableCall(callId, nodeId ?? void 0));
+@@ -7324,7 +7388,8 @@ var WebRTCVertoManager = class extends VertoManager {
+ 	async bye(cause) {
+ 		this.attachManager.detach(this.buildAttachableCall());
+ 		const rtcPeerConnController = this._rtcPeerConnectionsMap.get(this.webRtcCallSession.id);
+-		if (rtcPeerConnController) await this.executeVertoBye(rtcPeerConnController, cause);
++		const hasServerLeg = this.webRtcCallSession.direction === "inbound" || this._mainInviteSent;
++		if (rtcPeerConnController && hasServerLeg) await this.executeVertoBye(rtcPeerConnController, cause);
+ 	}
+ 	async sendDigits(dtmf) {
+ 		const vertoInfoMessage = VertoInfo({
+@@ -8264,7 +8329,8 @@ var WebRTCCall = class extends Destroyable {
+ 		this._errors$ = this.createReplaySubject(1);
+ 		this._lastMergedStatus = "new";
+ 		this._answered$ = this.createReplaySubject();
+-		this._holdState = false;
++		this._held$ = this.createBehaviorSubject(false);
++		this._holdQueue = Promise.resolve();
+ 		this._userVariables$ = this.createBehaviorSubject({ ...PreferencesContainer.instance.userVariables });
+ 		this._networkIssues$ = this.createBehaviorSubject([]);
+ 		this._networkMetrics$ = this.createBehaviorSubject([]);
+@@ -8384,14 +8450,69 @@ var WebRTCCall = class extends Destroyable {
+ 		await this.executeMethod(this.callSelf, method, {});
+ 	}
+ 	/**
+-	* Toggles the hold state of the call (pauses/resumes local media transmission).
++	* Puts the call on hold: the server stops its media to the call, and the
++	* call stops sending local media. Resolves at once if the call is already held.
+ 	*
+ 	* Distinct from {@link Participant.toggleMute} which mutes individual tracks.
+ 	*/
++	async hold() {
++		return this.queueHoldChange(() => true);
++	}
++	/** Takes the call off hold and resumes local media. Resolves at once if the call is not held. */
++	async unhold() {
++		return this.queueHoldChange(() => false);
++	}
++	/**
++	* Toggles the hold state of the call (see {@link hold} and {@link unhold}).
++	*
++	* A toggle made while another hold change is in flight applies after it, to
++	* the state it left.
++	*/
+ 	async toggleHold() {
+-		if (this._holdState) await this.vertoManager.unhold();
+-		else await this.vertoManager.hold();
+-		this._holdState = !this._holdState;
++		return this.queueHoldChange((held) => !held);
++	}
++	/** Whether the call is on hold. Emits the current state on subscribe. */
++	get held$() {
++		return this.deferEmission(this._held$.asObservable()).pipe(takeUntil(this._destroyed$));
++	}
++	/** Whether the call is on hold. */
++	get held() {
++		return this._held$.value;
++	}
++	/**
++	* A held call receives no media by design, so the stats monitor reports
++	* `no_inbound_audio` for it. That is not a broken connection, and an ICE
++	* restart cannot fix it. The same holds just after unhold, until the
++	* server's media resumes.
++	*/
++	isSilenceExpectedFromHold() {
++		return this._held$.value || this._holdReleasedAt !== void 0 && Date.now() - this._holdReleasedAt < HOLD_RELEASE_GRACE_MS;
++	}
++	/**
++	* [@signalwire/react-native patch: hold compat] The React Native wrapper's
++	* CallHoldState (packages/react/src/callHold.ts) reads the hold state from
++	* `_holdState`, and looks for `_pauseLocalMediaForHold` to tell whether the
++	* SDK stops local media on hold (the wrapper's earlier rc.5 patch). Both now
++	* come from hold()/unhold()/held$ (signalwire-typescript-web #143).
++	*/
++	get _holdState() {
++		return this._held$.value;
++	}
++	/** [@signalwire/react-native patch: hold compat] See `_holdState`. */
++	async _pauseLocalMediaForHold(paused) {
++		await this.vertoManager.mainPeerConnection.setSendingPaused(paused);
++	}
++	async queueHoldChange(target) {
++		const change = this._holdQueue.then(async () => {
++			const held = target(this._held$.value);
++			if (held === this._held$.value) return;
++			if (held) await this.vertoManager.hold();
++			else await this.vertoManager.unhold();
++			this._held$.next(held);
++			if (!held) this._holdReleasedAt = Date.now();
++		});
++		this._holdQueue = change.catch(() => void 0);
++		return change;
+ 	}
+ 	/** @throws {UnimplementedError} Not yet implemented. Status tracked via {@link recording$}. */
+ 	async startRecording() {
+@@ -8816,6 +8937,10 @@ var WebRTCCall = class extends Destroyable {
+ 				}
+ 			});
+ 			this.subscribeTo(this._statsMonitor.criticalIssue$, (issue) => {
++				if (issue.type === "no_inbound_audio" && this.isSilenceExpectedFromHold()) {
++					logger$12.debug("[Call] No inbound audio on a held call; not starting recovery");
++					return;
++				}
+ 				this._recoveryManager?.pushTrigger({
+ 					source: "stats",
+ 					detail: `${issue.type}: ${issue.severity}`,
+@@ -10218,6 +10343,7 @@ var ClientSessionManager = class extends Destroyable {
+ 				logger$9.error("[Session] Re-authentication RPC failed:", err);
+ 				throw err;
+ 			})));
++			this._sessionTokenExpiresAt = options?.expiresAt;
+ 			if (options?.clientBound) this._wasClientBound = true;
+ 			logger$9.debug("[Session] Re-authentication successful, updating stored auth state");
+ 		} catch (error) {
+@@ -10226,6 +10352,10 @@ var ClientSessionManager = class extends Destroyable {
+ 			throw error;
+ 		}
+ 	}
++	/** Whether the token the server holds for this session is known to have expired. */
++	get sessionTokenExpired() {
++		return this._sessionTokenExpiresAt !== void 0 && this._sessionTokenExpiresAt <= Date.now();
++	}
+ 	async authenticate() {
+ 		logger$9.debug("[Session] Starting authentication process");
+ 		this._lastFreshConnectReminted = false;
+@@ -10237,7 +10367,12 @@ var ClientSessionManager = class extends Destroyable {
+ 			protocol: persistedParams.protocol,
+ 			authStateLength: persistedParams.authorization_state?.length
+ 		});
+-		const hasReconnectState = persistedParams.authorization_state && persistedParams.protocol;
++		let hasReconnectState = Boolean(persistedParams.authorization_state && persistedParams.protocol);
++		if (hasReconnectState && this.sessionTokenExpired) {
++			logger$9.debug("[Session] Session token expired, connecting fresh instead of resuming");
++			await this.cleanupStoredConnectionParams();
++			hasReconnectState = false;
++		}
+ 		const storedToken = this.getCredential().token;
+ 		const isReconnect = hasReconnectState && storedToken;
+ 		let dpopToken;
+@@ -10288,6 +10423,8 @@ var ClientSessionManager = class extends Destroyable {
+ 		});
+ 		if (response.protocol) await this.transport.setProtocol(response.protocol);
+ 		this._authorization$.next(response.authorization);
++		const expiresAtSec = response.authorization.fabric_subscriber?.expires_at;
++		this._sessionTokenExpiresAt = expiresAtSec ? expiresAtSec * 1e3 : this.getCredential().expiry_at ?? void 0;
+ 		if (response.authorization.cnf?.jkt) this._wasClientBound = true;
+ 		this._iceServers$.next(response.ice_servers ?? []);
+ 		this.transport.setAuthenticated();
+@@ -10364,12 +10501,33 @@ var ClientSessionManager = class extends Destroyable {
+ 			return callSession;
+ 		} catch (error) {
+ 			logger$9.error("[Session] Error creating outbound call:", error);
+-			callSession?.destroy();
++			if (callSession) await this.endFailedOutboundCall(callSession);
+ 			const callError = new CallCreateError(error instanceof TimeoutError ? "Call create timeout" : "Call creation failed", error, "outbound");
+ 			this._errors$.next(callError);
+ 			throw callError;
+ 		}
+ 	}
++	/**
++	* End a dial that failed before `dial()` could hand the call to the app.
++	*
++	* The call is not in `calls$` and `dial()` rejects without it, so nothing
++	* else can hang it up. Once the invite has gone out the server holds a leg
++	* for it, and destroying the call locally would leave that leg up and
++	* billed. So hang up: the bye releases the leg, then the call is destroyed.
++	* `hangup()` sends no bye when no invite went out. A fatal call error has
++	* already sent its own bye and destroyed the call.
++	*/
++	async endFailedOutboundCall(callSession) {
++		if (callSession.status === "destroyed" || callSession.status === "failed") {
++			callSession.destroy();
++			return;
++		}
++		try {
++			await callSession.hangup();
++		} catch (error) {
++			logger$9.warn("[Session] Hanging up the failed outbound call failed:", error);
++		}
++	}
+ 	async createCall(options = {}) {
+ 		try {
+ 			const addressURI = getAddressSearchURI(options);
+@@ -12023,7 +12181,7 @@ var SignalWire = class extends Destroyable {
+ 	async reauthenticateLiveSession(credential) {
+ 		if (!this.isConnected || !this._clientSession.authenticated || !credential.token) return;
+ 		try {
+-			await this._clientSession.reauthenticate(credential.token);
++			await this._clientSession.reauthenticate(credential.token, void 0, { expiresAt: credential.expiry_at });
+ 			logger$1.info("[SignalWire] Session refreshed with new credentials.");
+ 		} catch (error) {
+ 			logger$1.error("[SignalWire] Failed to refresh session with new credentials:", error);
+@@ -12094,7 +12252,7 @@ var SignalWire = class extends Destroyable {
+ 				logger$1.warn("[SignalWire] Re-minted credential has no token; keeping the current one.");
+ 				return false;
+ 			}
+-			await this._clientSession.reauthenticate(newCredentials.token);
++			await this._clientSession.reauthenticate(newCredentials.token, void 0, { expiresAt: newCredentials.expiry_at });
+ 			this._deps.credential = newCredentials;
+ 			this.persistCredential(newCredentials);
+ 			if (newCredentials.expiry_at && provider.refresh) this._refreshCoordinator?.scheduleDeveloperRefresh(provider, newCredentials.expiry_at);
+@@ -13066,5 +13224,5 @@ const emitReadyEvent = () => {
+ emitReadyEvent();
+ 
+ //#endregion
+-export { Address, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, CallCreateError, CallNotReadyError, ClientPreferences, CollectionFetchError, DPoPInitError, DeviceTokenError, EmbedTokenCredentialProvider, InvalidCredentialsError, MediaAccessError, MediaTrackError, MessageParseError, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, PreflightError, RecoveryError, ScreenShareAlreadyActiveError, SelfCapabilities, SelfParticipant, SignalWire, StaticCredentialProvider, TokenRefreshError, UnexpectedError, User, VertoPongError, WebRTCCall, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
++export { Address, AuxiliaryLegCancelledError, AuxiliaryLegTimeoutError, CallCreateError, CallNotReadyError, ClientPreferences, CollectionFetchError, DPoPInitError, DeviceTokenError, EmbedTokenCredentialProvider, IceGatheringError, InvalidCredentialsError, MediaAccessError, MediaTrackError, MessageParseError, OverconstrainedFallbackError, Participant, ParticipantNotReadyError, PreflightError, RecoveryError, ScreenShareAlreadyActiveError, SelfCapabilities, SelfParticipant, SignalWire, StaticCredentialProvider, TokenRefreshError, UnexpectedError, User, VertoPongError, WebRTCCall, embeddableCall, getLogger, isSelfParticipant, ready, setDebugOptions, setLogLevel, setLogger, version };
+ //# sourceMappingURL=index.mjs.map
+\ No newline at end of file
+diff --git a/node_modules/@signalwire/js/dist/operators-CTNnvDcG.mjs b/node_modules/@signalwire/js/dist/operators-CTNnvDcG.mjs
+index 0a8ff37..7ff16af 100644
+--- a/node_modules/@signalwire/js/dist/operators-CTNnvDcG.mjs
++++ b/node_modules/@signalwire/js/dist/operators-CTNnvDcG.mjs
+@@ -126,6 +126,11 @@ const DEFAULT_RECOVERY_DEBOUNCE_TIME_MS = 2e3;
+ const DEFAULT_RECOVERY_COOLDOWN_MS = 1e4;
+ /** Grace period in ms before treating ICE 'disconnected' as a failure. */
+ const DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS = 3e3;
++/**
++* After unhold, how long missing inbound audio is not treated as a connectivity
++* failure, while the server's media to the call resumes.
++*/
++const HOLD_RELEASE_GRACE_MS = 5e3;
+ /** Timeout for a single ICE restart attempt in milliseconds. */
+ const DEFAULT_ICE_RESTART_TIMEOUT_MS = 5e3;
+ /** Maximum recovery attempts before emitting 'max_attempts_reached'. */
+@@ -419,6 +424,20 @@ var AuxiliaryLegCancelledError = class extends Error {
+ 		this.name = "AuxiliaryLegCancelledError";
+ 	}
+ };
++/**
++* ICE gathering for a call's first offer or answer ended without a single
++* candidate, as when the device has no usable network, so there is nothing the
++* far end could connect to. Fatal for the main leg: the SDP is never sent, and
++* waiting would stall the call forever.
++*/
++var IceGatheringError = class extends Error {
++	constructor(sdpType, gatheringState) {
++		super(`ICE gathering ended (${gatheringState}) with no candidates; the ${sdpType} cannot be sent`);
++		this.sdpType = sdpType;
++		this.gatheringState = gatheringState;
++		this.name = "IceGatheringError";
++	}
++};
+ var MediaTrackError = class extends Error {
+ 	constructor(operation, kind, originalError) {
+ 		super(`Media track ${operation} failed for ${kind}`, { cause: originalError instanceof Error ? originalError : void 0 });
+@@ -739,5 +758,5 @@ function throwOnRPCError() {
+ }
+ 
+ //#endregion
+-export { CREDENTIAL_REFRESH_BUFFER_MS as $, ICE_GATHERING_COMPLETE_TIMEOUT_MS as $t, RPCTimeoutError as A, DEFAULT_REFRESH_DEVICES_ON_VISIBLE as At, TransportConnectionError as B, DEFAULT_STATS_RTT_SPIKE_MULTIPLIER as Bt, JSONRPCError as C, DEFAULT_MAX_RECOVERY_ATTEMPTS as Ct, OverconstrainedFallbackError as D, DEFAULT_RECONNECT_DELAY_MIN_MS as Dt, MessageParseError as E, DEFAULT_RECONNECT_DELAY_MAX_MS as Et, SerializationError as F, DEFAULT_STATS_HISTORY_SIZE as Ft, VertoInviteHandlerError as G, DEVICE_STORAGE_KEY_AUDIO_INPUT as Gt, UnimplementedError as H, DEFAULT_STEREO_MAX_AVERAGE_BITRATE as Ht, StorageNotAvailableError as I, DEFAULT_STATS_JITTER_SPIKE_MULTIPLIER as It, WebSocketTimeoutError as J, DEVICE_TOKEN_DEFAULT_EXPIRE_IN as Jt, VertoPongError as K, DEVICE_STORAGE_KEY_AUDIO_OUTPUT as Kt, StorageReadError as L, DEFAULT_STATS_NO_PACKET_THRESHOLD_MS as Lt, RequestError as M, DEFAULT_REINVITE_MAX_ATTEMPTS as Mt, RequestTimeoutError as N, DEFAULT_REINVITE_TIMEOUT_MS as Nt, ParticipantNotReadyError as O, DEFAULT_RECOVERY_COOLDOWN_MS as Ot, ScreenShareAlreadyActiveError as P, DEFAULT_STATS_BASELINE_SAMPLES as Pt, CREDENTIAL_EXPIRY_SKEW_MS as Q, DEVICE_TOKEN_REFRESH_RETRY_BASE_MS as Qt, StorageWriteError as R, DEFAULT_STATS_PACKET_LOSS_THRESHOLD as Rt, InvalidParams as S, DEFAULT_KEYFRAME_MAX_BURST as St, MediaTrackError as T, DEFAULT_RECONNECT_CALLS_TIMEOUT_MS as Tt, ValidationError as U, DEFAULT_SYNC_DEVICES_TO_ACTIVE_CALLS as Ut, UnexpectedError as V, DEFAULT_STEREO_AUDIO as Vt, VertoAttachHandlerError as W, DEVICE_REFRESH_ENDPOINT as Wt, AUDIO_LEVEL_POLL_INTERVAL_MS as X, DEVICE_TOKEN_REFRESH_BUFFER_MS as Xt, isMediaDeviceInUse as Y, DEVICE_TOKEN_ENDPOINT as Yt, CREDENTIAL_ACTIVATE_TIMEOUT_MS as Z, DEVICE_TOKEN_REFRESH_MAX_RETRIES as Zt, DPoPInitError as _, DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS as _t, filterNull as a, RPC_ERROR_INVALID_PARAMS as an, DEFAULT_CALL_SIGNALING_TIMEOUT_MS as at, DeviceTokenError as b, DEFAULT_KEYFRAME_BURST_WINDOW_MS as bt, setLogLevel as c, SERVER_PING_PROBE_TIMEOUT_MS as cn, DEFAULT_DEGRADATION_BITRATE_THRESHOLD_KBPS as ct, AuxiliaryLegCancelledError as d, VAD_THRESHOLD as dn, DEFAULT_DEVICE_POLLING_INTERVAL_MS as dt, INVITE_VERSION as en, CREDENTIAL_REFRESH_MAX_DELAY_MS as et, AuxiliaryLegTimeoutError as f, DEFAULT_ENABLE_AUTO_DEGRADATION as ft, ConversationError as g, DEFAULT_ICE_CANDIDATE_TIMEOUT_MS as gt, CollectionFetchError as h, DEFAULT_ENABLE_SERVER_HANGUP_INTERCEPTION as ht, getValueFrom as i, RPC_ERROR_AUTHENTICATION_FAILED as in, DEFAULT_AUX_LEG_CONNECT_TIMEOUT_MS as it, RecoveryError as j, DEFAULT_REINVITE_DEBOUNCE_TIME_MS as jt, PreflightError as k, DEFAULT_RECOVERY_DEBOUNCE_TIME_MS as kt, setLogger as l, SERVER_PING_TIMEOUT_MS as ln, DEFAULT_DEGRADATION_RECOVERY_THRESHOLD_KBPS as lt, CallNotReadyError as m, DEFAULT_ENABLE_RELAY_FALLBACK as mt, filterAs as n, PEER_CONNECTION_RECOVERY_WAIT_MS as nn, CREDENTIAL_REFRESH_RETRY_BASE_MS as nt, getLogger as o, RPC_ERROR_REQUESTER_VALIDATION_FAILED as on, DEFAULT_CHECK_CONNECTION_ON_VISIBLE as ot, CallCreateError as p, DEFAULT_ENABLE_NETWORK_CHANGE_DETECTION as pt, WebSocketConnectionError as q, DEVICE_STORAGE_KEY_VIDEO_INPUT as qt, ifIsMap as r, PREFERENCES_STORAGE_KEY as rn, DEFAULT_AUTO_MUTE_VIDEO_ON_HIDDEN as rt, setDebugOptions as s, SAT_REFRESH_SCOPE as sn, DEFAULT_CONNECTION_TIMEOUT_MS as st, throwOnRPCError as t, PEER_CONNECTION_RECOVERY_POLL_MS as tn, CREDENTIAL_REFRESH_MAX_RETRIES as tt, AuthStateHandlerError as u, VAD_HOLD_MS as un, DEFAULT_DEVICE_DEBOUNCE_TIME_MS as ut, DependencyError as v, DEFAULT_ICE_GATHERING_TIMEOUT_MS as vt, MediaAccessError as w, DEFAULT_PERSIST_DEVICE_SELECTION as wt, InvalidCredentialsError as x, DEFAULT_KEYFRAME_COOLDOWN_MS as xt, DeserializationError as y, DEFAULT_ICE_RESTART_TIMEOUT_MS as yt, TokenRefreshError as z, DEFAULT_STATS_POLLING_INTERVAL_MS as zt };
++export { CREDENTIAL_EXPIRY_SKEW_MS as $, DEVICE_TOKEN_REFRESH_RETRY_BASE_MS as $t, PreflightError as A, DEFAULT_RECOVERY_DEBOUNCE_TIME_MS as At, TokenRefreshError as B, DEFAULT_STATS_POLLING_INTERVAL_MS as Bt, InvalidParams as C, DEFAULT_KEYFRAME_MAX_BURST as Ct, MessageParseError as D, DEFAULT_RECONNECT_DELAY_MAX_MS as Dt, MediaTrackError as E, DEFAULT_RECONNECT_CALLS_TIMEOUT_MS as Et, ScreenShareAlreadyActiveError as F, DEFAULT_STATS_BASELINE_SAMPLES as Ft, VertoAttachHandlerError as G, DEVICE_REFRESH_ENDPOINT as Gt, UnexpectedError as H, DEFAULT_STEREO_AUDIO as Ht, SerializationError as I, DEFAULT_STATS_HISTORY_SIZE as It, WebSocketConnectionError as J, DEVICE_STORAGE_KEY_VIDEO_INPUT as Jt, VertoInviteHandlerError as K, DEVICE_STORAGE_KEY_AUDIO_INPUT as Kt, StorageNotAvailableError as L, DEFAULT_STATS_JITTER_SPIKE_MULTIPLIER as Lt, RecoveryError as M, DEFAULT_REINVITE_DEBOUNCE_TIME_MS as Mt, RequestError as N, DEFAULT_REINVITE_MAX_ATTEMPTS as Nt, OverconstrainedFallbackError as O, DEFAULT_RECONNECT_DELAY_MIN_MS as Ot, RequestTimeoutError as P, DEFAULT_REINVITE_TIMEOUT_MS as Pt, CREDENTIAL_ACTIVATE_TIMEOUT_MS as Q, DEVICE_TOKEN_REFRESH_MAX_RETRIES as Qt, StorageReadError as R, DEFAULT_STATS_NO_PACKET_THRESHOLD_MS as Rt, InvalidCredentialsError as S, DEFAULT_KEYFRAME_COOLDOWN_MS as St, MediaAccessError as T, DEFAULT_PERSIST_DEVICE_SELECTION as Tt, UnimplementedError as U, DEFAULT_STEREO_MAX_AVERAGE_BITRATE as Ut, TransportConnectionError as V, DEFAULT_STATS_RTT_SPIKE_MULTIPLIER as Vt, ValidationError as W, DEFAULT_SYNC_DEVICES_TO_ACTIVE_CALLS as Wt, isMediaDeviceInUse as X, DEVICE_TOKEN_ENDPOINT as Xt, WebSocketTimeoutError as Y, DEVICE_TOKEN_DEFAULT_EXPIRE_IN as Yt, AUDIO_LEVEL_POLL_INTERVAL_MS as Z, DEVICE_TOKEN_REFRESH_BUFFER_MS as Zt, DPoPInitError as _, DEFAULT_ICE_CANDIDATE_TIMEOUT_MS as _t, filterNull as a, PREFERENCES_STORAGE_KEY as an, DEFAULT_AUX_LEG_CONNECT_TIMEOUT_MS as at, DeviceTokenError as b, DEFAULT_ICE_RESTART_TIMEOUT_MS as bt, setLogLevel as c, RPC_ERROR_REQUESTER_VALIDATION_FAILED as cn, DEFAULT_CONNECTION_TIMEOUT_MS as ct, AuxiliaryLegCancelledError as d, SERVER_PING_TIMEOUT_MS as dn, DEFAULT_DEVICE_DEBOUNCE_TIME_MS as dt, HOLD_RELEASE_GRACE_MS as en, CREDENTIAL_REFRESH_BUFFER_MS as et, AuxiliaryLegTimeoutError as f, VAD_HOLD_MS as fn, DEFAULT_DEVICE_POLLING_INTERVAL_MS as ft, ConversationError as g, DEFAULT_ENABLE_SERVER_HANGUP_INTERCEPTION as gt, CollectionFetchError as h, DEFAULT_ENABLE_RELAY_FALLBACK as ht, getValueFrom as i, PEER_CONNECTION_RECOVERY_WAIT_MS as in, DEFAULT_AUTO_MUTE_VIDEO_ON_HIDDEN as it, RPCTimeoutError as j, DEFAULT_REFRESH_DEVICES_ON_VISIBLE as jt, ParticipantNotReadyError as k, DEFAULT_RECOVERY_COOLDOWN_MS as kt, setLogger as l, SAT_REFRESH_SCOPE as ln, DEFAULT_DEGRADATION_BITRATE_THRESHOLD_KBPS as lt, CallNotReadyError as m, DEFAULT_ENABLE_NETWORK_CHANGE_DETECTION as mt, filterAs as n, INVITE_VERSION as nn, CREDENTIAL_REFRESH_MAX_RETRIES as nt, getLogger as o, RPC_ERROR_AUTHENTICATION_FAILED as on, DEFAULT_CALL_SIGNALING_TIMEOUT_MS as ot, CallCreateError as p, VAD_THRESHOLD as pn, DEFAULT_ENABLE_AUTO_DEGRADATION as pt, VertoPongError as q, DEVICE_STORAGE_KEY_AUDIO_OUTPUT as qt, ifIsMap as r, PEER_CONNECTION_RECOVERY_POLL_MS as rn, CREDENTIAL_REFRESH_RETRY_BASE_MS as rt, setDebugOptions as s, RPC_ERROR_INVALID_PARAMS as sn, DEFAULT_CHECK_CONNECTION_ON_VISIBLE as st, throwOnRPCError as t, ICE_GATHERING_COMPLETE_TIMEOUT_MS as tn, CREDENTIAL_REFRESH_MAX_DELAY_MS as tt, AuthStateHandlerError as u, SERVER_PING_PROBE_TIMEOUT_MS as un, DEFAULT_DEGRADATION_RECOVERY_THRESHOLD_KBPS as ut, DependencyError as v, DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS as vt, JSONRPCError as w, DEFAULT_MAX_RECOVERY_ATTEMPTS as wt, IceGatheringError as x, DEFAULT_KEYFRAME_BURST_WINDOW_MS as xt, DeserializationError as y, DEFAULT_ICE_GATHERING_TIMEOUT_MS as yt, StorageWriteError as z, DEFAULT_STATS_PACKET_LOSS_THRESHOLD as zt };
+ //# sourceMappingURL=operators-CTNnvDcG.mjs.map
+\ No newline at end of file
+diff --git a/node_modules/@signalwire/js/dist/operators-IoitK-As.cjs b/node_modules/@signalwire/js/dist/operators-IoitK-As.cjs
+index 91e1039..74fc54c 100644
+--- a/node_modules/@signalwire/js/dist/operators-IoitK-As.cjs
++++ b/node_modules/@signalwire/js/dist/operators-IoitK-As.cjs
+@@ -154,6 +154,11 @@ const DEFAULT_RECOVERY_DEBOUNCE_TIME_MS = 2e3;
+ const DEFAULT_RECOVERY_COOLDOWN_MS = 1e4;
+ /** Grace period in ms before treating ICE 'disconnected' as a failure. */
+ const DEFAULT_ICE_DISCONNECTED_GRACE_PERIOD_MS = 3e3;
++/**
++* After unhold, how long missing inbound audio is not treated as a connectivity
++* failure, while the server's media to the call resumes.
++*/
++const HOLD_RELEASE_GRACE_MS = 5e3;
+ /** Timeout for a single ICE restart attempt in milliseconds. */
+ const DEFAULT_ICE_RESTART_TIMEOUT_MS = 5e3;
+ /** Maximum recovery attempts before emitting 'max_attempts_reached'. */
+@@ -447,6 +452,20 @@ var AuxiliaryLegCancelledError = class extends Error {
+ 		this.name = "AuxiliaryLegCancelledError";
+ 	}
+ };
++/**
++* ICE gathering for a call's first offer or answer ended without a single
++* candidate, as when the device has no usable network, so there is nothing the
++* far end could connect to. Fatal for the main leg: the SDP is never sent, and
++* waiting would stall the call forever.
++*/
++var IceGatheringError = class extends Error {
++	constructor(sdpType, gatheringState) {
++		super(`ICE gathering ended (${gatheringState}) with no candidates; the ${sdpType} cannot be sent`);
++		this.sdpType = sdpType;
++		this.gatheringState = gatheringState;
++		this.name = "IceGatheringError";
++	}
++};
+ var MediaTrackError = class extends Error {
+ 	constructor(operation, kind, originalError) {
+ 		super(`Media track ${operation} failed for ${kind}`, { cause: originalError instanceof Error ? originalError : void 0 });
+@@ -1175,6 +1194,12 @@ Object.defineProperty(exports, 'DeviceTokenError', {
+     return DeviceTokenError;
+   }
+ });
++Object.defineProperty(exports, 'HOLD_RELEASE_GRACE_MS', {
++  enumerable: true,
++  get: function () {
++    return HOLD_RELEASE_GRACE_MS;
++  }
++});
+ Object.defineProperty(exports, 'ICE_GATHERING_COMPLETE_TIMEOUT_MS', {
+   enumerable: true,
+   get: function () {
+@@ -1187,6 +1212,12 @@ Object.defineProperty(exports, 'INVITE_VERSION', {
+     return INVITE_VERSION;
+   }
+ });
++Object.defineProperty(exports, 'IceGatheringError', {
++  enumerable: true,
++  get: function () {
++    return IceGatheringError;
++  }
++});
+ Object.defineProperty(exports, 'InvalidCredentialsError', {
+   enumerable: true,
+   get: function () {
