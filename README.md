@@ -448,6 +448,16 @@ prompt on the Mac's screen (System Settings → Privacy & Security → Automatio
   meant another message, Scout finds the right one by subject and date, logs
   `MAIL INDEX ID MISMATCH`, and goes back to scripting Mail for the session.
   `mail_mac.verify_index_ids()` compares the two directly (ids and counts only).
+- Only text Mail has downloaded is asked for: asking Mail for a message it
+  hasn't downloaded makes it fetch the text from the server on the thread that
+  answers AppleScript, and on 2026-10-19 one such fetch froze Mail's scripting for
+  five hours. AppleScript can't tell (only attachments have `downloaded`), so the
+  helper answers `mail_local`: whether each message's file is on the Mac, by name
+  only. The rest are indexed by sender and subject and read once Mail has them.
+- If Mail stops answering anyway (two scripts in a row time out, then a quick
+  `count accounts` does too), Scout restarts it, hidden, at most once an hour,
+  and skips the message it was stuck on for a day (`mail_heal.py`). It's said
+  only when that didn't help.
 - By phone (docs/phone-design.md, "Email by phone"): `mail_draft` saves the
   message in Drafts with no window, and `mail_send` takes two steps (the exact
   addresses, subject and a one-sentence summary are read back; it sends only
@@ -604,9 +614,10 @@ not to Scout's Python, Claude or a terminal:
   person, unread messages, one conversation, and a text search. At most 50
   messages and 365 days per answer, 60 lookups a minute, message text only (no
   attachments), no sending, no SQL from callers.
-- It also answers four questions about Mail's index (`mail_status`,
-  `mail_recent`, `mail_search`, and `mail_sent_to`: whether you've sent mail to
-  one address, a count and a date; see Mail above), under the same token, limits
+- It also answers five questions about Mail's index and files (`mail_status`,
+  `mail_recent`, `mail_search`, `mail_sent_to`: whether you've sent mail to
+  one address, a count and a date, and `mail_local`: which messages Mail has
+  downloaded, by file name; see Mail above), under the same token, limits
   and log. Rebuilding the helper for a source change needs the switch again for
   both.
 - Every lookup is logged to `logs/messages-access.log` (what kind, how many,

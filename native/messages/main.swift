@@ -12,7 +12,8 @@
 //
 // Protocol: one JSON object per line, one request per connection:
 //   {"token": "...", "op": "status"|"recent"|"from"|"unread"|"chat"|"search"
-//                          |"mail_status"|"mail_recent"|"mail_search"|"mail_sent_to", "args": {...}}
+//                          |"mail_status"|"mail_recent"|"mail_search"|"mail_sent_to"|"mail_local",
+//                          "args": {...}}
 // The answer is one JSON line: {"ok": true, ...} or {"ok": false, "code": "...", "error": "..."}.
 // The token is random per start, in DATA/state/messages_token (0600); the socket is 0600
 // and only answers this user. Limits: at most 50 messages per answer, 365 days back,
@@ -26,6 +27,10 @@
 // never message bodies: the index doesn't hold them, and Scout reads a body through Mail.
 // mail_sent_to answers only whether (how often, and when last) the user sent mail to
 // one address: the phone sends only to people in Contacts or ones written to before.
+// mail_local answers only whether each message's file is on this Mac (full, partial or
+// none), by its name: no file is opened. Asking Mail for the text of a message it hasn't
+// downloaded makes it fetch the text from the server on the thread that answers
+// AppleScript, and one fetch that never came back froze Mail's scripting for hours.
 
 import Contacts
 import Darwin
@@ -816,6 +821,88 @@ final class MailIndex {
     }
 }
 
+// MARK: - Mail's message files
+
+/// Whether Mail has a message's file on this Mac, by name only (nothing is opened). Mail
+/// keeps a message as <V folder>/<account>/<mailbox>.mbox[/<child>.mbox...]/<store>/Data/
+/// <digits>/Messages/<ROWID>.emlx, <digits> being ROWID / 1000 one digit per folder, last
+/// digit first (ROWID 123456: Data/3/2/1/Messages; under 1000: Data/Messages), and
+/// <ROWID>.partial.emlx when the attachments aren't in it (the text is). The store
+/// folders are found by walking only through .mbox folders, again every 10 minutes.
+final class MessageFiles {
+    let root: String
+    private var stores: [String] = []
+    private var storesAt = Date.distantPast
+
+    /// root: the V<N> folder; "" when the index isn't in one (a test index), so every
+    /// answer is "none" with no stores, which Scout reads as "can't tell".
+    init(indexPath: String) {
+        let mailData = (indexPath as NSString).deletingLastPathComponent
+        root = (mailData as NSString).lastPathComponent == "MailData"
+            ? (mailData as NSString).deletingLastPathComponent : ""
+    }
+
+    static func folder(_ rowid: Int64) -> String {
+        var n = rowid / 1000
+        var parts: [String] = []
+        while n > 0 {
+            parts.append(String(n % 10))
+            n /= 10
+        }
+        return (parts + ["Messages"]).joined(separator: "/")
+    }
+
+    private static func children(_ dir: String) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+    }
+
+    private static func isDir(_ path: String) -> Bool {
+        var d: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &d) && d.boolValue
+    }
+
+    private func walk(_ dir: String, _ depth: Int, _ out: inout [String]) {
+        guard depth < 12, out.count < 5000 else { return }
+        for name in MessageFiles.children(dir) {
+            let path = dir + "/" + name
+            if name.hasSuffix(".mbox") {
+                walk(path, depth + 1, &out)
+            } else if depth > 0, MessageFiles.isDir(path + "/Data") {
+                out.append(path + "/Data")
+            }
+        }
+    }
+
+    func storeFolders() -> [String] {
+        if root.isEmpty { return [] }
+        if Date().timeIntervalSince(storesAt) < 600, !stores.isEmpty { return stores }
+        var out: [String] = []
+        for account in MessageFiles.children(root) where account != "MailData" {
+            let dir = root + "/" + account
+            if MessageFiles.isDir(dir) { walk(dir, 0, &out) }
+        }
+        stores = out
+        storesAt = Date()
+        return out
+    }
+
+    /// "full", "partial" or "none" for each ROWID.
+    func states(_ ids: [Int64]) -> [String: String] {
+        let found = storeFolders()
+        var out: [String: String] = [:]
+        for id in ids {
+            let tail = "/" + MessageFiles.folder(id) + "/\(id)"
+            var state = "none"
+            for store in found {
+                if FileManager.default.fileExists(atPath: store + tail + ".emlx") { state = "full"; break }
+                if FileManager.default.fileExists(atPath: store + tail + ".partial.emlx") { state = "partial"; break }
+            }
+            out[String(id)] = state
+        }
+        return out
+    }
+}
+
 // MARK: - request handling
 
 func intArg(_ args: [String: Any], _ key: String, default def: Int, max hi: Int) throws -> Int {
@@ -859,6 +946,7 @@ let allowedArgs: [String: Set<String>] = [
     "mail_recent": ["limit", "unread_only", "since_days"],
     "mail_search": ["text", "limit", "since_days"],
     "mail_sent_to": ["address"],
+    "mail_local": ["ids"],
 ]
 
 /// Read access to one file, re-checked in a fresh process while it's missing (a grant
@@ -910,6 +998,7 @@ final class Server {
     private var bucketAt = Date()
     private let messagesAccess: AccessWatch
     private let mailAccess: AccessWatch
+    private var messageFiles: MessageFiles?
 
     init(_ o: Options, token: String) {
         self.o = o
@@ -1024,6 +1113,26 @@ final class Server {
             throw Failure(code: "schema", message: "Mail's index lacks " + index.schema.missing.joined(separator: ", "))
         }
         var answer: [String: Any]
+        if op == "mail_local" {
+            guard let raw = args["ids"] as? [Any], !raw.isEmpty, raw.count <= maxLimit else {
+                throw Failure(code: "bad_request", message: "ids must be 1-\(maxLimit) message ids")
+            }
+            let ids = try raw.map { v -> Int64 in
+                guard let n = v as? Int, n >= 1, CFGetTypeID(v as CFTypeRef) != CFBooleanGetTypeID() else {
+                    throw Failure(code: "bad_request", message: "ids must be whole numbers")
+                }
+                return Int64(n)
+            }
+            if messageFiles?.root != MessageFiles(indexPath: found.path).root {
+                messageFiles = MessageFiles(indexPath: found.path)
+            }
+            let files = messageFiles!
+            let states = files.states(ids)
+            answer = ["local": states, "stores": files.storeFolders().count]
+            note += (note.isEmpty ? "" : ",") + "n=\(ids.count)"
+            answer["ok"] = true
+            return (answer, op, note)
+        }
         if op == "mail_sent_to" {
             let address = try textArg(args, "address", max: 320)
             guard address.contains("@"), !address.contains(where: { $0 == " " || $0 == "," }) else {

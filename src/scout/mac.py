@@ -8,6 +8,7 @@ script text, so a tool can't be turned into arbitrary AppleScript.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from typing import Any
 from urllib.parse import quote_plus, urlparse
@@ -71,17 +72,52 @@ def check_int(value: Any, lo: int, hi: int, what: str) -> int:
 # --- running things ------------------------------------------------------------------
 
 
+PROGRESS = "scout-progress "  # a stderr line starting so says what a script is at; not an error
+
+
+class TimedOut(ToolError):
+    """A program that didn't finish in time. `progress`: the PROGRESS lines it wrote
+    before it was killed (without the prefix), so the caller knows what it was stuck on."""
+
+    def __init__(self, message: str, progress: list[str]) -> None:
+        super().__init__(message)
+        self.progress = progress
+
+
 async def _run(*argv: str, timeout: float = 10.0) -> str:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
+    stdout, stderr = proc.stdout, proc.stderr
+    if stdout is None or stderr is None:  # both are pipes: can't happen
+        raise ToolError(f"{argv[0]} has no output pipes")
+    err_lines: list[str] = []
+
+    async def read_errors() -> None:  # line by line, so what a killed program wrote is kept
+        async for raw in stderr:
+            err_lines.append(raw.decode(errors="replace").rstrip("\n"))  # noqa: PERF401  as it comes
+
+    errors = asyncio.ensure_future(read_errors())
+
+    async def finish() -> bytes:
+        out = await stdout.read()
+        await asyncio.shield(errors)
+        await proc.wait()
+        return out
+
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        out = await asyncio.wait_for(finish(), timeout)
     except TimeoutError:
         proc.kill()
-        raise ToolError(f"{argv[0]} timed out") from None
+        await proc.wait()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(errors, 1.0)
+        errors.cancel()
+        progress = [ln[len(PROGRESS) :] for ln in err_lines if ln.startswith(PROGRESS)]
+        raise TimedOut(f"{argv[0]} timed out", progress) from None
     if proc.returncode != 0:
-        raise ToolError(err.decode(errors="replace").strip()[:300] or f"{argv[0]} failed")
+        err = "\n".join(ln for ln in err_lines if not ln.startswith(PROGRESS))
+        raise ToolError(err.strip()[:300] or f"{argv[0]} failed")
     return out.decode(errors="replace").strip()
 
 

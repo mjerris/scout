@@ -104,6 +104,24 @@ def _no_real_apps(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _own_mail_health(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each test has its own Mail health (mail_heal.py): its own state file, and a probe
+    and process control that fail the test if it gets that far without its own fakes.
+    No test may quit, signal or open the real Mail."""
+    import scout.mail_heal as mail_heal_mod
+
+    async def no_probe() -> bool:
+        raise AssertionError("test reached the real Mail probe")
+
+    class NoProcs(mail_heal_mod.Procs):
+        async def pid(self) -> int | None:
+            raise AssertionError("test reached the real Mail process control")
+
+    monkeypatch.setattr(mail_heal_mod, "PATH", tmp_path / "mail_health.json")
+    monkeypatch.setattr(mail_heal_mod, "HEALTH", mail_heal_mod.Health(probe=no_probe, procs=NoProcs()))
+
+
+@pytest.fixture(autouse=True)
 def _own_sync_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Each test has its own sync status file (syncstate.py)."""
     import scout.syncstate as syncstate_mod

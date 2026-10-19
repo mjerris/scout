@@ -10,12 +10,13 @@ index when it has mail and fall back to asking Mail.app when it finds nothing.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import re
 import time
 from typing import Any
 
-from . import appdb, index, mail_mac, syncstate
+from . import appdb, index, mail_heal, mail_mac, syncstate
 from .config import load
 from .mac import ToolError
 from .summary import essential
@@ -242,8 +243,26 @@ async def sync_pass(
         m for m in listed
         if isinstance(m.get("id"), int) and _ts(str(m.get("date") or "")) > since and ix.get(f"mail:{m['id']}") is None
     ]  # fmt: skip
-    new = due[:BODIES]
-    partial = [h for h in ix.recent([KIND], 300) if h.meta.get("partial")][:CHUNK]
+    # Only text Mail has downloaded is asked for (asking for the rest makes Mail fetch it
+    # from the server while scripting waits, and one fetch froze Mail for hours), and none
+    # that hung Mail (mail_heal). Those are stored as sender and subject, read on a later pass.
+    skip = mail_heal.HEALTH.skipped()
+    first = [m for m in due[:BODIES] if int(m["id"]) not in skip]
+    candidates = [
+        h for h in ix.recent([KIND], 300)
+        if h.meta.get("partial") and int(h.meta.get("mail_id") or 0) not in skip
+    ][:50]  # fmt: skip
+    asked = [int(m["id"]) for m in first] + [int(h.meta["mail_id"]) for h in candidates]
+    here = await mail_mac.INDEX.downloaded(asked[:50]) if asked else set()
+    if here is not None and len(asked) > 50:
+        here |= await mail_mac.INDEX.downloaded(asked[50:100]) or set()
+    held = [
+        m for m in due[:BODIES] if int(m["id"]) in skip or (here is not None and int(m["id"]) not in here)
+    ]
+    for kept in held:
+        _put(ix, kept, None)
+    new = [m for m in first if here is None or int(m["id"]) in here]
+    partial = [h for h in candidates if here is None or int(h.meta["mail_id"]) in here][:CHUNK]
     todo = [
         *new,
         *(
@@ -252,11 +271,13 @@ async def sync_pass(
         ),
     ]
     stored = 0
-    done: set[int] = set()
+    done: set[int] = {int(m["id"]) for m in held}  # stored, their text read on a later pass
     t1 = time.monotonic()
     for i in range(0, len(todo), CHUNK):
         chunk = todo[i : i + CHUNK]
-        got = await mail_mac.bodies([int(m["id"]) for m in chunk], run, remember=False, stored=False)
+        got = await mail_mac.bodies(
+            [int(m["id"]) for m in chunk], run, remember=False, stored=False, checked=True
+        )
         for row in chunk:
             m = got.get(int(row["id"]))
             if m is not None:
@@ -275,6 +296,7 @@ async def sync_pass(
         _mark(max([_ts(str(m.get("date") or "")) for m in listed] + ([mark] if mark is not None else [])))
     out = {
         "listed": len(listed), "how": how, "new": len(new), "filled": len(partial), "stored": stored,
+        "held": len(held),
         "list_s": round(t_list, 1), "read_s": round(t2 - t1, 1), "message_ids": ids_added,
         "ids_s": round(t_ids, 1), "total": ix.count(KIND), "left": len(left),
     }  # fmt: skip
@@ -376,11 +398,15 @@ async def loop(
                 await syncstate.sleep(MAIL_SOURCES, syncstate.BUSY_RETRY_S)
                 continue
             since = time.time()
+            health = mail_heal.HEALTH  # Mail stuck answering AppleScript: restarted, the pass retried
             with syncstate.track("mail", every_s) as p:
-                out = await sync_pass(index.default())
+                out = await health.guarded(lambda: sync_pass(index.default()))
                 p.added, p.updated, p.backlog = out["stored"], out["message_ids"], out["left"]
             with syncstate.track("meetings_email", every_s) as p:
-                p.added = await backfill_meetings(index.default(), days=load().tasks.backfill_days)
+                meetings = functools.partial(
+                    backfill_meetings, index.default(), days=load().tasks.backfill_days
+                )
+                p.added = await health.guarded(meetings)
         except Exception as exc:
             log.warning("mail index pass failed: %s", exc)
         await syncstate.sleep(MAIL_SOURCES, min(syncstate.retry_in(s, every_s) for s in MAIL_SOURCES))

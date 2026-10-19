@@ -289,6 +289,51 @@ def test_sent_to_counts_mail_the_user_sent_to_an_address(running: Running) -> No
     assert "acme" not in running.log.read_text()  # the address is never logged
 
 
+def test_local_says_which_message_files_are_on_this_mac(binary: Path) -> None:
+    """mail_local: by file name only, in Mail's V<N> layout (a full .emlx, a .partial.emlx
+    without its attachments, or none), for nested mailboxes too."""
+    v10 = _short_tmp() / "local-tree" / "V10"
+    shutil.rmtree(v10.parent, ignore_errors=True)
+    (v10 / "MailData").mkdir(parents=True)
+    index = v10 / "MailData" / "Envelope Index"
+    build_index(index, dt.datetime.now().astimezone(), FIXTURE)
+    store = "0F0E0D0C-0000-4000-8000-00000000000A"
+    inbox = v10 / GOOGLE / "INBOX.mbox" / store / "Data"
+    allmail = v10 / GOOGLE / "[Gmail].mbox" / "All Mail.mbox" / store / "Data"
+    for path in (
+        inbox / "Messages" / "7.emlx",  # ROWID under 1000
+        allmail / "3" / "2" / "1" / "Messages" / "123456.partial.emlx",  # 123456 / 1000 = 123: 3/2/1
+        allmail / "4" / "3" / "Messages" / "34012.emlx",
+        inbox / "Messages" / "999.txt",  # not a message file
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic")
+    r = _start(binary, "local", "--rate", "1000", index=index)
+    try:
+        got = mail(r, "mail_local", ids=[7, 123456, 34012, 999, 34013])
+        assert got["local"] == {
+            "7": "full",
+            "123456": "partial",
+            "34012": "full",
+            "999": "none",
+            "34013": "none",
+        }
+        assert got["stores"] == 2
+        for bad in ([], list(range(1, 52)), ["7"], [True], [0]):
+            with pytest.raises(ToolError, match="bad_request"):
+                mail(r, "mail_local", ids=bad)
+        assert "synthetic" not in r.log.read_text()
+    finally:
+        _stop(r)
+
+
+def test_local_outside_a_mail_folder_finds_no_stores(running: Running) -> None:
+    """An index not in <V folder>/MailData (a test file): no stores, every id "none",
+    which mail_mac reads as "can't tell" (Index.downloaded)."""
+    got = mail(running, "mail_local", ids=[1, 2])
+    assert got["stores"] == 0 and set(got["local"].values()) == {"none"}
+
+
 def test_sent_to_without_recipients_says_so(binary: Path) -> None:
     d = _short_tmp() / "norecip"
     d.mkdir(parents=True, exist_ok=True)

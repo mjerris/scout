@@ -32,12 +32,15 @@ Self-healing comes first, in plain code (no model decides anything here):
     a failed pass       retried sooner, with backoff (retry_in): 1, 2, 4... minutes up to
                         the interval; an error only the user can fix waits the interval
     a stalled source    the pulse wakes its loop (nudge; each loop sleeps with sleep(),
-                        which returns early on a nudge) and says nothing
+                        which returns early on a nudge) and says nothing; the woken pass
+                        is judged once it ended or had its time (woken)
+    Mail stuck          mail_heal: restarted, at most once an hour
 
 The pulse speaks (alerts) only when that didn't work or the user must act: an error only
 the user can fix (NEEDS_USER: Reminders or Mail access, a token a service no longer
 accepts), said with what to do; a failure that retrying hasn't fixed in an hour; a stall
-still there grace_min after its nudge. Each once a day per source.
+whose woken pass failed or didn't finish in its time. Each once a day per source, and a
+source that runs after another (AFTER) not while that one is in trouble.
 """
 
 from __future__ import annotations
@@ -103,6 +106,11 @@ SOURCES: dict[str, Source] = {
 }  # fmt: skip
 
 
+# A source whose pass runs after another's in the same loop: while that one is failing or
+# stalled, this one's trouble is the same trouble, and only that one's is said.
+AFTER = {"meetings_email": "mail"}
+
+
 def enabled(cfg: Config) -> dict[str, bool]:
     """Which sources the config sets up (the rest are off)."""
     return {
@@ -127,6 +135,8 @@ NEEDS_USER: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     (("mail", "meetings_email"), ("Not allowed to control Mail",),
      "Allow Scout to control Mail in System Settings, under Privacy and Security, Automation."),
     (("mail", "meetings_email"), ("Mail isn't set up",), "Open Mail once and add an account."),
+    (("mail", "meetings_email"), ("Mail is stuck and isn't answering",),  # mail_heal.STUCK
+     "Mail is stuck, and restarting it didn't help. Quit Mail, with Force Quit if it won't, and open it again."),
     (("slack", "slack_events"), ("invalid_auth", "not_authed", "token_revoked", "account_inactive"),
      "Slack no longer accepts Scout's token. Put a new one in Scout's config, in the slack section."),
     (("github",), ("HTTP 401",),
@@ -381,6 +391,8 @@ class Status:
     every_s: float = 0.0
     nudged_at: float | None = None  # when the pulse last woke its loop
     action: str | None = None  # failing with an error only the user can fix: what to do
+    error_at: float | None = None  # when the last failed pass ended
+    took_s: float = 0.0  # how long its last good pass took
 
 
 def _num(v: Any) -> float | None:
@@ -416,6 +428,7 @@ def statuses(now: float | None = None, path: Path | None = None, cfg: Config | N
                 _num(e.get("last_attempt")), good, e.get("last_error"), int(e.get("added") or 0),
                 int(e.get("updated") or 0), int(backlog) if isinstance(backlog, int) else None, every,
                 _num(e.get("nudged_at")), needs_user(name, e.get("last_error")) if state == "failing" else None,
+                _num(e.get("error_at")), _num(e.get("took_s")) or 0.0,
             )
         )  # fmt: skip
     return out
@@ -497,15 +510,41 @@ def speak(sts: list[Status], now: dt.datetime) -> str:
     return " ".join(parts)
 
 
+WOKEN_PASS_TIMES = 3.0  # a woken pass gets this many times its last good pass's length...
+
+
+def woken_wait_s(s: Status, grace_s: float) -> float:
+    """How long a woken pass gets to finish before it's judged: `grace_s`, or longer for a
+    sync whose passes take longer (WOKEN_PASS_TIMES its last good pass)."""
+    return max(grace_s, WOKEN_PASS_TIMES * s.took_s)
+
+
+def woken(s: Status, now: float, grace_s: float) -> str:
+    """What came of waking `s`'s loop: "none" (not woken since its last good pass), "ok"
+    (a pass finished well after it), "failed" (a pass ended in an error after it),
+    "timed out" (no pass finished within woken_wait_s), or "pending" (still waiting for
+    the woken pass: nothing is decided yet)."""
+    good = s.last_success or s.first_seen or 0.0
+    if s.nudged_at is None or s.nudged_at <= good:
+        return "ok" if s.nudged_at is not None and s.last_success is not None else "none"
+    if s.error_at is not None and s.error_at >= s.nudged_at:
+        return "failed"
+    if now - s.nudged_at >= woken_wait_s(s, grace_s):
+        return "timed out"
+    return "pending"
+
+
 def to_nudge(sts: list[Status], now: float, grace_s: float) -> list[str]:
-    """The stalled sources to wake: not woken since their last good pass, or woken
-    `grace_s` ago or more and still stalled (woken again)."""
+    """The stalled sources to wake: not woken since their last good pass; or, once a woken
+    pass has been judged (failed or timed out) and a whole wait more has gone by, again."""
     out = []
     for s in sts:
-        if s.state != "stalled":
+        if s.state not in ("stalled", "failing"):
             continue
-        good = s.last_success or s.first_seen or 0.0
-        if s.nudged_at is None or s.nudged_at <= good or now - s.nudged_at >= grace_s:
+        w = woken(s, now, grace_s)
+        first = s.state == "stalled" and w in ("none", "ok")
+        again = w in ("failed", "timed out") and now - (s.nudged_at or 0.0) >= 2 * woken_wait_s(s, grace_s)
+        if first or again:
             out.append(s.source)
     return out
 
@@ -513,26 +552,26 @@ def to_nudge(sts: list[Status], now: float, grace_s: float) -> list[str]:
 def alerts(sts: list[Status], now: dt.datetime, grace_s: float) -> list[tuple[str, str]]:
     """(source, sentence) for the pulse, only when healing didn't work or the user must
     act: an error only the user can fix (with what to do); a failure retrying hasn't
-    fixed in SAY_AFTER_S; a stall still there `grace_s` after its loop was woken."""
+    fixed in SAY_AFTER_S; a stall whose woken pass failed, or didn't finish in its time
+    (woken). Never while the woken pass may still be running: a pass woken a moment ago
+    that then works says nothing."""
     t = now.timestamp()
     out = []
+    failing = {s.source for s in sts if s.state not in GOOD and s.state not in ("off", "waiting")}
     for s in sts:
+        if AFTER.get(s.source) in failing:  # the same trouble, said once (for the source it follows)
+            continue
         if s.state == "failing" and s.action:
             out.append((s.source, f"{s.spoken} needs you. {s.action}"))
         elif s.state == "failing" and s.failing_since is not None and t - s.failing_since >= SAY_AFTER_S:
             out.append((s.source, f"{s.spoken} has been failing since {when_words(s.failing_since, now)}, and "
                                   "retrying hasn't fixed it. Scout status shows the error."))  # fmt: skip
-        elif s.state == "stalled" and _woken_in_vain(s, t, grace_s):
+        elif s.state in ("stalled", "failing") and woken(s, t, grace_s) in ("failed", "timed out"):
             last = (f"its last good pass was {when_words(s.last_success, now, at=True)}"
                     if s.last_success is not None else "it hasn't finished a pass yet")  # fmt: skip
             out.append((s.source, f"{s.spoken} has stalled; {last}, and waking it didn't help. "
                                   "Try restarting Scout."))  # fmt: skip
     return out
-
-
-def _woken_in_vain(s: Status, now: float, grace_s: float) -> bool:
-    good = s.last_success or s.first_seen or 0.0
-    return s.nudged_at is not None and s.nudged_at > good and now - s.nudged_at >= grace_s
 
 
 # --- printing it ----------------------------------------------------------------------

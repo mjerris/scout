@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mac, messages_mac
+from . import mac, mail_heal, messages_mac
 from .mac import ToolError
 
 Runner = Callable[..., Awaitable[str]]
@@ -266,6 +266,7 @@ function run(argv) {
     try { const c = mb.messages.byId(id); c.id(); m = c; break; } catch (e) {}
   }
   if (m === null) return JSON.stringify({error: "no inbox message with id " + id});
+  console.log("scout-progress reading " + id);  // a read that hangs Mail is known by its id (mail_heal)
   const content = m.content() || "";
   let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
   return JSON.stringify({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
@@ -285,6 +286,7 @@ function run(argv) {
     for (const mb of boxes) {
       let m;
       try { m = mb.messages.byId(id); m.id(); } catch (e) { continue; }
+      console.log("scout-progress reading " + id);
       const content = m.content() || "";
       let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
       out.push({id: id, date: m.dateReceived().toISOString(), sender: m.sender(), subject: m.subject(),
@@ -320,6 +322,7 @@ function run(argv) {
       if (!dates[i] || Math.abs(dates[i].getTime() - target) > 300000) continue;
       const m = mb.messages.byId(ids[i]);
       if (norm(m.subject()) !== want) continue;
+      console.log("scout-progress reading " + ids[i]);
       const content = m.content() || "";
       let mid = ""; try { mid = m.messageId() || ""; } catch (e) {}
       return JSON.stringify({id: ids[i], date: m.dateReceived().toISOString(), sender: m.sender(),
@@ -376,10 +379,17 @@ async def _jxa(script: str, *args: str, timeout: float = 30.0) -> str:
 
 
 async def _call(run: Runner, script: str, *args: str) -> dict[str, Any]:
+    health = mail_heal.HEALTH
+    if health.gave_up and not await health.probe():  # stuck, and restarting didn't help
+        raise ToolError(mail_heal.STUCK)
     try:
         out = await run(script, *args)
     except ToolError as exc:
         text = str(exc)
+        if isinstance(exc, mac.TimedOut) or text.endswith("timed out"):
+            health.timed_out(exc)  # the mail loop checks Mail, and heals it, on its next pass
+            raise
+        health.answered()
         if "-1743" in text or "Not authorized" in text:
             raise ToolError(
                 "Not allowed to control Mail yet. Allow it in the prompt on the Mac's screen, or in "
@@ -390,6 +400,7 @@ async def _call(run: Runner, script: str, *args: str) -> dict[str, Any]:
                 "Mail isn't set up or couldn't start. Open Mail once and add an account."
             ) from None
         raise
+    health.answered()
     try:
         data: dict[str, Any] = json.loads(out or "{}")
     except json.JSONDecodeError:
@@ -489,6 +500,7 @@ class Index:
     ids_trusted: bool = True  # False after Mail's id for an index row was another message
     access: str = ""  # the helper's Full Disk Access state, from mail_status
     offered_at: float | None = None  # when the slow-search setup was last offered
+    files_seen: bool | None = None  # True once mail_local found a message's file (downloaded)
     _usable: bool | None = None
     _checked_at: float = 0.0
     rows: OrderedDict[int, dict[str, Any]] = field(default_factory=OrderedDict)
@@ -518,6 +530,29 @@ class Index:
 
     def invalidate(self) -> None:
         self._usable = None
+
+    async def downloaded(self, ids: list[int]) -> set[int] | None:
+        """Which of these messages Mail has on this Mac (its file, full or without the
+        attachments: the text is there), from the helper's mail_local; None when that
+        can't be told (no helper, no Full Disk Access, an older helper, or this Mac's
+        files not found where expected). Until one message has been found on disk, the
+        answer is None too: a layout the helper doesn't know must not stop every read."""
+        if not ids:
+            return set()
+        try:
+            data = await messages_mac.mail("mail_local", {"ids": ids[:50]}, self.helper)
+        except ToolError as exc:
+            if self.files_seen is not False:
+                log.info("mail: can't tell which messages are downloaded (%s)", exc)
+                self.files_seen = False
+            return None
+        raw = data.get("local")
+        states: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        here = {int(k) for k, v in states.items() if str(k).isdigit() and v in ("full", "partial")}
+        if here and self.files_seen is not True:
+            log.info("mail: the helper finds Mail's message files; reading only downloaded messages")
+            self.files_seen = True
+        return here if self.files_seen else None
 
     async def listing(self, n: int, unread_only: bool, q: str, days: int) -> dict[str, Any]:
         if q:
@@ -751,7 +786,11 @@ async def message(message_id: Any, run: Runner = _jxa, index: Index | None = Non
     """One inbox message with its text: id, date, sender, subject, to, cc, body, truncated.
     For an id from the index, Mail's message must be that row's (subject, sender, date)."""
     mid = _check_id(message_id)
+    if mid in mail_heal.HEALTH.skipped():
+        raise ToolError(SKIPPED)
     idx = index or INDEX
+    if (here := await idx.downloaded([mid])) is not None and mid not in here:
+        raise ToolError(NOT_DOWNLOADED)
     row = idx.rows.get(mid)
     try:
         m: dict[str, Any] | None = await _call(run, _READ, str(mid), str(_MAX_BODY))
@@ -769,6 +808,16 @@ async def message(message_id: Any, run: Runner = _jxa, index: Index | None = Non
         return m
     idx.mismatch(mid, row, m)
     return await _find(run, mid, row)
+
+
+NOT_DOWNLOADED = (
+    "Mail hasn't downloaded that message's text to this Mac yet, and asking Mail for it then can "
+    "freeze Mail. Open it in Mail once, and it can be read here."
+)
+SKIPPED = (
+    "Mail got stuck reading that message's text earlier, so Scout won't ask Mail for it again until "
+    "tomorrow. It can be read in Mail itself."
+)
 
 
 def _remember(messages: list[dict[str, Any]], with_body: bool) -> None:
@@ -801,10 +850,13 @@ async def bodies(
     index: Index | None = None,
     remember: bool = True,
     stored: bool = True,
+    checked: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """Several messages with their text, by id: from Scout's index when it has them
-    (`stored`), the rest in one call to Mail. Missing ids are left out. Ids from Mail's
-    index are checked like message()'s, stored text included."""
+    (`stored`), the rest in one call to Mail. Missing ids are left out, and so are ids
+    Mail hasn't downloaded (Index.downloaded; `checked`: the caller already asked) or
+    that hung Mail (mail_heal). Ids from Mail's index are checked like message()'s,
+    stored text included."""
     if not ids:
         return {}
     if len(ids) > 50:
@@ -818,7 +870,12 @@ async def bodies(
         except Exception as exc:  # the memory service is down: Mail still answers
             log.info("mail: Scout's index unavailable for message text (%s); asking Mail", exc)
         have = {i: m for i, m in have.items() if (row := idx.rows.get(i)) is None or not _same(row, m)}
-    ask = [i for i in wanted if i not in have]
+    skip = mail_heal.HEALTH.skipped()  # each hung Mail once: not asked for again yet
+    ask = [i for i in wanted if i not in have and i not in skip]
+    if ask and not checked and (here := await idx.downloaded(ask)) is not None:
+        if left := [i for i in ask if i not in here]:
+            log.info("mail: %d message(s) not downloaded yet; their text is read later", len(left))
+        ask = [i for i in ask if i in here]
     if not ask:
         return have
     data = await _call(run, _READ_MANY, ",".join(map(str, ask)), str(_MAX_BODY))

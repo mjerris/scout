@@ -277,6 +277,103 @@ def test_a_failure_that_needs_the_user_is_said_at_once_with_the_action() -> None
     assert s.nudged == []
 
 
+SOURCES_WOKEN = ["tasks", "links", "mail", "meetings_email"]  # syncs the pulse wakes, alike
+
+
+def _stall(source: str, took_s: float = 0.0) -> None:
+    """A good pass 35 minutes before NOON (taking took_s), none since: stalled at NOON."""
+    end = (NOON - dt.timedelta(minutes=35)).timestamp()
+    syncstate.record(source, FARM_EVERY_S, started=end - took_s, now=end)
+
+
+@pytest.mark.parametrize("source", SOURCES_WOKEN)
+def test_a_woken_pass_that_works_after_a_while_says_nothing(source: str) -> None:
+    """2026-10-19 16:08: the stall was said in the same second its loop was woken, and the
+    woken pass then worked 23 s later. Nothing is decided while the woken pass may run."""
+    _stall(source)
+    s = Said()
+    p = s.make()
+    assert s.check(p, NOON) == [] and s.nudged == [source]
+    for minutes in (0, 1, 5, 9):  # the woken pass is still running: nothing said
+        assert s.check(p, NOON + dt.timedelta(minutes=minutes, seconds=1)) == []
+    syncstate.record(source, FARM_EVERY_S, started=NOON.timestamp() + 1, now=NOON.timestamp() + 600)
+    for minutes in (11, 15, 40):
+        assert s.check(p, NOON + dt.timedelta(minutes=minutes)) == []
+
+
+@pytest.mark.parametrize("source", SOURCES_WOKEN)
+def test_a_woken_pass_that_fails_is_said_once(source: str) -> None:
+    _stall(source)
+    s = Said()
+    p = s.make()
+    assert s.check(p, NOON) == []
+    assert s.check(p, NOON + dt.timedelta(seconds=30)) == []  # running
+    syncstate.record(
+        source, FARM_EVERY_S, error=RuntimeError("boom"), started=NOON.timestamp() + 1,
+        now=NOON.timestamp() + 60,
+    )  # fmt: skip
+    first = s.check(p, NOON + dt.timedelta(minutes=2))  # judged as soon as it failed
+    assert len(first) == 1 and "waking it didn't help" in first[0]
+    assert s.check(p, NOON + dt.timedelta(minutes=15)) == []
+    assert s.check(p, NOON + dt.timedelta(minutes=40)) == []
+
+
+def test_a_sync_woken_again_is_not_said_in_that_same_check() -> None:
+    """No check came between the woken pass's time running out and the next wake: the
+    sync is woken again then, and judged by that pass, not in the same breath."""
+    _stall("tasks")
+    s = Said()
+    p = s.make()
+    assert s.check(p, NOON) == []
+    assert s.check(p, NOON + dt.timedelta(minutes=25)) == [] and s.nudged == ["tasks", "tasks"]
+    assert s.check(p, NOON + dt.timedelta(minutes=30)) == []  # that pass's 10 minutes
+    assert len(s.check(p, NOON + dt.timedelta(minutes=36))) == 1
+
+
+def test_a_woken_pass_that_never_finishes_is_said_once_after_its_time() -> None:
+    _stall("tasks")
+    s = Said()
+    p = s.make()
+    assert s.check(p, NOON) == []
+    assert s.check(p, NOON + dt.timedelta(minutes=9)) == []
+    said = [*s.check(p, NOON + dt.timedelta(minutes=10)), *s.check(p, NOON + dt.timedelta(minutes=45))]
+    assert len(said) == 1 and "waking it didn't help" in said[0]
+
+
+def test_meeting_notes_stalled_behind_a_stuck_mail_are_not_said_as_well() -> None:
+    """2026-10-19: meeting notes by email run after the mail pass in one loop; with Mail
+    stuck they never ran, and their stall was said on top of Mail's own trouble. Then Mail
+    was restarted and the woken pass worked: nothing more is said."""
+    t = NOON.timestamp()
+    syncstate.record("meetings_email", 1200, now=t - 5 * 3600)  # 10:42-ish: the last good pass
+    syncstate.record("mail", 1200, now=t - 5 * 3600)
+    syncstate.record("mail", 1200, error=TimeoutError("/usr/bin/osascript timed out"), now=t - 600)
+    s = Said()
+    p = s.make()
+    said = []
+    for minutes in (0, 18, 35):  # meeting notes woken, their pass never runs: mail fails first
+        said += s.check(p, NOON + dt.timedelta(minutes=minutes))
+        syncstate.record("mail", 1200, error=TimeoutError("timed out"), now=t + minutes * 60 + 60)
+    assert "meetings_email" in s.nudged
+    assert not any("meeting notes" in x.lower() for x in said), said
+    # Mail restarted; the woken pass works for both
+    end = t + 40 * 60
+    syncstate.record("mail", 1200, started=end - 23, now=end)
+    syncstate.record("meetings_email", 1200, started=end - 1, now=end)
+    assert s.check(p, NOON + dt.timedelta(minutes=41)) == []
+    assert s.check(p, NOON + dt.timedelta(minutes=70)) == []
+
+
+def test_a_slow_sync_s_woken_pass_gets_its_usual_time() -> None:
+    """A sync whose passes take 6 minutes isn't judged at the 10-minute grace."""
+    _stall("tasks", took_s=360)
+    s = Said()
+    p = s.make()
+    assert s.check(p, NOON) == []
+    assert s.check(p, NOON + dt.timedelta(minutes=15)) == []  # 3 x 6 min = 18 min to finish
+    assert len(s.check(p, NOON + dt.timedelta(minutes=18))) == 1
+
+
 @pytest.mark.parametrize(
     ("source", "error", "words"),
     [

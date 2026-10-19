@@ -14,8 +14,9 @@ needs the user. No AI, nothing sent anywhere.
     a GitHub item you waited on  "PR 117 in api, Fix the jitter buffer, was merged. You were
                                   waiting on Luca for it." (once; the task notes it was said)
 
-A stalled sync is woken first (syncstate.nudge), silently: it's spoken of only if it's
-still stalled [sync] grace_min later. Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
+A stalled sync is woken first (syncstate.nudge), silently: it's spoken of only if the
+woken pass failed, or didn't finish in [sync] grace_min (longer for a sync whose passes
+take longer: syncstate.woken), never in the check that woke it. Each thing is said once. Quiet hours skip the check altogether, so what's still ahead
 when they end (the morning's overlaps and tasks, an event just after) is said then.
 Checks that can't run (no calendar access) are skipped quietly.
 
@@ -162,11 +163,14 @@ class Pulse:
         except Exception as exc:  # an unreadable status file: nothing to say
             log.info("pulse: sync status skipped (%s)", exc)
             return []
-        for source in syncstate.to_nudge(sts, now.timestamp(), grace):
+        woken = syncstate.to_nudge(sts, now.timestamp(), grace)
+        for source in woken:
             try:
                 self.nudge(source)
             except Exception as exc:
                 log.info("pulse: %s not woken (%s)", source, exc)
+        # A sync woken now is judged by this pass, once it has had its time (syncstate.woken).
+        found = [(source, text) for source, text in found if source not in woken]
         return [text for source, text in found if self._once(f"sync:{source}:{now.date()}")]
 
     def wait(self, now: dt.datetime) -> float:
