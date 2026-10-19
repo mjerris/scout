@@ -1,10 +1,11 @@
 // Scout's web server, as the app uses it (src/scout/web.py). Pairing needs no web token:
 // a one-time code from a scout://pair link (POST /api/phone/pair {code, name}), or a
 // request the room approves by voice (/api/phone/pair/request, then .../status). After
-// that the app signs its SignalWire token requests with its device secret. It reaches the
+// that the app signs its SignalWire token requests with its device secret, and (while it
+// is open) shows other devices asking to pair, for an Approve or Deny signed the same way. It reaches the
 // Mac at its Tailscale name ([web] public_url, else the Tailscale Serve name,
 // https://<mac>.<tailnet>.ts.net).
-import { tokenRequest } from './sign';
+import { PAIR_REVIEW, pairDecidePurpose, signedFor, tokenRequest } from './sign';
 
 export class ServerError extends Error {
   constructor(
@@ -67,6 +68,26 @@ export interface PairRequest {
   match: string;
   expires_at: number;
 }
+
+/** A device asking to pair, as Scout shows it (every part cleaned by Scout). */
+export interface PendingPair {
+  id: string;
+  name: string;
+  match: string;
+  login: string;
+  owner: boolean;
+  peer: string;
+  ip: string;
+  agent: string;
+  at: number;
+  expires_at: number;
+}
+
+export type PairAnswer =
+  | { status: 'approved'; device: string }
+  | { status: 'denied' }
+  | { status: 'already'; result: string; via: string }
+  | { status: 'unknown' | 'error'; error?: string };
 
 export type PairStatus =
   | ({ status: 'approved' } & Paired)
@@ -145,12 +166,11 @@ export class ScoutServer {
   }
 
   /**
-   * Ask to pair without a code: Scout asks the room, with `match` shown on both. From the
-   * owner's own Tailscale login ([phone] pair_mode = "tailnet") it pairs at once.
+   * Ask to pair without a code: Scout asks for a yes (the room, the web UI, a paired
+   * phone, the Mac's alert, or its CLI), with `match` shown on both.
    */
-  async requestPairing(name: string): Promise<PairRequest | ({ status: 'approved' } & Paired)> {
-    const d = (await this.post('/api/phone/pair/request', { name })) as (Partial<PairRequest> & { status?: unknown }) | null;
-    if (d && d.status === 'approved') return { status: 'approved', ...ScoutServer.paired(d as Partial<Paired>, 'pairing') };
+  async requestPairing(name: string): Promise<PairRequest> {
+    const d = (await this.post('/api/phone/pair/request', { name })) as Partial<PairRequest> | null;
     if (!d || typeof d.request !== 'string' || typeof d.match !== 'string') {
       throw new ServerError('Scout answered the pairing request with something unexpected', 502);
     }
@@ -175,5 +195,40 @@ export class ScoutServer {
       throw new ServerError('Scout answered the token request with something unexpected', 502);
     }
     return { token: d.token, expires_at: typeof d.expires_at === 'number' ? d.expires_at : 0 };
+  }
+
+  /**
+   * The devices asking to pair now (signed by this phone). Scout holds the answer up to
+   * `wait` seconds for a change after `since` (the `version` it last returned).
+   */
+  async pairPending(since = -1, wait = 0): Promise<{ requests: PendingPair[]; version: number }> {
+    if (!this.me) throw new ServerError('This phone is not paired', 401);
+    const body = { ...signedFor(this.me, PAIR_REVIEW), since, wait };
+    const d = (await this.post('/api/phone/pair/pending', body, (wait + 15) * 1000)) as {
+      requests?: unknown;
+      version?: unknown;
+    } | null;
+    if (!d || !Array.isArray(d.requests) || typeof d.version !== 'number') {
+      throw new ServerError('Scout answered with something unexpected', 502);
+    }
+    const requests = d.requests.filter(
+      (r): r is PendingPair => !!r && typeof r === 'object' && typeof (r as PendingPair).id === 'string',
+    );
+    return { requests, version: d.version };
+  }
+
+  /** Approve or deny a device asking to pair (signed by this phone for exactly this answer). */
+  async pairDecide(id: string, approve: boolean): Promise<PairAnswer> {
+    if (!this.me) throw new ServerError('This phone is not paired', 401);
+    const body = { ...signedFor(this.me, pairDecidePurpose(id, approve)), id, approve };
+    let d: unknown;
+    try {
+      d = await this.post('/api/phone/pair/decide', body);
+    } catch (e) {
+      if (e instanceof ServerError && e.status === 404) return { status: 'unknown' };
+      throw e;
+    }
+    if (d && typeof d === 'object' && typeof (d as { status?: unknown }).status === 'string') return d as PairAnswer;
+    throw new ServerError('Scout answered with something unexpected', 502);
   }
 }

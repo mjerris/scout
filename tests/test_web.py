@@ -28,7 +28,7 @@ from aiohttp.test_utils import make_mocked_request
 
 import scout.mcp_server as mcp_mod
 import scout.web as web_mod
-from scout import phone_devices, phone_pairing
+from scout import phone_devices, phone_pairing, tailnet
 from scout.config import Config, PhoneConfig, WebConfig
 
 TOKEN = "t" * 32
@@ -69,6 +69,8 @@ class StubApp:
         self.rules = StubRules()
         self.pair_asked: list[tuple[str, str]] = []
         self.pair_answer: bool | None = True
+        self.pair_gate: asyncio.Event | None = None  # when set, the room's question waits for it
+        self.pair_cancelled = 0  # the room's question was withdrawn (another channel answered)
         self.announced: list[str] = []
         self.history: deque[dict[str, Any]] = deque(maxlen=300)
         self.listeners: set[asyncio.Queue[dict[str, Any]]] = set()
@@ -147,6 +149,12 @@ class StubApp:
 
     async def approve_pairing(self, name: str, match: str) -> bool | None:
         self.pair_asked.append((name, match))
+        if self.pair_gate is not None:
+            try:
+                await self.pair_gate.wait()
+            except asyncio.CancelledError:
+                self.pair_cancelled += 1
+                raise
         return self.pair_answer
 
     async def announce(self, text: str, who: str = "announce") -> None:
@@ -1352,115 +1360,211 @@ def test_a_paired_phone_signs_its_token_request(
     run(main())
 
 
-# --- pairing by the owner's own Tailscale identity ([phone] pair_mode = "tailnet") ----------
+# --- the Host allowlist (DNS rebinding) and identity from tailscaled ------------------------
 
+MAC = "mini.tail1234.ts.net"
 OWNER = "mike@example.com"
-SERVE = {"Tailscale-User-Login": OWNER, "Tailscale-User-Name": "Mike", "X-Forwarded-Proto": "https"}
+PHONE_IP = "100.101.102.103"
+PHONE_NODE = "mike-iphone.tail1234.ts.net"
 
 
-def test_the_identity_is_trusted_only_through_serve_on_loopback() -> None:
-    assert web_mod.serve_login("127.0.0.1", SERVE) == OWNER
-    assert web_mod.serve_login("::1", SERVE) == OWNER
-    # The same headers straight to a LAN or tailnet listener: anyone could send them.
-    assert web_mod.serve_login("192.168.1.5", SERVE) == ""
-    assert web_mod.serve_login("100.101.102.103", SERVE) == ""
-    # Serve always says https; without it, it isn't Serve.
-    assert web_mod.serve_login("127.0.0.1", {"Tailscale-User-Login": OWNER}) == ""
-    assert web_mod.serve_login("127.0.0.1", {"X-Forwarded-Proto": "https"}) == ""
+def fake_tailscale(whois: dict[str, tuple[str, str]] | None = None) -> tailnet.Tailnet:
+    """tailscaled as this Mac (MAC, owned by OWNER) sees it; `whois`: ip -> (login, node)."""
+    peers = {PHONE_IP: (OWNER, PHONE_NODE)} if whois is None else whois
 
+    def run(args: list[str]) -> str:
+        if args[:1] == ["status"]:
+            return json.dumps(
+                {
+                    "Self": {
+                        "DNSName": MAC + ".",
+                        "TailscaleIPs": ["100.85.0.1", "fd7a:115c:a1e0::1"],
+                        "UserID": 1,
+                    },
+                    "User": {"1": {"LoginName": OWNER}},
+                }
+            )
+        if args[:2] == ["whois", "--json"] and args[2] in peers:
+            login, node = peers[args[2]]
+            return json.dumps({"Node": {"Name": node + "."}, "UserProfile": {"LoginName": login}})
+        return ""
 
-def test_the_owner_is_read_from_tailscale_status() -> None:
-    status = {
-        "Self": {"UserID": 123, "HostName": "mac"},
-        "User": {"123": {"LoginName": OWNER}, "456": {"LoginName": "other@example.com"}},
-    }
-    assert web_mod.owner_login(status) == OWNER
-    assert web_mod.owner_login({"Self": {"UserID": 9}, "User": {}}) == ""
-    assert web_mod.owner_login({}) == ""
-
-
-def _request(s: aiohttp.ClientSession, srv: Server, headers: dict[str, str] | None = None) -> Any:
-    return s.post(srv.url + "/api/phone/pair/request", json={"name": "Mike's iPhone"}, headers=headers or {})
+    return tailnet.Tailnet(run=run)
 
 
 @pytest.fixture
-def owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(web_mod, "_tailscale_owner", lambda: OWNER)
+def tailscale(monkeypatch: pytest.MonkeyPatch) -> tailnet.Tailnet:
+    tn = fake_tailscale()
+    monkeypatch.setattr(tailnet, "_default", tn)
+    return tn
 
 
-def test_the_owner_pairs_at_once(token_file: Path, devices: Path, owner: None) -> None:
+def test_only_this_macs_names_are_allowed_as_host() -> None:
+    local = ["localhost", "127.0.0.1", "::1", "192.168.1.5", "100.85.0.1", "mini.local"]
+    anyport = [MAC]
+
+    def ok(host: str) -> bool:
+        return web_mod.host_allowed(host, 8765, local, anyport)
+
+    for good in ("localhost:8765", "127.0.0.1:8765", "[::1]:8765", "192.168.1.5:8765", "100.85.0.1:8765",
+                 "mini.local:8765", "LOCALHOST:8765", MAC, MAC + ":443", MAC + ":8443", MAC.upper() + "."):  # fmt: skip
+        assert ok(good), good
+    for bad in ("evil.example:8765", "evil.example", "localhost:3000", "localhost", "127.0.0.1",
+                "192.168.1.6:8765", f"{MAC}.evil.example", f"evil.{MAC}", "", " ", "localhost:8765@evil.example",
+                "evil.example/localhost:8765", "localhost:notaport", "127.0.0.2:8765"):  # fmt: skip
+        assert not ok(bad), bad
+
+
+def test_a_rebound_page_is_refused_before_any_handler(
+    token_file: Path, devices: Path, tailscale: Any
+) -> None:
+    """DNS rebinding: a page at evil.example points its name at 127.0.0.1. Its requests
+    reach Scout over loopback as same-origin, carrying any headers it likes (here the
+    owner's Tailscale identity as Serve would send it). Refused on the Host alone."""
     stub = StubApp()
+    stub.pair_answer = None  # nobody answers the one request that gets through
 
     async def main() -> None:
         async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
-            async with _request(s, srv, SERVE) as r:
-                assert r.status == 200 and r.headers["Cache-Control"] == "no-store"
-                got = await r.json()
-            for _ in range(50):
-                if stub.announced:
-                    break
-                await asyncio.sleep(0.01)
-        assert got["status"] == "approved" and got["address"] == ADDRESS
-        assert phone_devices.load_devices(devices)[got["device"]]["secret"] == got["secret"]
-        assert stub.pair_asked == []  # nobody was asked
-        assert stub.announced == ["Paired Mike's iPhone."]  # but the room hears it
-
-    run(main())
-
-
-def test_an_owner_listed_in_config_pairs_at_once(
-    token_file: Path, devices: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(web_mod, "_tailscale_owner", lambda: "")
-    stub = StubApp()
-
-    async def main() -> None:
-        async with (
-            serve(stub, phone=_phone(owners=["Mike@Example.com"])) as srv,
-            aiohttp.ClientSession() as s,
-            _request(s, srv, SERVE) as r,
-        ):
-            assert (await r.json())["status"] == "approved"
-
-    run(main())
-
-
-@pytest.mark.parametrize(
-    ("mode", "headers"),
-    [
-        ("tailnet", {**SERVE, "Tailscale-User-Login": "guest@example.com"}),  # the other user
-        ("tailnet", {}),  # no identity (a tagged device, or not through Serve)
-        ("approve", SERVE),  # the owner too
-    ],
-)
-def test_everyone_else_is_approved_in_the_room(
-    token_file: Path, devices: Path, owner: None, mode: str, headers: dict[str, str]
-) -> None:
-    stub = StubApp()
-    stub.pair_answer = False
-
-    async def main() -> None:
-        async with serve(stub, phone=_phone(pair_mode=mode)) as srv, aiohttp.ClientSession() as s:
-            async with _request(s, srv, headers) as r:
-                started = await r.json()
-            assert set(started) == {"request", "match", "expires_at"}
+            port = srv.url.rsplit(":", 1)[1]
+            evil = f"evil.example:{port}"
+            forged = {"Host": evil, "Origin": f"http://{evil}", "X-Forwarded-Proto": "https",
+                      "X-Forwarded-For": PHONE_IP, "X-Forwarded-Host": MAC, "Tailscale-User-Login": OWNER}  # fmt: skip
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": "x"}, headers=forged) as r:
+                assert r.status == 421
             async with s.post(
-                srv.url + "/api/phone/pair/status", json={"request": started["request"], "wait": 5}
+                srv.url + "/api/phone/pair/pending", json={}, headers={**forged, **srv.auth}
             ) as r:
-                assert (await r.json())["status"] == "denied"
-        assert [n for n, _ in stub.pair_asked] == ["Mike's iPhone"]
+                assert r.status == 421
+            async with s.get(srv.url + f"/?token={TOKEN}", headers={"Host": evil}) as r:
+                assert r.status == 421
+            async with s.post(
+                srv.url + "/api/discuss", json={"message": "hi"}, headers={**srv.auth, "Host": evil}
+            ) as r:
+                assert r.status == 421
+            with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
+                await s.ws_connect(srv.ws_url(), headers={**srv.auth, "Host": evil}, origin=f"http://{evil}")
+            assert exc.value.status == 421
+            # The same request under a name that is this Mac's goes through (and waits for a yes).
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": "x"}) as r:
+                assert r.status == 200 and "request" in await r.json()
+        assert stub.calls == [] and len(stub.pair_asked) == 1
         assert not devices.exists()
 
     run(main())
 
 
-def test_code_mode_takes_codes_only(token_file: Path, devices: Path, codes: Path, owner: None) -> None:
+def _req_from(remote: str, headers: dict[str, str]) -> aioweb.Request:
+    return make_mocked_request("POST", "/api/phone/pair/request", headers=headers).clone(remote=remote)
+
+
+SERVED = {"Host": MAC, "X-Forwarded-Host": MAC, "X-Forwarded-Proto": "https", "X-Forwarded-For": PHONE_IP,
+          "Tailscale-User-Login": OWNER}  # fmt: skip
+
+
+def test_serve_provenance_is_checked_before_any_identity_is_read() -> None:
+    assert web_mod.served_client("127.0.0.1", SERVED, [MAC]) == PHONE_IP
+    assert (
+        web_mod.served_client("::1", {**SERVED, "Host": "127.0.0.1:8765"}, [MAC]) == PHONE_IP
+    )  # X-Forwarded-Host
+    assert web_mod.served_client("192.168.1.9", SERVED, [MAC]) == ""  # not from this Mac
+    assert web_mod.served_client(PHONE_IP, SERVED, [MAC]) == ""
+    assert web_mod.served_client("127.0.0.1", {**SERVED, "X-Forwarded-Proto": "http"}, [MAC]) == ""
+    assert web_mod.served_client("127.0.0.1", SERVED, []) == ""  # no MagicDNS name known
+    other = {**SERVED, "Host": "evil.example:8765", "X-Forwarded-Host": "evil.example"}
+    assert web_mod.served_client("127.0.0.1", other, [MAC]) == ""
+    for xff in ("", "192.168.1.9", f"{PHONE_IP}, 100.64.0.2", "nonsense"):
+        assert web_mod.served_client("127.0.0.1", {**SERVED, "X-Forwarded-For": xff}, [MAC]) == "", xff
+
+
+def test_identity_comes_from_tailscaled_never_from_the_headers() -> None:
+    tn = fake_tailscale({PHONE_IP: (OWNER, PHONE_NODE), "100.64.0.7": ("guest@example.com", "guest.ts.net")})
+
+    def who(remote: str, headers: dict[str, str]) -> web_mod.Identity:
+        return run(web_mod.identify(_req_from(remote, headers), tn, [MAC]))
+
+    assert who("127.0.0.1", SERVED) == web_mod.Identity(OWNER, PHONE_NODE, PHONE_IP, "serve")
+    # The old trust: loopback + Tailscale-User-Login + https. Without Serve's Host it's nobody.
+    forged = {"Host": "127.0.0.1:8765", "X-Forwarded-Proto": "https", "Tailscale-User-Login": OWNER}
+    assert who("127.0.0.1", forged).login == ""
+    assert who("127.0.0.1", {**forged, "X-Forwarded-For": PHONE_IP}).login == ""
+    # Serve's shape, but the header names someone tailscaled doesn't: neither is believed.
+    assert who("127.0.0.1", {**SERVED, "Tailscale-User-Login": "guest@example.com"}).login == ""
+    # Serve's shape, but tailscaled doesn't know the client: no identity.
+    assert who("127.0.0.1", {**SERVED, "X-Forwarded-For": "100.64.0.99"}) == web_mod.Identity(
+        "", "", "100.64.0.99", "unverified"
+    )
+    # Straight to a tailnet listener: the TCP peer is whois'd; its headers don't matter.
+    assert who("100.64.0.7", {"Tailscale-User-Login": OWNER}) == web_mod.Identity(
+        "guest@example.com", "guest.ts.net", "100.64.0.7", "tailnet"
+    )
+    assert who("192.168.1.9", SERVED).login == ""  # the home network: nobody
+
+
+async def _pending(s: aiohttp.ClientSession, srv: Server) -> list[dict[str, Any]]:
+    async with s.post(srv.url + "/api/phone/pair/pending", json={}, headers=srv.auth) as r:
+        assert r.status == 200
+        got: list[dict[str, Any]] = (await r.json())["requests"]
+        return got
+
+
+def test_the_owner_through_serve_is_named_but_not_paired_at_once(
+    token_file: Path, devices: Path, tailscale: Any
+) -> None:
+    stub = StubApp()
+    stub.pair_answer = None  # nobody answers in the room
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            headers = {**SERVED, "User-Agent": "Scout/1.0 (iPhone)"}
+            async with s.post(
+                srv.url + "/api/phone/pair/request", json={"name": "Mike's iPhone"}, headers=headers
+            ) as r:
+                assert r.status == 200
+                started = await r.json()
+            assert set(started) == {"request", "match", "expires_at"}  # no secret: it waits
+            [p] = await _pending(s, srv)
+            assert p["login"] == OWNER and p["owner"] is True and p["peer"] == PHONE_NODE
+            assert p["ip"] == PHONE_IP and p["agent"] == "Scout/1.0 (iPhone)" and p["name"] == "Mike's iPhone"
+            assert "request" not in p and started["request"] not in json.dumps(
+                p
+            )  # the requester's handle stays secret
+        assert not devices.exists()
+
+    run(main())
+
+
+def test_forged_identity_headers_get_no_owner_status(token_file: Path, devices: Path, tailscale: Any) -> None:
+    """What serve_login used to believe: loopback, X-Forwarded-Proto: https and a
+    Tailscale-User-Login. Without Serve's provenance it is no one, and nothing pairs."""
+    stub = StubApp()
+    stub.pair_answer = None
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            forged = {
+                "X-Forwarded-Proto": "https",
+                "Tailscale-User-Login": OWNER,
+                "Tailscale-User-Name": "Mike",
+            }
+            async with s.post(
+                srv.url + "/api/phone/pair/request", json={"name": "Mike's iPhone"}, headers=forged
+            ) as r:
+                assert (await r.json()).get("status") != "approved"
+            [p] = await _pending(s, srv)
+            assert p["login"] == "" and p["owner"] is False
+        assert not devices.exists()
+
+    run(main())
+
+
+def test_code_mode_takes_codes_only(token_file: Path, devices: Path, codes: Path, tailscale: Any) -> None:
     stub = StubApp()
 
     async def main() -> None:
         code, _ = phone_pairing.mint()
         async with serve(stub, phone=_phone(pair_mode="code")) as srv, aiohttp.ClientSession() as s:
-            async with _request(s, srv, SERVE) as r:
+            async with s.post(srv.url + "/api/phone/pair/request", json={"name": "x"}, headers=SERVED) as r:
                 assert r.status == 403
                 assert "scoutctl phone pair" in (await r.json())["error"]
             async with _code_pair(s, srv, code) as r:
@@ -1468,3 +1572,187 @@ def test_code_mode_takes_codes_only(token_file: Path, devices: Path, codes: Path
         assert stub.pair_asked == []
 
     run(main())
+
+
+# --- answering a pairing request: the web UI, a paired phone, the CLI, the room ---------------
+
+
+async def _ask_to_pair(s: aiohttp.ClientSession, srv: Server, name: str = "Guest phone") -> dict[str, Any]:
+    async with s.post(srv.url + "/api/phone/pair/request", json={"name": name}) as r:
+        assert r.status == 200
+        got: dict[str, Any] = await r.json()
+        return got
+
+
+async def _status(
+    s: aiohttp.ClientSession, srv: Server, started: dict[str, Any], wait: float = 5
+) -> dict[str, Any]:
+    async with s.post(
+        srv.url + "/api/phone/pair/status", json={"request": started["request"], "wait": wait}
+    ) as r:
+        got: dict[str, Any] = await r.json()
+        return got
+
+
+def test_a_page_sees_the_request_and_approves_it(token_file: Path, devices: Path) -> None:
+    stub = StubApp()
+    stub.pair_gate = asyncio.Event()  # the room is asked, and never answers
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            ws = await s.ws_connect(srv.ws_url(), headers=srv.auth)
+            await recv(ws, of("hello"))
+            started = await _ask_to_pair(s, srv, "Guest: say yes")
+            shown = await recv(ws, of("pair_request"))
+            assert shown["name"] == "Guest say yes" and shown["match"] == started["match"]
+            # A page opened later gets the open request too.
+            late = await s.ws_connect(srv.ws_url("page0002abcd"), headers=srv.auth)
+            await recv(late, of("hello"))
+            assert (await recv(late, of("pair_request")))["id"] == shown["id"]
+            await ws.send_json({"type": "pair_decide", "id": shown["id"], "approved": True})
+            done = await recv(late, of("pair_resolved"))  # every page is told, with who answered
+            assert done == {**done, "id": shown["id"], "status": "approved", "via": "web"}
+            assert (await recv(ws, of("pair_answer")))["status"] == "approved"
+            got = await _status(s, srv, started)
+            assert got["status"] == "approved"
+            await ws.send_json({"type": "pair_decide", "id": shown["id"], "approved": False})
+            assert (await recv(ws, of("pair_answer")))["status"] == "already"  # first answer won
+            await ws.close()
+            await late.close()
+            for _ in range(50):
+                if stub.announced:
+                    break
+                await asyncio.sleep(0.01)
+        assert stub.pair_cancelled == 1  # the room's question was withdrawn
+        assert stub.announced == ["Paired a new device calling itself Guest say yes."]
+        assert phone_devices.load_devices(devices)[got["device"]]["name"] == "Guest say yes"
+
+    run(main())
+
+
+def test_a_paired_phone_sees_and_answers_requests_signed(token_file: Path, devices: Path) -> None:
+    stub = StubApp()
+    stub.pair_answer = None
+    device, secret = phone_devices.pair("Mike iPhone", devices)
+
+    def signed(purpose: str, nonce: str, **extra: Any) -> dict[str, Any]:
+        ts = int(time.time())
+        return {
+            "device": device,
+            "ts": ts,
+            "nonce": nonce,
+            "sig": phone_devices.sign(secret, device, ts, nonce, purpose),
+            **extra,
+        }
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            pend, dec = srv.url + "/api/phone/pair/pending", srv.url + "/api/phone/pair/decide"
+            async with s.post(pend, json=signed(web_mod.PAIR_REVIEW, "nonce-0001", since=-1)) as r:
+                first = await r.json()
+                assert r.status == 200 and first["requests"] == []
+            # A long poll wakes when a device asks.
+            poll = asyncio.create_task(
+                s.post(pend, json=signed(web_mod.PAIR_REVIEW, "nonce-0002", since=first["version"], wait=5))
+            )
+            await asyncio.sleep(0.05)
+            started = await _ask_to_pair(s, srv)
+            async with await asyncio.wait_for(poll, 3) as r:
+                [p] = (await r.json())["requests"]
+            rid = p["id"]
+            async with s.post(pend, json={"since": -1}) as r:  # unsigned
+                assert r.status == 401
+            async with s.post(pend, json=signed(web_mod.PAIR_REVIEW, "nonce-0002")) as r:  # replayed
+                assert r.status == 401
+            # A signature for "approve" can't carry "deny" (or another request).
+            async with s.post(
+                dec, json=signed(web_mod.pair_decide_purpose(rid, True), "nonce-0003", id=rid, approve=False)
+            ) as r:
+                assert r.status == 401
+            async with s.post(
+                dec,
+                json=signed(
+                    web_mod.pair_decide_purpose("ZZZZZZ", False), "nonce-0004", id=rid, approve=False
+                ),
+            ) as r:
+                assert r.status == 401
+            async with s.post(
+                dec, json=signed(web_mod.pair_decide_purpose(rid, False), "nonce-0005", id=rid, approve=False)
+            ) as r:
+                assert r.status == 200 and await r.json() == {"status": "denied"}
+            assert (await _status(s, srv, started))["status"] == "denied"
+            async with s.post(
+                dec, json=signed(web_mod.pair_decide_purpose(rid, True), "nonce-0006", id=rid, approve=True)
+            ) as r:
+                got = await r.json()
+                assert got == {"status": "already", "result": "denied", "via": f"phone {device}"}
+            phone_devices.forget(device, devices)
+            async with s.post(pend, json=signed(web_mod.PAIR_REVIEW, "nonce-0007")) as r:  # a forgotten phone
+                assert r.status == 401
+        assert len(phone_devices.load_devices(devices)) == 1  # nothing new was paired
+
+    run(main())
+
+
+def test_scoutctl_lists_and_approves_a_request(
+    token_file: Path, devices: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import scout.config as config_mod
+
+    stub = StubApp()
+    stub.pair_answer = None
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            port = int(srv.url.rsplit(":", 1)[1])
+            monkeypatch.setattr(config_mod, "load", lambda *a, **k: Config(web=WebConfig(port=port)))
+            assert await asyncio.to_thread(phone_devices.main, ["pair", "list"]) == 0
+            assert "No device is asking to pair." in capsys.readouterr().out
+            started = await _ask_to_pair(s, srv)
+            assert await asyncio.to_thread(phone_devices.main, ["pair", "list"]) == 0
+            [p] = await _pending(s, srv)
+            listed = capsys.readouterr().out
+            assert p["id"] in listed and "Guest phone" in listed and f"code {started['match']}" in listed
+            assert await asyncio.to_thread(phone_devices.main, ["pair", "approve", p["id"].lower()]) == 0
+            assert "Approved: paired as d" in capsys.readouterr().out
+            assert (await _status(s, srv, started))["status"] == "approved"
+            assert await asyncio.to_thread(phone_devices.main, ["pair", "deny", p["id"]]) == 1
+            assert "Already answered (approved by cli)" in capsys.readouterr().out
+            assert await asyncio.to_thread(phone_devices.main, ["pair", "deny", "NOSUCH"]) == 1
+            assert "No pairing request" in capsys.readouterr().err
+
+    run(main())
+
+
+def test_a_request_nobody_answers_expires(
+    token_file: Path, devices: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = StubApp()
+    stub.pair_gate = asyncio.Event()
+    real = phone_pairing.PairRequests.__init__
+
+    def short(self: phone_pairing.PairRequests, *a: Any, **k: Any) -> None:
+        real(self, *a, **{**k, "ttl_s": 0.2})
+
+    monkeypatch.setattr(phone_pairing.PairRequests, "__init__", short)
+
+    async def main() -> None:
+        async with serve(stub, phone=_phone()) as srv, aiohttp.ClientSession() as s:
+            ws = await s.ws_connect(srv.ws_url(), headers=srv.auth)
+            await recv(ws, of("hello"))
+            started = await _ask_to_pair(s, srv)
+            assert (await _status(s, srv, started, wait=3))["status"] == "expired"
+            assert (await recv(ws, of("pair_resolved")))["status"] == "expired"
+            assert await _pending(s, srv) == []
+            await ws.close()
+        assert stub.pair_cancelled == 1
+        assert not devices.exists()
+
+    run(main())
+
+
+def test_the_web_page_shows_requester_details_as_text() -> None:
+    html = (Path(web_mod.__file__).parent / "web.html").read_text()
+    body = html[html.index("function showPair") : html.index("function pairDone")]
+    assert "innerHTML" not in body and "textContent" in body
+    assert 'type: "pair_decide"' in body and "calling itself" in body

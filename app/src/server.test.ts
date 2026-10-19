@@ -1,5 +1,5 @@
 import { normalizeServer, ScoutServer, ServerError } from './server';
-import { sign, TOKEN_PURPOSE } from './sign';
+import { PAIR_REVIEW, pairDecidePurpose, sign, TOKEN_PURPOSE } from './sign';
 
 test('normalizeServer: https Tailscale names, localhost over http, nothing else in the clear', () => {
   expect(normalizeServer('mac.tail1234.ts.net')).toBe('https://mac.tail1234.ts.net');
@@ -92,12 +92,25 @@ test('a network failure says to turn Tailscale on', async () => {
   );
 });
 
-test("the owner's request comes back paired", async () => {
-  const f = fakeFetch(200, { status: 'approved', device: 'd1', secret: 's', address: '/private/scout' });
-  expect(await new ScoutServer('https://m', null, f.impl).requestPairing('Mike iPhone')).toEqual({
-    status: 'approved',
-    device: 'd1',
-    secret: 's',
-    address: '/private/scout',
-  });
+test('pairing requests from other devices: listed and answered with signatures for exactly that', async () => {
+  const me = { device: 'd1234567890abcdef', secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8' };
+  const req = { id: 'ABCDEF', name: 'Guest', match: '47', login: '', owner: false, peer: '', ip: '100.64.0.9', agent: 'x', at: 1, expires_at: 2 };
+  const f = fakeFetch(200, { requests: [req, null], version: 3 });
+  expect(await new ScoutServer('https://m', me, f.impl).pairPending(2, 20)).toEqual({ requests: [req], version: 3 });
+  const pend = JSON.parse(f.calls[0]!.init.body as string) as Record<string, unknown>;
+  expect(f.calls[0]!.url).toBe('https://m/api/phone/pair/pending');
+  expect(pend).toMatchObject({ device: me.device, since: 2, wait: 20 });
+  expect(pend.sig).toBe(sign(me.secret, me.device, pend.ts as number, pend.nonce as string, PAIR_REVIEW));
+
+  const g = fakeFetch(200, { status: 'denied' });
+  expect(await new ScoutServer('https://m', me, g.impl).pairDecide('ABCDEF', false)).toEqual({ status: 'denied' });
+  const dec = JSON.parse(g.calls[0]!.init.body as string) as Record<string, unknown>;
+  expect(g.calls[0]!.url).toBe('https://m/api/phone/pair/decide');
+  expect(dec).toMatchObject({ id: 'ABCDEF', approve: false });
+  expect(dec.sig).toBe(sign(me.secret, me.device, dec.ts as number, dec.nonce as string, pairDecidePurpose('ABCDEF', false)));
+  expect(pairDecidePurpose('ABCDEF', true)).toBe('scout:pair-decide|ABCDEF|approve');
+
+  const gone = fakeFetch(404, { status: 'unknown' });
+  expect(await new ScoutServer('https://m', me, gone.impl).pairDecide('ZZZZZZ', true)).toEqual({ status: 'unknown' });
+  await expect(new ScoutServer('https://m', null, gone.impl).pairPending()).rejects.toThrow(/not paired/);
 });

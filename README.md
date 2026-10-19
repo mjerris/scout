@@ -524,13 +524,17 @@ Pairing the phone app, in three steps (nothing to type, and the web token stays 
 1. Turn on Tailscale on the iPhone.
 2. Run `scripts/scoutctl.sh phone pair` (or **Pair the phone app** on the `/phone` page)
    and point the iPhone Camera at the QR code; tap the Scout banner. Or, at home, open the
-   app: it finds Scout on the network ("Found <your Mac>"). From your own Tailscale login
-   it pairs at once (Scout says "Paired <phone>."); anyone else, Scout asks out loud "<phone>
-   wants to pair with Scout, code 47. Should I allow it?"; say yes if the phone shows 47.
+   app: it finds Scout on the network ("Found <your Mac>") and asks to pair. Nothing pairs
+   until you say yes from something you already have: a phone already paired (its app
+   shows the request while open), Scout's web page, the alert on the Mac, the room ("A new
+   device calling itself <phone> wants to pair with Scout, code 47. Should I allow it?"),
+   or `scoutctl phone pair approve <id>`. Approve only if the phone shows the same code.
 3. Tap **Pair** in the app.
 
 ```sh
 scripts/scoutctl.sh phone pair               # a one-time code (10 minutes) as a QR code and scout:// link
+scripts/scoutctl.sh phone pair list          # devices asking to pair now (id, name, code, Tailscale login)
+scripts/scoutctl.sh phone pair approve <id>  # or deny <id>; the first answer from anywhere wins
 scripts/scoutctl.sh phone list
 scripts/scoutctl.sh phone forget <device>    # a lost phone stops working at once
 ```
@@ -539,10 +543,14 @@ The link is `scout://pair?server=<[web] public_url, else the Tailscale Serve nam
 A code works once; only its hash is stored, and wrong codes are rate-limited. Scout
 advertises itself as `_scout._tcp` over Bonjour (with its https address, never a token)
 for the app to find. The app's manual form takes the address and code, or a pasted link.
-`[phone] pair_mode` is `"tailnet"` (default), `"approve"` (always ask in the room) or
-`"code"` (QR codes only); `[phone] owners` adds Tailscale logins that count as you.
-Your login is believed only from Tailscale Serve (its `Tailscale-User-Login` header, on
-127.0.0.1), never from the LAN listeners.
+`[phone] pair_mode` is `"tailnet"` (default) or `"approve"` (a request waits for a yes, as
+above) or `"code"` (QR codes only); `[phone] owners` adds Tailscale logins that count as
+you, and `[phone] pair_alert = false` turns the Mac's alert off. The prompt says which
+Tailscale login asked, as tailscaled reports it (`tailscale whois` for the address the
+request came from), never as the request's own headers claim; it labels the request
+and never pairs it by itself. Scout's web server answers only to this Mac's own names
+(localhost, its LAN and tailnet addresses at its port, its Tailscale name), so a web page
+that points its own name at 127.0.0.1 (DNS rebinding) is refused.
 
 Each call carries `userVariables = {device, ts, nonce, sig}` with
 `sig = hex(HMAC-SHA256(secret, "device|ts|nonce|address"))` (the secret base64url-decoded

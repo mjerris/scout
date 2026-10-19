@@ -17,11 +17,11 @@ import re
 import secrets
 import shutil
 import socket
-import subprocess
 import time
 import uuid
 from collections import deque
 from collections.abc import Coroutine, Iterable
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol
@@ -29,8 +29,9 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import WSCloseCode, WSMsgType, web
+from aiohttp.typedefs import Handler
 
-from . import phone_devices, phone_pairing
+from . import phone_devices, phone_pairing, tailnet
 from .audio import SAMPLE_RATE, decode_to_pcm
 from .config import DATA, PhoneConfig, WebConfig
 
@@ -402,9 +403,6 @@ def _is_loopback(req: web.Request) -> bool:
         return False
 
 
-_TAILNET6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")  # Tailscale's IPv6 range
-
-
 def tailnet_peer(remote: str | None) -> bool:
     """A request from this Mac (Tailscale Serve proxies from 127.0.0.1) or the tailnet,
     not from the home network."""
@@ -412,51 +410,141 @@ def tailnet_peer(remote: str | None) -> bool:
         ip = ipaddress.ip_address(remote or "")
     except ValueError:
         return False
-    return ip.is_loopback or ip in _CGNAT or ip in _TAILNET6
+    return ip.is_loopback or tailnet.is_tailnet_ip(str(ip))
 
 
-def serve_login(remote: str | None, headers: Any) -> str:
-    """The Tailscale login Tailscale Serve vouches for (Tailscale-User-Login), or "". Only
-    on a request Serve proxied: from this Mac's loopback, as https. Serve removes any copy
-    a client sends, and adds none for tagged devices or Funnel; a LAN or tailnet listener
-    gets whatever the client sent, so it is never believed there."""
+# --- which host names a request may use (DNS rebinding) ------------------------------------
+#
+# A web page anywhere can point its own host name at 127.0.0.1 (DNS rebinding). The
+# browser then sends that page's requests to Scout over loopback, as same-origin (Origin
+# and Host both say the attacker's name), with any headers the page likes. So every
+# request must name, in its Host header, an address that is really this Mac's: localhost
+# or the LAN / tailnet address at Scout's own port, or its Tailscale MagicDNS name (which
+# only Tailscale Serve, or a device on the tailnet, can be sending). Anything else is
+# refused with 421 before any handler runs.
+
+LOCAL_NAMES = ("localhost", "127.0.0.1", "::1")
+
+
+def split_host(host: str) -> tuple[str, int | None]:
+    """("name", port) from a Host header (lower case, no trailing dot, IPv6 without
+    brackets). ("", None) when it can't be read."""
+    host = host.strip().lower()
+    if not host or any(c in host for c in "/@?#\\ "):
+        return "", None
     try:
-        ip = ipaddress.ip_address(remote or "")
+        u = urlsplit("//" + host)
+        port = u.port
     except ValueError:
-        return ""
-    if not ip.is_loopback:
+        return "", None
+    name = (u.hostname or "").rstrip(".")
+    return name, port
+
+
+def host_allowed(host: str, port: int, local: Iterable[str], anyport: Iterable[str]) -> bool:
+    """`host` (a Host header) names this Mac: one of `local` at `port`, or one of
+    `anyport` (the MagicDNS name and [web] public_url's host, which Tailscale Serve may
+    front on 443 or another port)."""
+    name, p = split_host(host)
+    if not name:
+        return False
+    if name in {n.lower().rstrip(".") for n in anyport if n}:
+        return True
+    return p == port and name in {n.lower().strip("[]").rstrip(".") for n in local if n}
+
+
+def _hostname_aliases() -> set[str]:
+    """This Mac's own host name, with and without .local (Bonjour)."""
+    name = socket.gethostname().strip().lower().rstrip(".")
+    if not name:
+        return set()
+    base = name.removesuffix(".local")
+    return {name, base, base + ".local"}
+
+
+# --- who is asking (owner identity) --------------------------------------------------------
+#
+# Identity comes from tailscaled (tailnet.py: `tailscale whois` on the LocalAPI), for the
+# address the request really came from, never from a request's own headers:
+# - On a tailnet listener the TCP peer is the device itself: whois it.
+# - Tailscale Serve connects from this Mac's loopback. It keeps the Host the client asked
+#   for (this Mac's MagicDNS name), says X-Forwarded-Proto: https, and sets
+#   X-Forwarded-For to the client's tailnet address (replacing any copy the client sent),
+#   along with Tailscale-User-Login (removing any copy). Only a request that looks like
+#   that is taken as Serve's, and even then the login is whois'd from X-Forwarded-For
+#   rather than read from Tailscale-User-Login: a header that disagrees with tailscaled
+#   voids it. A browser page can't forge any of this: DNS rebinding can't make its Host
+#   this Mac's MagicDNS name (the allowlist above refuses its own name), and a
+#   cross-origin page can't send custom headers without a CORS preflight Scout never
+#   grants. What remains is a program running on this Mac, which could read Scout's web
+#   token anyway.
+# And identity only labels a pairing request; it never pairs a device by itself.
+
+
+@dataclass(frozen=True)
+class Identity:
+    login: str  # the Tailscale login tailscaled vouches for ("" when none)
+    node: str  # the device's tailnet name
+    ip: str  # where the request came from (the tailnet client, for a Serve request)
+    via: str  # "serve", "tailnet", "local", "lan", or "unverified"
+
+
+def served_client(remote: str | None, headers: Any, anyport: Iterable[str]) -> str:
+    """The tailnet address of the client a Tailscale Serve request is for, or "" if the
+    request doesn't look like Serve's: from loopback, as https, for this Mac's MagicDNS
+    name (in Host or X-Forwarded-Host), with exactly one tailnet address in X-Forwarded-For."""
+    try:
+        if not ipaddress.ip_address(remote or "").is_loopback:
+            return ""
+    except ValueError:
         return ""
     if headers.get("X-Forwarded-Proto", "").split(",")[0].strip() != "https":
         return ""
-    return str(headers.get("Tailscale-User-Login", "")).strip()
-
-
-def owner_login(status: Any) -> str:
-    """This Mac's own Tailscale login, from `tailscale status --json`."""
-    try:
-        uid = status["Self"]["UserID"]
-        return str(status["User"][str(uid)]["LoginName"]).strip()
-    except (KeyError, TypeError):
+    names = {n.lower().rstrip(".") for n in anyport if n}
+    hosts = [headers.get("Host", ""), headers.get("X-Forwarded-Host", "")]
+    if not names or not any(split_host(h.split(",")[0])[0] in names for h in hosts if h):
         return ""
+    fwd = [f.strip() for f in str(headers.get("X-Forwarded-For", "")).split(",") if f.strip()]
+    if len(fwd) != 1 or not tailnet.is_tailnet_ip(fwd[0]):
+        return ""
+    return fwd[0]
 
 
-def _tailscale_owner() -> str:
-    for exe in _tailscale_exes():
-        try:
-            out = subprocess.run(  # noqa: S603 (a fixed program with fixed arguments)
-                [exe, "status", "--json"], capture_output=True, text=True, timeout=5, check=False
-            ).stdout
-            login = owner_login(json.loads(out or "{}"))
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            log.info("web: tailscale status not read (%s)", exc)
-            continue
-        if login:
-            return login
-    return ""
+async def identify(req: web.Request, tn: tailnet.Tailnet, anyport: Iterable[str]) -> Identity:
+    """Who sent `req`, by tailscaled's account (see above)."""
+    remote = req.remote or ""
+    if tailnet.is_tailnet_ip(remote):  # straight to a tailnet listener
+        peer = await asyncio.to_thread(tn.whois, remote)
+        return (
+            Identity(peer.login, peer.node, remote, "tailnet")
+            if peer
+            else Identity("", "", remote, "unverified")
+        )
+    if not _is_loopback(req):
+        return Identity("", "", remote, "lan")
+    client = served_client(remote, req.headers, anyport)
+    if not client:
+        return Identity("", "", remote, "local")
+    peer = await asyncio.to_thread(tn.whois, client)
+    if peer is None:
+        return Identity("", "", client, "unverified")
+    claimed = str(req.headers.get("Tailscale-User-Login", "")).strip()
+    if claimed and claimed.casefold() != peer.login.casefold():
+        log.warning("web: a Serve request's login header disagrees with tailscaled; ignoring both")
+        return Identity("", peer.node, client, "unverified")
+    return Identity(peer.login, peer.node, client, "serve")
 
 
 PAIR_MODES = ("tailnet", "approve", "code")
-OWNER_TTL_S = 600.0
+# What a paired phone signs (in place of the agent address) to see pairing requests, and
+# to answer one: the answer's purpose names the request and the answer, so a signature
+# for one can't be used for another.
+PAIR_REVIEW = "scout:pair-review"
+MAC_ALERT = phone_pairing.OSASCRIPT  # "" turns the Mac's alert off (tests)
+
+
+def pair_decide_purpose(rid: str, approve: bool) -> str:
+    return f"scout:pair-decide|{rid}|{'approve' if approve else 'deny'}"
 
 
 def _netloc(scheme: str, host: str) -> str:
@@ -741,21 +829,74 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
     phone_page = files.joinpath("phone.html").read_text()
     phone_js = {name: files.joinpath(name).read_text() for name in ("phone.js", "phone_sign.js")}
     hub = _Hub(assistant)
-    pair_requests = phone_pairing.PairRequests(
-        assistant.approve_pairing, lambda name: phone_devices.pair(name)
-    )
+    tn = tailnet.default()
     pair_mode = phone.pair_mode if phone.pair_mode in PAIR_MODES else "approve"
     if pair_mode != phone.pair_mode:
         log.warning(
-            "web: [phone] pair_mode %r is not one of %s; asking in the room", phone.pair_mode, PAIR_MODES
+            "web: [phone] pair_mode %r is not one of %s; asking for approval", phone.pair_mode, PAIR_MODES
         )
-    owner_cache: list[tuple[float, str]] = []
+
+    async def ask_room(view: dict[str, Any]) -> bool | None:
+        return await assistant.approve_pairing(str(view.get("name", "")), str(view.get("match", "")))
+
+    askers: list[tuple[str, phone_pairing.Asker]] = [("voice", ask_room)]
+    if phone.pair_alert and MAC_ALERT and Path(MAC_ALERT).exists():
+        askers.append(("mac", phone_pairing.mac_alert(MAC_ALERT)))
+    pair_requests = phone_pairing.PairRequests(lambda name: phone_devices.pair(name), askers)
+
+    def on_pairing(kind: str, data: dict[str, Any]) -> None:
+        """Every open page sees a pairing request come and go (with who answered it)."""
+        for c in list(hub.conns):
+            c.push({"type": kind, "ts": time.time(), **data})
+        if kind == "pair_resolved" and data.get("status") == "approved":
+            name = phone_pairing.clean_name(data.get("name"))
+            hub.spawn(
+                assistant.announce(
+                    f"Paired a new device calling itself {name}." if name else "Paired a new device."
+                )
+            )
+
+    pair_requests.listeners.append(on_pairing)
 
     async def owners() -> set[str]:
-        """The logins that count as the owner: this Mac's own (kept a while) and [phone] owners."""
-        if not owner_cache or time.monotonic() - owner_cache[0][0] > OWNER_TTL_S:
-            owner_cache[:] = [(time.monotonic(), await asyncio.to_thread(_tailscale_owner))]
-        return {o.casefold() for o in [owner_cache[0][1], *phone.owners] if o.strip()}
+        """The logins that count as the owner: this Mac's own (tailscale status) and [phone] owners."""
+        me = await asyncio.to_thread(tn.me)
+        return {o.casefold() for o in [me.owner, *phone.owners] if o.strip()}
+
+    # --- the Host allowlist (see host_allowed) ---
+
+    public_host = split_host(urlsplit(cfg.public_url.strip()).netloc)[0] if cfg.public_url.strip() else ""
+    allowed: dict[str, Any] = {"at": -math.inf, "local": set(), "anyport": set()}
+
+    async def allowed_hosts(refresh: bool = False) -> tuple[set[str], set[str]]:
+        """(names allowed at Scout's port, names allowed on any port), kept REBIND_SECONDS."""
+        if refresh or time.monotonic() - allowed["at"] > REBIND_SECONDS:
+            me = await asyncio.to_thread(tn.me, refresh)
+            literal = {h for h in cfg.hosts if h not in ("localhost", "lan", "tailscale")}
+            local = {*LOCAL_NAMES, *literal, *sites, *me.ips, *_hostname_aliases()}
+            if lan := _lan_ip():
+                local.add(lan)
+            allowed.update(at=time.monotonic(), local=local, anyport={n for n in (me.name, public_host) if n})
+        return allowed["local"], allowed["anyport"]
+
+    def local_port(req: web.Request) -> int:
+        if cfg.port:
+            return cfg.port
+        sock = req.transport.get_extra_info("sockname") if req.transport else None
+        return int(sock[1]) if sock else 0
+
+    @web.middleware
+    async def check_host(request: web.Request, handler: Handler) -> web.StreamResponse:
+        host, port = request.headers.get("Host", ""), local_port(request)
+        local, anyport = await allowed_hosts()
+        if not host_allowed(host, port, local, anyport):
+            local, anyport = await allowed_hosts(refresh=True)  # a new LAN or tailnet address?
+            if not host_allowed(host, port, local, anyport):
+                log.warning(
+                    "web: refused a request for host %r from %s (not this Mac's)", host[:100], request.remote
+                )
+                raise web.HTTPMisdirectedRequest(text="That host name isn't this Scout.")
+        return await handler(request)
 
     # A phone's signed token request: its secret over device|ts|nonce|TOKEN_PURPOSE.
     token_check = phone_devices.CallCheck(phone_pairing.TOKEN_PURPOSE, 60.0)
@@ -977,8 +1118,11 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         return resp
 
     async def api_phone_pair_request(req: web.Request) -> web.StreamResponse:
-        """A phone asks to pair without a code; the room approves it by voice (or on the
-        web UI). Only from the tailnet."""
+        """A phone asks to pair without a code. Only from the tailnet (or Tailscale Serve).
+        Nothing pairs here: the request waits for an answer from a channel the owner
+        already holds (PairRequests: the web UI, the paired phones, the room, the Mac's
+        alert, the CLI), the owner's own Tailscale login included. Its identity, from
+        tailscaled (`identify`), labels the prompt."""
         if not origin_ok(req):
             raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
         if not tailnet_peer(req.remote):
@@ -993,28 +1137,80 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             return refused(
                 403, "Scout pairs phones by code only here: run scoutctl phone pair and scan the QR code."
             )
-        login = serve_login(req.remote, req.headers)
-        if pair_mode == "tailnet" and login and login.casefold() in await owners():
-            try:
-                device, secret = await asyncio.to_thread(phone_devices.pair, name)
-            except (OSError, ValueError) as exc:
-                log.warning("web: pairing %r failed: %s", name, exc)
-                return refused(500, f"Couldn't pair: {exc}")
-            log.info("web: paired %s (%s) at once: it is the owner's Tailscale login %s", device, name, login)
-            hub.spawn(assistant.announce(f"Paired {name}."))
-            resp = web.json_response(
-                {"status": "approved", "device": device, "secret": secret, "address": phone.address}
-            )
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
-        if login:
-            log.info("web: pairing request from Tailscale login %s (not the owner): asking the room", login)
+        _, anyport = await allowed_hosts()
+        ident = await identify(req, tn, anyport)
+        owner = bool(ident.login) and ident.login.casefold() in await owners()
+        who = {
+            "login": ident.login,
+            "owner": owner,
+            "peer": ident.node,
+            "ip": ident.ip,
+            "agent": req.headers.get("User-Agent", ""),
+        }
         try:
-            started = pair_requests.start(name)
+            started = pair_requests.start(name, who)
         except phone_pairing.PairRefused as exc:
-            log.warning("web: a pairing request from %r refused: %s", name, exc)
+            log.warning("web: a pairing request refused: %s", exc)
             return refused(exc.status, str(exc))
+        log.info("web: pairing request from %s (%s, login %s): waiting for an answer",
+                 ident.ip, ident.via, ident.login or "none")  # fmt: skip
         resp = web.json_response(started)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def pair_reviewer(req: web.Request, b: dict[str, Any], purpose: str) -> str | None:
+        """Who may see or answer pairing requests: the web token (the CLI sends it as a
+        Bearer header: "cli"; a page's cookie: "web"), or a paired phone signing `purpose`
+        with its device secret ("phone <device>"). None for anyone else."""
+        if authed(req):
+            return "cli" if req.headers.get("Authorization", "").startswith("Bearer ") else "web"
+        verdict = token_check.check(b, address=purpose)
+        if verdict.ok:
+            return f"phone {verdict.device}"
+        log.warning("web: a pairing review refused: %s", verdict.reason)
+        return None
+
+    async def api_phone_pair_pending(req: web.Request) -> web.StreamResponse:
+        """The devices asking to pair now, for a paired phone's app (signed PAIR_REVIEW;
+        waits up to `wait` seconds for a change after `since`), the CLI or the web UI."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            wait = _number(b.get("wait"), 0.0, 25.0)
+            since = b.get("since", -1)
+            if isinstance(since, bool) or not isinstance(since, int):
+                raise TypeError("since must be a number")
+        except (ValueError, TypeError) as exc:
+            if not authed(req):
+                raise web.HTTPUnauthorized() from None
+            return refused(400, str(exc))
+        if pair_reviewer(req, b, PAIR_REVIEW) is None:
+            raise web.HTTPUnauthorized()
+        version = await pair_requests.changed(since, wait)
+        resp = web.json_response({"requests": pair_requests.pending(), "version": version})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def api_phone_pair_decide(req: web.Request) -> web.StreamResponse:
+        """Answer a device asking to pair: {id, approve}. The first answer from any
+        channel wins; a later one gets {"status": "already"}."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            rid, approve = b.get("id"), b.get("approve")
+            if not isinstance(rid, str) or not isinstance(approve, bool):
+                raise TypeError("id must be a string and approve true or false")
+        except (ValueError, TypeError) as exc:
+            if not authed(req):
+                raise web.HTTPUnauthorized() from None
+            return refused(400, str(exc))
+        via = pair_reviewer(req, b, pair_decide_purpose(rid, approve))
+        if via is None:
+            raise web.HTTPUnauthorized()
+        got = await pair_requests.decide(rid, approve, via)
+        resp = web.json_response(got, status=404 if got["status"] == "unknown" else 200)
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -1219,6 +1415,15 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                     return
                 answer: bool | str = "always" if m.get("always") is True else m.get("approved") is True
                 assistant.answer_confirm(answer, confirm_id=cid_)
+            elif kind == "pair_decide":
+                rid, approved = m.get("id"), m.get("approved")
+                if isinstance(rid, str) and isinstance(approved, bool):
+
+                    async def decide(rid: str = rid, approved: bool = approved) -> None:
+                        got = await pair_requests.decide(rid, approved, "web")
+                        reply({"type": "pair_answer", "id": rid, **got})
+
+                    hub.spawn(decide())
             elif kind == "remove_rule":
                 rule_id = m.get("id")
                 if isinstance(rule_id, str) and rule_id:
@@ -1234,6 +1439,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         worker: asyncio.Task[Any] | None = None
         try:
             conn.push(hub.attach(conn))
+            for view in pair_requests.pending():  # a request made before this page opened
+                conn.push({"type": "pair_request", "ts": time.time(), **view})
             tasks += [asyncio.create_task(conn.run_sender()), asyncio.create_task(_audio_worker(hub, conn))]
             worker = hub.spawn(_request_worker(conn, requests))
             async for msg in ws:
@@ -1260,7 +1467,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 worker.cancel()
         return ws
 
-    app = web.Application(client_max_size=1024 * 1024)
+    app = web.Application(client_max_size=1024 * 1024, middlewares=[check_host])
     app.add_routes(
         [
             web.get("/", index),
@@ -1277,6 +1484,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.post("/api/phone/pair-code", api_phone_pair_code),
             web.post("/api/phone/pair/request", api_phone_pair_request),
             web.post("/api/phone/pair/status", api_phone_pair_status),
+            web.post("/api/phone/pair/pending", api_phone_pair_pending),
+            web.post("/api/phone/pair/decide", api_phone_pair_decide),
             web.post("/api/phone/token", api_phone_token),
         ]
     )

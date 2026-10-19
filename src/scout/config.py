@@ -420,13 +420,17 @@ class PhoneConfig:
     # The SignalWire subscriber the browser test page (/phone) signs in as. SignalWire creates
     # it the first time a token is minted for it; any string works (often an email).
     subscriber: str = "scout-owner"
-    # How a phone app pairs (docs/phone-design.md): "tailnet" (a request from your own
-    # Tailscale login, through Tailscale Serve, pairs at once; anyone else is asked about in
-    # the room, or uses a QR code), "approve" (always asked about in the room), "code"
-    # (only a one-time code from `scoutctl phone pair` or the /phone page).
+    # How a phone app pairs (docs/phone-design.md): "tailnet" or "approve" (it asks over
+    # Tailscale and waits for a yes from a channel you already hold: the web UI, a paired
+    # phone, the room by voice, an alert on the Mac, or `scoutctl phone pair approve`; the
+    # prompt says whether tailscaled vouches for it as your own login, but nothing pairs
+    # without the yes), "code" (only a one-time code from `scoutctl phone pair` or the
+    # /phone page).
     pair_mode: str = "tailnet"
     # Tailscale logins that count as you, besides this Mac's own (tailscale status).
     owners: list[str] = field(default_factory=list)
+    # Also ask about a pairing request in an alert on this Mac (Approve / Deny).
+    pair_alert: bool = True
 
 
 @dataclass

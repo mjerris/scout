@@ -150,9 +150,10 @@ enabled = true
 # port = 8768
 # call_skew_s = 60                         # a call's signed timestamp may be this far off
 # subscriber = "scout-owner"               # who the /phone test page signs in to SignalWire as
-# pair_mode = "tailnet"   # how the app pairs: "tailnet" (your own Tailscale login pairs at once;
-#                         # others are asked about in the room), "approve" (always asked), "code" (QR only)
-# owners = []             # Tailscale logins that count as you, besides this Mac's own
+# pair_mode = "tailnet"   # how the app pairs: "tailnet" / "approve" (it asks; a paired phone, the web UI,
+#                         # the room, the Mac's alert or `scoutctl phone pair approve <id>` says yes), "code" (QR only)
+# owners = []             # Tailscale logins that count as you, besides this Mac's own (shown in the prompt)
+# pair_alert = true       # also ask about a pairing request in an alert on this Mac
 
 [tasks]
 # Scout's task list (docs/tasks-design.md): found in meetings and email, ordered by plain code,

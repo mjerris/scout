@@ -44,6 +44,12 @@
   #confirm { display: none; padding: 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); }
   #confirm.show { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   #confirm span { flex: 1; min-width: 200px; }
+  .pair { padding: 12px; margin: 8px 0; border: 1px solid var(--bad); border-radius: 10px; background: var(--panel);
+          display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .pair div { flex: 1; min-width: 220px; font-size: 14px; }
+  .pair small { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .pair .yes { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .pair .no { background: var(--bad); color: #fff; border-color: var(--bad); }
   #unlock { display: none; margin: 4px 0; align-self: center; }
   #unlock.show { display: inline-block; }
   #ptt { touch-action: none; user-select: none; -webkit-user-select: none; }
@@ -79,6 +85,7 @@
     <button class="yes" type="button" id="approve">Approve</button>
     <button type="button" id="always">Always</button>
     <button class="no" type="button" id="deny">Deny</button></div>
+  <div id="pairs"></div>
   <details id="rules"><summary>Always allowed (<span id="rcount">0</span>)</summary><ul id="rlist"></ul></details>
   <form id="f">
     <input id="text" placeholder="Type a request…" autocomplete="off">
@@ -146,6 +153,38 @@ function answer(approved, always) {
   send({type: "confirm", id: confirmId, approved, always}, true);
 }
 
+// --- a device asking to pair: one card per request; any channel's answer removes it ------
+// Everything about the requester is shown as text (textContent), never as markup.
+function showPair(p) {
+  if (!p || typeof p.id !== "string" || document.getElementById("pair-" + p.id)) return;
+  const card = document.createElement("div"); card.className = "pair"; card.id = "pair-" + p.id;
+  const body = document.createElement("div");
+  body.append(p.name ? "A new device calling itself “" + p.name + "” wants to pair with Scout."
+                     : "A new device with no usable name wants to pair with Scout.");
+  const lines = ["Code " + p.match + " (shown on the device) · request " + p.id,
+    "Tailscale: " + (p.login ? p.login + (p.owner ? " (yours)" : "") : "login not verified")];
+  if (p.peer) lines.push("Device: " + p.peer);
+  if (p.ip) lines.push("Address: " + p.ip);
+  if (p.agent) lines.push("App: " + p.agent);
+  if (p.at) lines.push("Asked " + new Date(p.at * 1000).toLocaleTimeString());
+  for (const l of lines) { const sm = document.createElement("small"); sm.textContent = l; body.appendChild(sm); }
+  const yes = document.createElement("button"); yes.type = "button"; yes.className = "yes"; yes.textContent = "Approve";
+  const no = document.createElement("button"); no.type = "button"; no.className = "no"; no.textContent = "Deny";
+  const answerPair = (approved) => {
+    yes.disabled = no.disabled = true;
+    if (!send({type: "pair_decide", id: p.id, approved}, true)) yes.disabled = no.disabled = false;
+  };
+  yes.onclick = () => answerPair(true); no.onclick = () => answerPair(false);
+  card.append(body, yes, no);
+  $("pairs").appendChild(card);
+}
+function pairDone(ev) {
+  const card = document.getElementById("pair-" + ev.id);
+  if (card) card.remove();
+  const by = ev.via ? " by " + (ev.via === "web" ? "a web page" : ev.via) : "";
+  add("meta", "pairing request " + ev.id + " " + ev.status + by);
+}
+
 function renderRules(rules) {
   const ul = $("rlist"); ul.innerHTML = "";
   $("rcount").textContent = rules.length;
@@ -189,12 +228,16 @@ function render(ev) {
     case "result": showResult(ev); break;
     case "stopped": if (!replaying) stopPlayback(); add("meta", "stopped"); break;
     case "reset": if (!replaying) stopPlayback(); add("meta", "— new conversation —"); break;
+    case "pair_request": if (!replaying) showPair(ev); break;
+    case "pair_resolved": pairDone(ev); break;
+    case "pair_answer": if (ev.status === "already") add("meta", "that pairing request was already " + ev.result + (ev.via ? " by " + ev.via : "")); break;
     case "error": add("err", ev.text); break;
   }
 }
 
 function onHello(ev) {
   log.innerHTML = "";
+  $("pairs").innerHTML = "";  // the server sends the open requests again after hello
   const history = Array.isArray(ev.history) ? ev.history : [];
   replaying = true;
   try { for (const h of history) render(h); } finally { replaying = false; }

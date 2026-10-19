@@ -80,3 +80,23 @@ export const TOKEN_PURPOSE = 'scout:phone-token';
 export function tokenRequest(pairing: { device: string; secret: string }, now: number = Date.now()): CallVariables {
   return callVariables({ ...pairing, address: TOKEN_PURPOSE }, now);
 }
+
+/**
+ * What a paired phone signs to see the devices asking to pair (web.PAIR_REVIEW), and to
+ * answer one: the answer's purpose names the request and the answer, so its signature
+ * can't be used for anything else.
+ */
+export const PAIR_REVIEW = 'scout:pair-review';
+
+export function pairDecidePurpose(id: string, approve: boolean): string {
+  return `scout:pair-decide|${id}|${approve ? 'approve' : 'deny'}`;
+}
+
+/** {device, ts, nonce, sig} signed over `purpose` in place of the agent address. */
+export function signedFor(
+  pairing: { device: string; secret: string },
+  purpose: string,
+  now: number = Date.now(),
+): CallVariables {
+  return callVariables({ ...pairing, address: purpose }, now);
+}

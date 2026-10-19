@@ -9,10 +9,16 @@ same device id and secret (phone_devices.pair):
 2. **Found on the local network**: Scout advertises `_scout._tcp` over Bonjour with its
    https address in the TXT record (`Advertiser`, a managed `dns-sd -R` child); the app
    offers "Found <host>", then asks as in 3.
-3. **Approved by voice**: the app asks to pair (`POST /api/phone/pair/request`, tailnet
-   only); Scout asks the room "<name> wants to pair with Scout, code 47. Should I allow
-   it?" with the same two-digit number on the phone and on the web UI. A yes pairs it;
-   the app picks the secret up once (`POST /api/phone/pair/status`).
+3. **Approved on a device already trusted**: the app asks to pair
+   (`POST /api/phone/pair/request`, tailnet only) and gets a two-digit match number. That
+   one pending request (`PairRequests`) goes to every channel at once: the open web UI
+   pages, the paired phones (their app shows it while open), the room by voice ("A new
+   device calling itself <name> wants to pair with Scout, code 47. Should I allow it?"),
+   an alert on the Mac, and `scoutctl phone pair list | approve <id> | deny <id>`. The
+   first answer wins and the others are told; unanswered, it expires in two minutes. A
+   yes pairs it; the app picks the secret up once (`POST /api/phone/pair/status`).
+   Nothing pairs without an answer, even from the owner's own Tailscale login: a request's
+   identity only labels the prompt (web.py explains why).
 
 The web token is never in a code, a link, a QR code or the Bonjour record. A phone
 paired this way doesn't hold the web token at all: it signs its SignalWire token
@@ -27,10 +33,12 @@ import fcntl
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
+import unicodedata
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -160,7 +168,43 @@ def print_qr(text: str) -> None:
     segno.make(text, error="m").terminal(compact=True)
 
 
-# --- approve by voice -----------------------------------------------------------------------
+# --- approval: one pending request, answered from any channel ---------------------------------
+
+NAME_MAX = 24  # what a requester may call itself in a prompt
+_NAME_OK = re.compile(r"[A-Za-z0-9 '_()-]")
+# Curly apostrophes and dashes, as typed on a phone, read as plain ones.
+_QUOTES = str.maketrans(
+    dict.fromkeys("\u2018\u2019\u201b\u02bc", "'") | dict.fromkeys("\u2010\u2011\u2012\u2013\u2014", "-")
+)
+
+
+def clean_name(raw: object, limit: int = NAME_MAX) -> str:
+    """A requester's name as it may appear in a prompt: NFKC-normalized, plain ASCII
+    letters, digits, spaces and ' _ ( ) - only (no full stops, quotes, commas, colons or
+    other punctuation a sentence could be built from), single-spaced, at most `limit`
+    characters. "" when nothing usable is left. Never read or shown raw: the requester
+    chooses it, so it could otherwise be written to sound like an instruction."""
+    if not isinstance(raw, str):
+        return ""
+    text = unicodedata.normalize("NFKC", raw).translate(_QUOTES)
+    text = "".join(c if _NAME_OK.fullmatch(c) else " " for c in text)
+    return " ".join(text.split())[:limit].strip(" '-_(")
+
+
+def clean_text(raw: object, limit: int = 80) -> str:
+    """Other requester-supplied details (its user agent): printable ASCII, single-spaced, cut short."""
+    if not isinstance(raw, str):
+        return ""
+    text = unicodedata.normalize("NFKC", raw)
+    text = "".join(c if " " <= c <= "~" else " " for c in text)
+    return " ".join(text.split())[:limit]
+
+
+def spoken_prompt(name: str, match: str) -> str:
+    """What the room hears: always the fixed prefix, never the requester's words first."""
+    name = clean_name(name)
+    who = f"A new device calling itself {name}" if name else "A new device with no usable name"
+    return f"{who} wants to pair with Scout, code {match}. Should I allow it?"
 
 
 class PairRefused(Exception):
@@ -171,91 +215,213 @@ class PairRefused(Exception):
 
 @dataclass
 class _Request:
-    name: str
+    id: str  # short and public: what the CLI, the web UI and the phones answer by
+    token: str  # the requester's own handle for picking up its answer (never shown)
+    name: str  # clean_name
     match: str
-    expires_at: float
+    who: dict[str, Any]  # login, owner, peer, ip, agent (all cleaned)
+    at: float  # wall clock, when it was asked
+    expires_at: float  # monotonic
+    ttl_s: float
     result: dict[str, Any] | None = None  # {"status": ...} once decided
+    via: str = ""  # which channel decided it
+    deciding: bool = False  # a decision is being written (first one wins)
+    picked_up: bool = False  # the requester has its secret
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+
+
+# A channel that asks someone and waits (the room by voice, an alert on the Mac): gets
+# the request's view; True approves, False denies, None means no answer from it (the
+# request stays open for the others). Cancelled as soon as another channel answers.
+Asker = Callable[[dict[str, Any]], Coroutine[Any, Any, bool | None]]
+Listener = Callable[[str, dict[str, Any]], None]  # ("pair_request" | "pair_resolved", data)
 
 
 class PairRequests:
-    """Phones asking to pair, approved by the room. One at a time; `limit` requests per
-    `window_s`. `ask(name, match)` asks the room (True: yes; False: no; None: no answer);
-    `pair(name)` adds the device. A decided request is kept until its secret is picked up
-    (once) or a little past its expiry."""
+    """Devices asking to pair. Each request is one pending record that every channel
+    answers: the askers (`askers`: the room's spoken question, an alert on the Mac) are
+    started at once, and the web UI, the paired phones and the CLI answer it by id
+    (`decide`). The first answer wins; the others are told (`listeners`; askers are
+    cancelled) and a later answer gets "already". Unanswered, it expires after `ttl_s`.
+
+    One request at a time; `limit` requests per `window_s`. `pair(name)` adds the device;
+    the requester picks its secret up once (`status`)."""
 
     def __init__(
         self,
-        ask: Callable[[str, str], Awaitable[bool | None]],
         pair: Callable[[str], tuple[str, str]],
+        askers: Sequence[tuple[str, Asker]] = (),
         ttl_s: float = 120.0,
         limit: int = 3,
         window_s: float = 600.0,
     ) -> None:
-        self.ask, self.pair, self.ttl_s = ask, pair, ttl_s
+        self.pair, self.askers, self.ttl_s = pair, list(askers), ttl_s
         self.limiter = Limiter(limit, window_s)
-        self._requests: dict[str, _Request] = {}
+        self.listeners: list[Listener] = []
+        self.version = 0  # bumped on every change, for long polls (`changed`)
+        self._changed = asyncio.Event()
+        self._requests: dict[str, _Request] = {}  # by token
         self._tasks: set[asyncio.Task[Any]] = set()
+
+    # --- views ---
+
+    @staticmethod
+    def view(req: _Request) -> dict[str, Any]:
+        """What a prompt shows: no token, nothing raw from the requester."""
+        return {"id": req.id, "name": req.name, "match": req.match, "at": req.at,
+                "expires_at": req.at + req.ttl_s, **req.who}  # fmt: skip
+
+    def pending(self) -> list[dict[str, Any]]:
+        self._sweep()
+        return [self.view(r) for r in self._requests.values() if r.result is None]
+
+    def _by_id(self, rid: str) -> _Request | None:
+        return next((r for r in self._requests.values() if r.id == rid), None)
+
+    def _notify(self, kind: str, data: dict[str, Any]) -> None:
+        self.version += 1
+        self._changed.set()
+        self._changed = asyncio.Event()
+        for fn in list(self.listeners):
+            try:
+                fn(kind, data)
+            except Exception:
+                log.exception("phone: a pairing listener failed")
+
+    async def changed(self, since: int, wait: float) -> int:
+        """Wait up to `wait` seconds for a change after version `since`; the version now."""
+        if self.version == since and wait > 0:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._changed.wait(), wait)
+        return self.version
 
     def _sweep(self) -> None:
         now = time.monotonic()
         for k in [k for k, r in self._requests.items() if r.expires_at + self.ttl_s < now]:
             del self._requests[k]
 
-    def start(self, name: str) -> dict[str, Any]:
+    # --- asking ---
+
+    def start(self, name: str, who: dict[str, Any] | None = None) -> dict[str, Any]:
         self._sweep()
         if any(r.result is None for r in self._requests.values()):
-            raise PairRefused(409, "Another phone is asking to pair right now; try again in a minute or two.")
+            raise PairRefused(
+                409, "Another device is asking to pair right now; try again in a minute or two."
+            )
         if not self.limiter.allowed():
             raise PairRefused(429, "Too many pairing requests; wait a few minutes and try again.")
         self.limiter.failed()  # every request counts toward the limit
-        rid = secrets.token_urlsafe(32)
+        token = secrets.token_urlsafe(32)
+        rid = "".join(secrets.choice(ALPHABET) for _ in range(6))
         match = str(10 + secrets.randbelow(90))
-        req = _Request(name, match, time.monotonic() + self.ttl_s)
-        self._requests[rid] = req
-        task = asyncio.get_running_loop().create_task(self._decide(req))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        log.info("phone: %r asks to pair (match %s)", name, match)
-        return {"request": rid, "match": match, "expires_at": time.time() + self.ttl_s}
+        w = who or {}
+        details = {
+            "login": clean_text(w.get("login"), 100),
+            "owner": bool(w.get("owner")),
+            "peer": clean_text(w.get("peer"), 100),
+            "ip": clean_text(w.get("ip"), 64),
+            "agent": clean_text(w.get("agent"), 80),
+        }
+        req = _Request(
+            rid,
+            token,
+            clean_name(name),
+            match,
+            details,
+            time.time(),
+            time.monotonic() + self.ttl_s,
+            self.ttl_s,
+        )
+        self._requests[token] = req
+        loop = asyncio.get_running_loop()
+        view = self.view(req)
+        for via, ask in self.askers:
+            self._spawn(req, loop.create_task(self._ask(req, via, ask, dict(view))))
+        self._spawn(req, loop.create_task(self._expire(req)))
+        log.info("phone: %r asks to pair (request %s, match %s, from %s)", req.name, rid, match,
+                 details["login"] or details["ip"] or "unknown")  # fmt: skip
+        self._notify("pair_request", view)
+        return {"request": token, "match": match, "expires_at": time.time() + self.ttl_s}
 
-    async def _decide(self, req: _Request) -> None:
-        result: dict[str, Any]
+    def _spawn(self, req: _Request, task: asyncio.Task[Any]) -> None:
+        self._tasks.add(task)
+        req.tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(req.tasks.discard)
+
+    async def _ask(self, req: _Request, via: str, ask: Asker, view: dict[str, Any]) -> None:
         try:
-            answer = await asyncio.wait_for(self.ask(req.name, req.match), self.ttl_s)
+            answer = await asyncio.wait_for(ask(view), self.ttl_s)
         except TimeoutError:
-            answer = None
+            return
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            log.exception("phone: asking the room about a pairing failed")
-            answer = None
-        if answer is True:
-            try:
-                device, secret = await asyncio.to_thread(self.pair, req.name)
-                result = {"status": "approved", "device": device, "secret": secret}
-                log.info("phone: paired %s (%s), approved in the room", device, req.name)
-            except (OSError, ValueError) as exc:
-                log.warning("phone: pairing %r failed: %s", req.name, exc)
-                result = {"status": "error", "error": f"Couldn't pair: {exc}"}
-        else:
-            result = {"status": "denied" if answer is False else "expired"}
-            log.info("phone: pairing %r %s", req.name, result["status"])
-        req.result = result
+            log.exception("phone: asking about a pairing (%s) failed", via)
+            return
+        if answer is not None:
+            await self.decide(req.id, bool(answer), via)
+
+    async def _expire(self, req: _Request) -> None:
+        await asyncio.sleep(max(0.0, req.expires_at - time.monotonic()))
+        if req.result is None and not req.deciding:
+            self._resolve(req, {"status": "expired"}, "")
+
+    def _resolve(self, req: _Request, result: dict[str, Any], via: str) -> None:
+        req.result, req.via = result, via
         req.done.set()
+        me = asyncio.current_task()
+        for t in list(req.tasks):
+            if t is not me:
+                t.cancel()  # the other channels stop asking
+        log.info("phone: pairing request %s (%r) %s%s", req.id, req.name, result["status"],
+                 f" by {via}" if via else "")  # fmt: skip
+        self._notify(
+            "pair_resolved", {"id": req.id, "status": result["status"], "via": via, "name": req.name}
+        )
+
+    async def decide(self, rid: str, approved: bool, via: str) -> dict[str, Any]:
+        """Answer request `rid` from channel `via`. The first answer wins: {"status":
+        "approved", "device"} or {"status": "denied"}; a later one gets {"status":
+        "already", "result", "via"}; {"status": "unknown"} for no such request."""
+        self._sweep()
+        req = self._by_id(rid) if isinstance(rid, str) and rid else None
+        if req is None:
+            return {"status": "unknown"}
+        if req.result is not None or req.deciding:
+            got = req.result["status"] if req.result else "being answered"
+            return {"status": "already", "result": got, "via": req.via}
+        req.deciding = True  # synchronously: no other answer can get past this point
+        if not approved:
+            self._resolve(req, {"status": "denied"}, via)
+            return {"status": "denied"}
+        try:
+            device, secret = await asyncio.to_thread(self.pair, req.name or "New device")
+        except (OSError, ValueError) as exc:
+            log.warning("phone: pairing %r failed: %s", req.name, exc)
+            self._resolve(req, {"status": "error", "error": f"Couldn't pair: {exc}"}, via)
+            return {"status": "error", "error": f"Couldn't pair: {exc}"}
+        self._resolve(req, {"status": "approved", "device": device, "secret": secret}, via)
+        log.info("phone: paired %s (%s), approved by %s", device, req.name, via)
+        return {"status": "approved", "device": device}
 
     async def status(self, request: str, wait: float = 0.0) -> dict[str, Any]:
-        """Where a request stands; waits up to `wait` seconds for the room's answer. The
-        secret is handed out once."""
+        """Where a request stands, for the requester (by its token); waits up to `wait`
+        seconds for an answer. The secret is handed out once."""
         req = self._requests.get(request) if request else None
-        if req is None:
+        if req is None or req.picked_up:
             return {"status": "unknown"}
         if req.result is None and wait > 0:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(req.done.wait(), wait)
         if req.result is None:
             return {"status": "waiting", "match": req.match}
-        if req.result["status"] == "approved":
-            self._requests.pop(request, None)
-        return dict(req.result)
+        got = dict(req.result)
+        if got["status"] == "approved":  # the secret goes out once; the record stays, for "already"
+            req.picked_up = True
+            req.result = {k: v for k, v in got.items() if k != "secret"}
+        return got
 
     async def close(self) -> None:
         for t in list(self._tasks):
@@ -263,6 +429,69 @@ class PairRequests:
         for t in list(self._tasks):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
+
+
+# --- the Mac's own alert (until the phone app has push notifications) -------------------------
+
+OSASCRIPT = "/usr/bin/osascript"
+_ALERT_SCRIPT = """on run argv
+  set r to display dialog (item 1 of argv) with title "Scout: pair a new device?" \
+buttons {"Deny", "Approve"} default button "Deny" cancel button "Deny" \
+giving up after ((item 2 of argv) as integer) with icon caution
+  if gave up of r then return "timeout"
+  return button returned of r
+end run"""
+
+
+def alert_text(view: dict[str, Any]) -> str:
+    """The alert's text: every requester-supplied part cleaned, and labelled."""
+    name = clean_name(view.get("name"))
+    lines = [
+        f"A new device calling itself {name} wants to pair with Scout."
+        if name else "A new device with no usable name wants to pair with Scout.",
+        f"It shows the code {view.get('match', '')}.",
+    ]  # fmt: skip
+    login = clean_text(view.get("login"), 100)
+    if login:
+        lines.append(f"Tailscale login: {login}" + (" (yours)" if view.get("owner") else ""))
+    else:
+        lines.append("Tailscale login: not verified")
+    for label, key in (("Device", "peer"), ("Address", "ip"), ("App", "agent")):
+        if text := clean_text(view.get(key), 100):
+            lines.append(f"{label}: {text}")
+    lines.append(
+        "Asked at " + time.strftime("%H:%M:%S", time.localtime(float(view.get("at") or time.time())))
+    )
+    return "\n".join(lines)
+
+
+def mac_alert(program: str = OSASCRIPT, give_up_s: float = 115.0) -> Asker:
+    """An asker that shows an alert on the Mac with Approve and Deny (osascript's
+    display dialog; the text goes in as an argument, never into the script). Closed
+    when another channel answers first."""
+
+    async def ask(view: dict[str, Any]) -> bool | None:
+        proc = await asyncio.create_subprocess_exec(
+            program, "-e", _ALERT_SCRIPT, alert_text(view), str(int(give_up_s)),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+        try:
+            out, err = await proc.communicate()
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            raise
+        said = out.decode(errors="replace").strip()
+        if proc.returncode == 0:
+            return {"Approve": True, "Deny": False}.get(said)
+        if b"-128" in err:  # the cancel button: Deny
+            return False
+        log.warning("phone: the pairing alert didn't show (%s)", err.decode(errors="replace").strip()[:200])
+        return None
+
+    return ask
 
 
 # --- auto-find: Bonjour ---------------------------------------------------------------------

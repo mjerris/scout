@@ -17,9 +17,10 @@ type Server = Pick<ScoutServer, 'pairWithCode' | 'requestPairing' | 'pairStatus'
  * phone's own device secret:
  * - a scout://pair link (the iPhone Camera scanned the QR code from `scoutctl phone pair`
  *   or Scout's /phone page): "Pair with <host>?" and one tap;
- * - Scout found on the local network (Bonjour), or its address typed in: the app asks;
- *   from your own Tailscale login Scout pairs at once, otherwise it asks the room out
- *   loud, with the same two-digit number on both;
+ * - Scout found on the local network (Bonjour), or its address typed in: the app asks,
+ *   and waits for a yes from something already trusted (a paired phone, Scout's web
+ *   page, the room out loud, an alert on the Mac, or its CLI), with the same two-digit
+ *   number on both;
  * - the address and the code typed in (or the link pasted).
  */
 export function PairScreen({
@@ -101,7 +102,7 @@ export function PairScreen({
     await pairWithCode(base, c);
   }
 
-  /** Ask Scout to pair; the room says yes (or no). */
+  /** Ask Scout to pair; something already trusted says yes (or no). */
   async function ask(typed: string) {
     setError('');
     let base: string;
@@ -119,12 +120,6 @@ export function PairScreen({
       const s = makeServer(base);
       const r = await s.requestPairing(n);
       if (mine !== askId.current) return;
-      if ('status' in r) {
-        // Your own Tailscale login: Scout paired it at once (and says so in the room).
-        const { status: _, ...p } = r;
-        await finish(base, n, p);
-        return;
-      }
       setAsking({ match: r.match, host: hostOf(base) });
       for (;;) {
         const st = await s.pairStatus(r.request, 20);
@@ -135,7 +130,7 @@ export function PairScreen({
           await finish(base, n, p);
           return;
         }
-        if (st.status === 'denied') throw new Error('Scout heard no: someone said no in the room, or tapped Deny.');
+        if (st.status === 'denied') throw new Error('Scout heard no: someone tapped Deny or said no in the room.');
         if (st.status === 'expired') throw new Error('Nobody said yes in time. Try again, and answer when Scout asks.');
         if (st.status === 'error') throw new Error(st.error || "Scout couldn't pair this phone.");
         throw new Error('Scout lost track of that request; ask again.');
@@ -188,8 +183,8 @@ export function PairScreen({
           {asking.match}
         </Text>
         <Muted>
-          Say yes when Scout asks out loud (or tap Approve on Scout&apos;s web page). Scout says the same number: if
-          it&apos;s not {asking.match}, say no.
+          Approve it on a phone already paired with Scout, on Scout&apos;s web page or the Mac&apos;s alert, or say yes
+          when Scout asks out loud. They show the same number: if it&apos;s not {asking.match}, deny it.
         </Muted>
         <Row>
           <Button testID="cancel" title="Cancel" onPress={cancelAsk} />
@@ -209,8 +204,8 @@ export function PairScreen({
             </Row>
           ))}
           <Muted>
-            From your own Tailscale login it pairs at once. Otherwise Scout asks out loud in the room, with a two-digit
-            number on this phone and on the Mac.
+            Scout asks for a yes on a phone already paired with it, its web page, the Mac and out loud in the room,
+            with a two-digit number on this phone and there.
           </Muted>
         </Section>
       ) : null}

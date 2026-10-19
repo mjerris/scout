@@ -12,7 +12,8 @@ The registry is state/phone_devices.json (mode 0600, this user only):
     {device_id: {name, secret, paired_at, revoked}}
 Forgetting a device deletes its secret and marks it revoked, so a lost phone stops
 working at once. Manage it with `scoutctl phone pair | list | forget <device>` (pair
-shows a one-time pairing code).
+shows a one-time pairing code; `pair list`, `pair approve <id>` and `pair deny <id>`
+answer a device asking to pair).
 """
 
 from __future__ import annotations
@@ -151,7 +152,9 @@ class CallCheck:
             return False
         return bool(d and not d.get("revoked") and d.get("secret"))
 
-    def check(self, uv: dict[str, Any], now: float | None = None) -> Verdict:
+    def check(self, uv: dict[str, Any], now: float | None = None, address: str | None = None) -> Verdict:
+        """`address`: what this request must be signed over, in place of `self.address`
+        (a purpose naming exactly what it does, e.g. one pairing request and its answer)."""
         now = time.time() if now is None else now
         device, ts, nonce, sig = (uv.get(k) for k in ("device", "ts", "nonce", "sig"))
         if not isinstance(device, str) or not _DEVICE.fullmatch(device):
@@ -175,7 +178,7 @@ class CallCheck:
         if d.get("revoked") or not isinstance(secret, str) or not secret:
             return Verdict(False, device, "device revoked")
         try:
-            want = sign(secret, device, t, nonce, self.address)
+            want = sign(secret, device, t, nonce, self.address if address is None else address)
         except (binascii.Error, ValueError):
             return Verdict(False, device, "device secret unreadable")
         if not hmac.compare_digest(want.encode(), sig.strip().lower().encode()):
@@ -216,11 +219,88 @@ def _pair_code() -> int:
     return 0
 
 
+def _pair_api(path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """POST to the running app's web server on this Mac, with its web token (the CLI is the
+    Mac's owner: it can read the token). (0, {error}) when the app isn't answering."""
+    import urllib.error
+    import urllib.request
+
+    from . import web
+    from .config import load
+
+    try:
+        token = web.TOKEN_PATH.read_text().strip()
+    except OSError:
+        return 0, {"error": "Scout's web token isn't there yet (is the app set up?)"}
+    port = load().web.port
+    req = urllib.request.Request(  # a fixed http://127.0.0.1 URL
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+            return int(r.status), json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read() or b"{}")
+        except ValueError:
+            return exc.code, {"error": f"HTTP {exc.code}"}
+    except (OSError, ValueError) as exc:
+        return 0, {"error": f"Scout's app isn't answering on port {port} ({exc})"}
+
+
+def _describe(r: dict[str, Any]) -> str:
+    left = max(0, int(float(r.get("expires_at") or 0) - time.time()))
+    who = r.get("login") or "no verified Tailscale login"
+    if r.get("owner"):
+        who += " (yours)"
+    bits = [f"{r.get('id')}  {r.get('name') or '(no usable name)'}  code {r.get('match')}  {who}"]
+    bits += [f"{k} {r[k]}" for k in ("peer", "ip", "agent") if r.get(k)]
+    when = time.strftime("%H:%M:%S", time.localtime(float(r.get("at") or 0)))
+    return "  ".join(bits) + f"  asked {when}, {left} s left"
+
+
+def _pair_requests(args: list[str]) -> int:
+    """scoutctl phone pair list | approve <id> | deny <id>: answer a device asking to pair."""
+    if args[0] == "list":
+        status, got = _pair_api("/api/phone/pair/pending", {})
+        if status != 200:
+            print(got.get("error") or f"HTTP {status}", file=sys.stderr)
+            return 1
+        reqs = got.get("requests") or []
+        for r in reqs:
+            print(_describe(r))
+        if not reqs:
+            print("No device is asking to pair.")
+        return 0
+    approve = args[0] == "approve"
+    status, got = _pair_api("/api/phone/pair/decide", {"id": args[1].strip().upper(), "approve": approve})
+    verdict = got.get("status")
+    if status == 200 and verdict == "approved":
+        print(f"Approved: paired as {got.get('device')}.")
+        return 0
+    if status == 200 and verdict == "denied":
+        print("Denied.")
+        return 0
+    if verdict == "already":
+        print(f"Already answered ({got.get('result')}{' by ' + got['via'] if got.get('via') else ''}).")
+        return 1
+    if verdict == "unknown":
+        print(f"No pairing request {args[1]!r} (see scoutctl phone pair list).", file=sys.stderr)
+        return 1
+    print(got.get("error") or f"HTTP {status}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     cmd = args[0] if args else ""
     if cmd == "pair" and len(args) == 1:
         return _pair_code()
+    if cmd == "pair" and (args[1:] == ["list"] or (len(args) == 3 and args[1] in ("approve", "deny"))):
+        return _pair_requests(args[1:])
     if cmd == "list" and len(args) == 1:
         for d in listing():
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(d["paired_at"] or 0))
@@ -240,7 +320,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{cid}  device {device}")
         print(f"{len(calls)} active call{'s' * (len(calls) != 1)}")
         return 0
-    print("usage: scoutctl phone pair | list | forget <device> | calls", file=sys.stderr)
+    print(
+        "usage: scoutctl phone pair | pair list | pair approve <id> | pair deny <id> | list | forget <device> | calls",
+        file=sys.stderr,
+    )
     return 2
 
 

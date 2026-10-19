@@ -4,6 +4,7 @@ import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, View }
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { CallPanel } from './CallPanel';
+import { PairApprovals } from './PairApprovals';
 
 import { clearPairing, loadPairing, parsePairLink } from './pairing';
 import type { PairLink, Pairing } from './pairing';
@@ -84,6 +85,7 @@ function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void 
   const t = useTheme();
   return (
     <>
+    <PairApprovals pairing={pairing} />
     <CallPanel pairing={pairing} />
     <Section title="Paired">
       <Text style={{ color: t.ink }} testID="paired">

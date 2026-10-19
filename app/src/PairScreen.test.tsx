@@ -134,7 +134,7 @@ test('Scout found on the network pairs by asking the room, showing the match num
   expect(makeServer).toHaveBeenCalledWith('https://mac.tail1.ts.net');
   expect(server.requestPairing).toHaveBeenCalledWith('iPhone');
   expect(await screen.findByTestId('match')).toHaveTextContent('47');
-  expect(screen.getByText(/Say yes when Scout asks/)).toBeTruthy();
+  expect(screen.getByText(/Approve it on a phone already paired with Scout/)).toBeTruthy();
   await act(async () => release({ status: 'approved', ...PAIRED }));
   await waitFor(() => expect(onPaired).toHaveBeenCalled());
   expect(onPaired.mock.calls[0]![0]).toEqual({ server: 'https://mac.tail1.ts.net', name: 'iPhone', ...PAIRED });
@@ -159,13 +159,3 @@ test('nobody answering in time is said plainly', async () => {
   expect(await screen.findByTestId('error')).toHaveTextContent(/Nobody said yes/);
 });
 
-test("the owner's own Tailscale login pairs at once, without a question", async () => {
-  const server = fakeServer();
-  server.requestPairing.mockResolvedValue({ status: 'approved', ...PAIRED });
-  const { onPaired } = setup({ makeServer: () => server });
-  fireEvent.changeText(screen.getByTestId('server'), 'mac.tail1.ts.net');
-  fireEvent.press(screen.getByTestId('ask'));
-  await waitFor(() => expect(onPaired).toHaveBeenCalled());
-  expect(server.pairStatus).not.toHaveBeenCalled();
-  expect(screen.queryByTestId('match')).toBeNull();
-});

@@ -172,26 +172,46 @@ sent with each call in `userVariables` (the data `@signalwire/js` passes with `d
         `url=<https address>` and `host=<Mac name>`; the app shows "Found <Mac>" with a
         Pair button, then asks as below. The app still talks to the https address over
         Tailscale, never the LAN one.
-      - **Your own Tailscale login.** When the app asks (below) through Tailscale Serve,
-        Serve adds `Tailscale-User-Login` (it removes any copy the client sent, and adds
-        none for tagged devices or Funnel). Scout believes it only on a request Serve
-        proxied (from 127.0.0.1, `X-Forwarded-Proto: https`), never on the LAN or tailnet
-        listeners, and pairs at once only when it is this Mac's own login (`tailscale
-        status --json`: `Self.UserID` → `User[...].LoginName`) or one of `[phone] owners`:
-        the tailnet has other users. It still says "Paired <name>." in the room and logs
-        it. Anyone else is asked about as below.
-      - **Approve by voice.** The app asks (`POST /api/phone/pair/request {name}`, from the
-        tailnet or this Mac only). Scout picks a two-digit number, shows it on the phone,
-        and asks the room "Mike's iPhone wants to pair with Scout, code 47. Should I allow
-        it?" (the web UI shows the same question with Approve and Deny). A yes within two
-        minutes pairs it; the app long-polls `POST /api/phone/pair/status {request}` and
-        gets the secret once. One request at a time, three per 10 minutes.
+      - **Approved on something already trusted.** The app asks (`POST
+        /api/phone/pair/request {name}`, from the tailnet or this Mac only). Scout picks a
+        two-digit number, shows it on the phone, and makes one pending request
+        (`phone_pairing.PairRequests`) that every channel answers at once: the open web UI
+        pages (a card with Approve and Deny), every paired phone whose app is open (it
+        long-polls `POST /api/phone/pair/pending` and answers with `POST
+        /api/phone/pair/decide`, both signed with its device secret, the answer's
+        signature naming the request and the answer), the room ("A new device calling
+        itself Mike's iPhone wants to pair with Scout, code 47. Should I allow it?"), an
+        alert on the Mac (`[phone] pair_alert`), and `scoutctl phone pair list | approve
+        <id> | deny <id>` (the web token, over 127.0.0.1). The first answer wins; the
+        others are withdrawn or told (the pages get `pair_resolved`, with who answered),
+        and unanswered it expires in two minutes. The app long-polls `POST
+        /api/phone/pair/status {request}` and gets the secret once. One request at a time,
+        three per 10 minutes. With no device paired yet, the CLI and the room still work.
+        There is no push yet: the app has no push entitlement and Scout no APNs key or
+        sender, so a paired phone sees a request only while its app is open.
+      - **What the prompt says about the requester.** The name is the requester's own
+        choice, so it is cleaned (`phone_pairing.clean_name`: NFKC, plain letters, digits,
+        spaces and ' _ ( ) -, at most 24 characters) and always follows a fixed prefix,
+        never read raw. The Tailscale login and device name come from tailscaled
+        (`tailnet.py`: `tailscale whois` for the request's real source): the TCP peer on a
+        tailnet listener, or, for Tailscale Serve, the client address Serve puts in
+        `X-Forwarded-For`, believed only on a request that came the way Serve sends it
+        (from 127.0.0.1, `X-Forwarded-Proto: https`, for this Mac's MagicDNS name); a
+        `Tailscale-User-Login` header that disagrees with tailscaled voids it. A login
+        that is this Mac's own (`tailscale status --json`) or one of `[phone] owners` is
+        marked "yours". None of this pairs anything by itself: before, the owner's login
+        paired at once, and a web page using DNS rebinding could send those headers from
+        this Mac's own browser.
+      - **Only this Mac's names.** Every request and WebSocket must name this Mac in its
+        Host header (localhost, 127.0.0.1, [::1], its LAN address or host name, or its
+        tailnet addresses, at the web port; or its MagicDNS name or `[web] public_url`'s
+        host, on any port). Anything else gets 421 before any handler runs: that is what
+        stops a page that points its own name at 127.0.0.1.
    3. Tap **Pair** in the app ("Pair with <host>?").
 
-   `[phone] pair_mode` picks which of these are on: `"tailnet"` (the default: the owner's
-   login pairs at once, others are asked about in the room or use a code), `"approve"`
-   (every request is asked about, the owner's too), `"code"` (codes only: requests are
-   refused and Bonjour is off). `scoutctl phone list` and `forget` review and revoke.
+   `[phone] pair_mode` picks which of these are on: `"tailnet"` (the default) and
+   `"approve"` both take requests and wait for a yes as above, `"code"` (codes only:
+   requests are refused and Bonjour is off). `scoutctl phone list` and `forget` review and revoke.
 
    `POST /api/phone/pair` takes `{code, name}` without the web token (or the web token,
    for the /phone page's own browser pairing). A wrong, used or expired code is refused

@@ -36,6 +36,7 @@ from . import (
     memory_client,
     memory,
     onboarding,
+    phone_pairing,
     privacy,
     pulse,
     reference,
@@ -1945,11 +1946,13 @@ class Assistant:
         out: dict[str, Any] | None = None,
         timeout: float | None = None,
         later: bool = False,
+        show: bool = True,
     ) -> bool | str | None:
         """True/False for a spoken or clicked answer, None if nobody answered.
         `out`: where to ask (default: where the current turn's replies go); `timeout`:
         how long to wait for the answer (default [claude] confirm_timeout_s); `later`:
-        "later" is an answer too (onboarding.LATER; setup's questions only)."""
+        "later" is an answer too (onboarding.LATER; setup's questions only); `show`:
+        False asks by voice only (the web UI shows the question its own way)."""
         gen = self._confirm_gen
         if self._confirm_waiting >= 5:  # a runaway fan-out of tool calls: don't queue forever
             return False
@@ -1960,7 +1963,7 @@ class Assistant:
                     return False  # the user said stop while this one was waiting its turn
                 self._confirm_later = later
                 try:
-                    return await self._confirm_one(spoken, description, out, timeout)
+                    return await self._confirm_one(spoken, description, out, timeout, show)
                 finally:
                     self._confirm_later = False
         finally:
@@ -1972,6 +1975,7 @@ class Assistant:
         description: str,
         out: dict[str, Any] | None = None,
         timeout: float | None = None,
+        show: bool = True,
     ) -> bool | str | None:
         if self._silence_turn and out is None:  # the room turn was stopped; don't ask about its tools
             return False
@@ -1986,7 +1990,8 @@ class Assistant:
         ok: bool | str | None = False
         question, read_back = split_question(spoken)
         try:
-            self.emit("confirm", id=cid, text=description)
+            if show:
+                self.emit("confirm", id=cid, text=description)
             self._set_state("confirming")
             if out["mini"]:
                 self.speaker.speak(question)
@@ -2016,7 +2021,8 @@ class Assistant:
             # Also on cancellation (the SDK withdrew the request): never leave a stale question.
             self._confirm_fut = None
             self._confirm_started = 0.0
-            self.emit("confirm_done", id=cid, approved=bool(ok), always=ok == "always")
+            if show:
+                self.emit("confirm_done", id=cid, approved=bool(ok), always=ok == "always")
             self._set_state("thinking" if self.busy else "idle")
         return ok
 
@@ -2196,18 +2202,23 @@ class Assistant:
         return {"status": "ok", "text": speech.to_speech(extmcp.spoken(text)) or "Done."}
 
     async def approve_pairing(self, name: str, match: str) -> bool | None:
-        """Ask the room whether the phone `name` may pair (phone_pairing.PairRequests):
-        spoken, and on the web UI with Approve and Deny. The phone shows the same `match`
-        number. True for yes, False for no, None if nobody answered in two minutes."""
+        """Ask the room whether a device asking to pair may (one channel of
+        phone_pairing.PairRequests; the web UI, the paired phones, the Mac's alert and the
+        CLI are asked at the same time, and this question is withdrawn when one of them
+        answers first). The name is the requester's own choice, so it is cleaned and
+        always said after a fixed prefix (phone_pairing.spoken_prompt), never raw. The
+        device shows the same `match` number. True for yes, False for no, None if
+        nobody answered here."""
         who = "pairing"
         if not await self.floor.acquire(who, SHARED_FLOOR_WAIT_S, cancel=self._stop_event):
             return None
         try:
             answer = await self._confirm(
-                f"{name} wants to pair with Scout, code {match}. Should I allow it?",
-                f"Pair the phone {name!r} with Scout? It shows the code {match}.",
+                phone_pairing.spoken_prompt(name, match),
+                "",
                 {"mini": True, "client": None},
                 timeout=PAIR_APPROVE_S,
+                show=False,  # the web UI shows the pairing request itself, with its details
             )
         finally:
             self.floor.release(who)

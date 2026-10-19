@@ -122,3 +122,14 @@ def _own_behavior_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setattr(behavior_mod, "PATH", path)
     monkeypatch.setattr(behavior_mod, "_default", behavior_mod.Behavior(path, seed=False))
     monkeypatch.setattr(corrections_mod, "PATH", tmp_path / "behavior_candidates.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_tailscale_or_mac_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never ask this Mac's tailscaled (tailnet.py) or show the pairing alert on it;
+    a test that needs either passes its own fake."""
+    import scout.tailnet as tailnet_mod
+    import scout.web as web_mod
+
+    monkeypatch.setattr(tailnet_mod, "_default", tailnet_mod.Tailnet(run=lambda args: ""))
+    monkeypatch.setattr(web_mod, "MAC_ALERT", "")
