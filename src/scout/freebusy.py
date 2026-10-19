@@ -136,12 +136,13 @@ async def free(
 ) -> str:
     """calendar_free: per day in [start, end), the free gaps in working hours and the busy blocks."""
     now = now or dt.datetime.now().astimezone()
+    # A start or end without an offset is in now's zone, the zone the days are walked in.
     s = (
-        calendar_mac.parse_time(start, "start")
+        calendar_mac.parse_time(start, "start", now.tzinfo)
         if start
         else now.replace(hour=0, minute=0, second=0, microsecond=0)
     )
-    e = calendar_mac.parse_time(end, "end") if end else s + dt.timedelta(days=1)
+    e = calendar_mac.parse_time(end, "end", now.tzinfo) if end else s + dt.timedelta(days=1)
     if e <= s:
         raise ToolError("end must be after start")
     if e - s > dt.timedelta(days=_MAX_DAYS):

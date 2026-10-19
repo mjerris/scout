@@ -93,8 +93,8 @@ async def ensure_access(helper: Path | None = None, reminders: bool = False) -> 
     )
 
 
-def parse_time(value: Any, what: str) -> dt.datetime:
-    """ISO 8601 date or date-time; without an offset it's local time."""
+def parse_time(value: Any, what: str, tz: dt.tzinfo | None = None) -> dt.datetime:
+    """ISO 8601 date or date-time; without an offset it's in `tz`, or local time."""
     if not isinstance(value, str) or not value.strip():
         raise ToolError(f"{what} must be an ISO 8601 date or time, like 2026-10-08T15:00")
     try:
@@ -103,7 +103,9 @@ def parse_time(value: Any, what: str) -> dt.datetime:
         raise ToolError(
             f"{what} must be an ISO 8601 date or time, like 2026-10-08T15:00 (got {value!r})"
         ) from None
-    return t if t.tzinfo else t.astimezone()  # naive = local
+    if t.tzinfo:
+        return t
+    return t.replace(tzinfo=tz) if tz else t.astimezone()  # naive = local
 
 
 def iso(t: dt.datetime) -> str:
