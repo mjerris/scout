@@ -363,6 +363,121 @@ def test_the_ringer_says_why_it_cant(rings: Path) -> None:
     assert run(refused.ring("manual", "x")) == "no phone took the push"
 
 
+TWO = [
+    phone_devices.PushTarget("d1", "a", VOIP, "", "sandbox"),
+    phone_devices.PushTarget("d2", "b", "ef" * 32, "", "production"),
+]
+
+
+def _two_phones(rings: Path, ring_s: float = 5.0) -> tuple[phone_ring.Ringer, list[list[phone_push.Push]]]:
+    """A Ringer for two phones that records each batch it sends; it watches every 10 ms."""
+    sent: list[list[phone_push.Push]] = []
+
+    async def send(pushes: list[phone_push.Push]) -> list[phone_push.Result]:
+        sent.append(pushes)
+        return [phone_push.Result(p, 200) for p in pushes]
+
+    ringer = phone_ring.Ringer(
+        PhoneConfig(), send, phone_ring.Rings(rings), lambda: TWO, ring_s=ring_s, poll_s=0.01
+    )
+    return ringer, sent
+
+
+async def _settled(sent: list[list[phone_push.Push]], batches: int) -> None:
+    for _ in range(300):
+        if len(sent) >= batches and not phone_ring._watching:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"sent {len(sent)} batches; still watching: {bool(phone_ring._watching)}")
+
+
+def test_a_cancel_names_the_call_it_ends() -> None:
+    uuids = phone_push.ring_uuids(TWO)
+    assert set(uuids) == {"d1", "d2"} and uuids["d1"] != uuids["d2"]
+    [ring] = phone_push.ring_pushes(TWO[:1], "tok" * 10, 1060, uuids)
+    [cancel] = phone_push.cancel_pushes(TWO[:1], uuids, "answered", 1060)
+    assert cancel.payload["uuid"] == ring.payload["uuid"] == uuids["d1"]
+    assert cancel.payload == {
+        "call_id": "",
+        "uuid": uuids["d1"],
+        "from": "Scout",
+        "from_name": "Scout",
+        "scoutCancel": "answered",
+    }
+    assert (cancel.kind, cancel.token, cancel.env, cancel.expires_at) == ("voip", VOIP, "sandbox", 1060)
+    assert "scoutRing" not in cancel.payload  # nothing can dial a cancel
+    assert phone_push.cancel_pushes(TWO, {"d2": "U2"}, "missed", 0)[0].device == "d2"  # only those rung
+    with pytest.raises(ValueError, match="not a cancel reason"):
+        phone_push.cancel_payload("U", "hung up")
+
+
+def test_answering_on_one_phone_ends_the_ring_on_the_other(rings: Path) -> None:
+    ringer, sent = _two_phones(rings)
+
+    async def main() -> None:
+        assert await ringer.ring("slack", "Pat: the deploy failed") == "rang"
+        [ring] = sent
+        token = ring[0].payload["scoutRing"]
+        await asyncio.sleep(0.05)
+        assert len(sent) == 1  # still ringing: nothing more
+        assert phone_ring.Rings(rings).claim(token, "d1") is not None  # scout-phone, d1's answer
+        await _settled(sent, 2)
+        [cancel] = sent[1]
+        assert cancel.device == "d2" and cancel.payload["scoutCancel"] == "answered"
+        assert cancel.payload["uuid"] == next(p for p in ring if p.device == "d2").payload["uuid"]
+        assert cancel.expires_at == ring[0].expires_at
+
+    run(main())
+
+
+def test_declining_on_one_phone_ends_the_ring_on_the_other(rings: Path) -> None:
+    ringer, sent = _two_phones(rings)
+
+    async def main() -> None:
+        await ringer.ring("pulse", "Meeting in 10")
+        token = sent[0][0].payload["scoutRing"]
+        assert phone_ring.Rings(rings).decline(token, "d2") == "declined"
+        await _settled(sent, 2)
+        [cancel] = sent[1]
+        assert (cancel.device, cancel.payload["scoutCancel"]) == ("d1", "declined")
+
+    run(main())
+
+
+def test_a_ring_nobody_answers_ends_as_missed_on_every_phone(rings: Path) -> None:
+    ringer, sent = _two_phones(rings, ring_s=0.05)
+
+    async def main() -> None:
+        await ringer.ring("starlink", "Starlink is down")
+        await _settled(sent, 2)
+        ring, cancels = sent
+        assert {p.device: p.payload["scoutCancel"] for p in cancels} == {"d1": "missed", "d2": "missed"}
+        assert {p.payload["uuid"] for p in cancels} == {p.payload["uuid"] for p in ring}
+        # Still claimable by a phone that answered just before the cancel (its app keeps that
+        # call: it answered it), until the ring's own expiry.
+        assert phone_ring.Rings(rings).claim(ring[0].payload["scoutRing"], "d1") is not None
+
+    run(main())
+
+
+def test_a_new_ring_ends_the_one_still_ringing_first(rings: Path) -> None:
+    ringer, sent = _two_phones(rings)
+
+    async def main() -> None:
+        await ringer.ring("manual", "one")
+        await ringer.ring("manual", "two")
+        first, cancels, second = sent
+        assert [p.payload["scoutCancel"] for p in cancels] == ["missed", "missed"]
+        assert {p.payload["uuid"] for p in cancels} == {p.payload["uuid"] for p in first}
+        assert {p.payload["uuid"] for p in second}.isdisjoint(p.payload["uuid"] for p in first)
+        # The first ring's watch ends quietly (replaced); the second's is still on.
+        assert phone_ring.Rings(rings).decline(second[0].payload["scoutRing"], "d1") == "declined"
+        await _settled(sent, 4)
+        assert [(p.device, p.payload["scoutCancel"]) for p in sent[3]] == [("d2", "declined")]
+
+    run(main())
+
+
 def test_scout_never_calls_by_default() -> None:
     assert phone_ring.Ringer.from_config(PhoneConfig(enabled=True)) is None
     assert phone_ring.Ringer.from_config(PhoneConfig(ring_for=["slack"])) is None  # phone path off

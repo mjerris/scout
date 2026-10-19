@@ -301,6 +301,19 @@ lists the recent rings and how they went.
    the alert, framed as data.
 4. Decline: the app posts the token (`POST /api/phone/ring/decline`, signed for that
    ring). Unanswered: the ring expires; the CallKit entry ends itself as missed after 45 s.
+5. The other phones: Scout keeps each device's CallKit uuid with the ring and watches it
+   (`Ringer._watch`, every 0.5 s: scout-phone claims an answer in the shared file). Once
+   one phone answers or declines, every other phone gets a cancel push; if nobody has by
+   `RING_S` (40 s), every phone does. A cancel is a VoIP push like the ring (iOS wants a
+   CallKit call for each): the same uuid, `scoutCancel` = answered | declined | missed,
+   no token, expiring with the ring. The native hook reports it; CallKit already has that
+   call, and the app ends it as answered or declined elsewhere, or unanswered
+   (`ring.watchCancels`). A cancel for a call the phone doesn't have (it came first, or
+   the call already ended) rings for a moment and is ended at once (Apple's pattern); a
+   cancel for the call this phone answered is ignored, and the ring can still be claimed
+   until its 60 s expiry. A new ring cancels one still ringing first. One case is left to
+   the 45 s fallback: a ring and its cancel both arriving before a killed app's
+   JavaScript runs, where the wrapper may keep the ring's data for that uuid.
 
 **Why no parked caller**: the library's own push flow parks a real caller on a SWML
 script and bridges the app to it. Scout has no caller to hold: its side of the call is
@@ -308,9 +321,8 @@ the agent, created only when the app dials. So nothing is billed while the phone
 and there is no leg that only an API could end (a parked caller reached through a Fabric
 SWML address runs on an internal leg that REST can't end: cloud-product#21780).
 
-**Not yet**: with two phones registered, both ring and the one not answered rings out
-(45 s); there is no cancel push. Real device testing waits for the build on the SignalWire
-Apple team (app/README.md, "Push").
+**Not yet**: real device testing waits for the build on the SignalWire Apple team
+(app/README.md, "Push").
 
 ## Setup the user does
 

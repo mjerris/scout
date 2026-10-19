@@ -8,6 +8,15 @@
 // push wakes a killed app, and the answer can come from the lock screen while the app is
 // still starting. An answer waits here until the call panel (which needs the pairing from
 // the Keychain) takes it.
+//
+// With more than one phone, the ring ends on the others once one answers or declines, or
+// nobody does (Scout's cancel push, phone_push.cancel_payload). iOS wants a CallKit call for
+// every VoIP push, so the cancel carries the uuid this phone was rung with: the native hook
+// reports it, CallKit already has that call (CallUUIDAlreadyExists), and it is ended here,
+// as answered or declined elsewhere, or as missed. A cancel for a call this phone doesn't
+// have (it came first, or the call already ended) is reported as a new call and ended at
+// once: Apple's pattern. A cancel for the call this phone answered is ignored.
+import RNCallKeep, { CONSTANTS } from '@signalwire/react-native-callkeep';
 import { getCallKit } from '@signalwire/react-native/callkit';
 import { useSyncExternalStore } from 'react';
 
@@ -23,6 +32,9 @@ export interface RingAnswer {
 }
 
 let waiting: RingAnswer[] = [];
+/** CallKit uuids (lowercase) this phone answered Scout's ring on, and ones a cancel ended. */
+const answeredHere = new Set<string>();
+const cancelled = new Set<string>();
 const listeners = new Set<() => void>();
 
 function changed(): void {
@@ -77,6 +89,7 @@ export function watchRings(
       console.warn(`Answered push ${e.uuid} isn't Scout's call; ignoring`);
       return;
     }
+    answeredHere.add(e.uuid.toLowerCase());
     waiting = [...waiting, { uuid: e.uuid, ring }];
     changed();
   });
@@ -98,8 +111,88 @@ export function watchRings(
   };
 }
 
+export type CancelReason = 'answered' | 'declined' | 'missed';
+
+/** CallKit's end reason for each (callkeep's iOS values: missed is "unanswered"). */
+export function endReason(reason: string): number {
+  const r = CONSTANTS.END_CALL_REASONS;
+  if (reason === 'answered') return r.ANSWERED_ELSEWHERE;
+  if (reason === 'declined') return r.DECLINED_ELSEWHERE;
+  return r.UNANSWERED;
+}
+
+type Display = { callUUID: string; fromPushKit?: string; payload?: unknown };
+type Entries = { subscribe(fn: (entries: readonly CancelEntry[]) => void): { unsubscribe(): void } };
+type CancelEntry = { uuid: string; state: string; data?: Record<string, string> };
+
+export interface CancelDeps {
+  /** callkeep's didDisplayIncomingCall, with the push's payload (a known uuid too). */
+  onDisplay: (fn: (e: Display) => void) => () => void;
+  /** The registry's entries: a cancel the wrapper adopted at a cold start shows up here. */
+  entries$: Entries;
+  /** Ends the CallKit call with a reason (callkeep's reportEndCallWithUUID). */
+  reportEnded: (uuid: string, reason: number) => void;
+  /** Tells the registry the call is over (its own native end is then a no-op). */
+  forget: (uuid: string) => void;
+}
+
+const CANCEL_DEPS = (): CancelDeps => ({
+  onDisplay: (fn) => {
+    const sub = RNCallKeep.addEventListener('didDisplayIncomingCall', fn);
+    return () => sub?.remove?.();
+  },
+  entries$: getCallKit().registry.entries$,
+  reportEnded: (uuid, reason) => RNCallKeep.reportEndCallWithUUID(uuid, reason),
+  forget: (uuid) => getCallKit().registry.reportRemoteEnded(uuid),
+});
+
+function cancelOf(data: unknown): string | null {
+  const c = (data as Record<string, unknown> | null | undefined)?.scoutCancel;
+  return typeof c === 'string' && c ? c : null;
+}
+
+/**
+ * End Scout's ring here when another phone settled it, or nobody answered (the cancel
+ * push). Returns the unsubscribe (for tests); index.ts calls it once.
+ */
+export function watchCancels(deps: CancelDeps = CANCEL_DEPS()): () => void {
+  const end = (rawUuid: string, reason: string) => {
+    const uuid = rawUuid.toLowerCase();
+    if (answeredHere.has(uuid)) {
+      console.warn(`Scout ended its ring (${reason}), but this phone answered ${uuid}; keeping the call`);
+      return;
+    }
+    if (!cancelled.has(uuid)) {
+      cancelled.add(uuid);
+      deps.reportEnded(uuid, endReason(reason));
+      const left = waiting.filter((w) => w.uuid.toLowerCase() !== uuid);
+      if (left.length !== waiting.length) {
+        waiting = left;
+        changed();
+      }
+    }
+    deps.forget(uuid);
+  };
+  const stopDisplay = deps.onDisplay((e) => {
+    const reason = cancelOf(e.payload);
+    if (reason && e.fromPushKit === '1' && e.callUUID) end(e.callUUID, reason);
+  });
+  const entries = deps.entries$.subscribe((list) => {
+    for (const e of list) {
+      const reason = cancelOf(e.data);
+      if (reason && e.state !== 'ended') end(e.uuid, reason);
+    }
+  });
+  return () => {
+    stopDisplay();
+    entries.unsubscribe();
+  };
+}
+
 /** For tests. */
 export function resetRingsForTesting(): void {
   waiting = [];
+  answeredHere.clear();
+  cancelled.clear();
   changed();
 }

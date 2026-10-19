@@ -2,9 +2,13 @@
 
 Two kinds, both from the app's own Apple team and its one APNs auth key (.p8):
 
-- VoIP (PushKit, topic "<bundle id>.voip"): Scout ringing the phone (phone_ring.py). iOS
+- VoIP (PushKit, topic "<bundle id>.voip"): Scout ringing the phone (phone_ring.py), and
+  ending that ring on the other phones once one answers or declines, or nobody does. iOS
   wakes the app, whose native hook reports a CallKit call before any JavaScript runs; a
-  VoIP push must always become a call, so nothing else may use it.
+  VoIP push must always become a call, so nothing else may use it. A cancel therefore
+  carries the same CallKit uuid as the ring it ends: iOS takes it as that call, already
+  reported, and the app ends it (a cancel for a call the phone doesn't have rings for a
+  moment and is ended at once: Apple's pattern).
 - Alert (topic "<bundle id>"): a notification. Pairing requests go this way, with Approve
   and Deny actions (category SCOUT_PAIR); the app answers through the same signed
   /api/phone/pair/decide as its in-app screen.
@@ -235,6 +239,19 @@ def ring_payload(token: str, call_uuid: str) -> dict[str, Any]:
     return {"call_id": token, "uuid": call_uuid, "from": "Scout", "from_name": "Scout", "scoutRing": token}
 
 
+# Why a ring ended, as the cancel push says it (the app's CallKit end reason follows it).
+CANCEL_REASONS = ("answered", "declined", "missed")
+
+
+def cancel_payload(call_uuid: str, reason: str) -> dict[str, Any]:
+    """A VoIP push that ends a ring on a phone that didn't settle it: the ring's own CallKit
+    uuid, so iOS reports it as that call (already there) and the app ends it, as answered
+    or declined elsewhere, or as missed. No call_id and no scoutRing: nothing dials it."""
+    if reason not in CANCEL_REASONS:
+        raise ValueError(f"not a cancel reason: {reason}")
+    return {"call_id": "", "uuid": call_uuid, "from": "Scout", "from_name": "Scout", "scoutCancel": reason}
+
+
 def pair_payload(view: dict[str, Any]) -> dict[str, Any]:
     """A notification for a device asking to pair, with Approve / Deny (category
     SCOUT_PAIR). The name is the requester's own (already cleaned by phone_pairing) and
@@ -255,14 +272,32 @@ def pair_payload(view: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def ring_pushes(targets: Iterable[phone_devices.PushTarget], token: str, expires_at: int) -> list[Push]:
-    """One VoIP push per device that registered a PushKit token; one CallKit uuid each."""
+def ring_uuids(targets: Iterable[phone_devices.PushTarget]) -> dict[str, str]:
+    """A CallKit uuid per device that registered a PushKit token (kept with the ring, so a
+    cancel names the same call)."""
+    return {t.device: str(uuid.uuid4()).upper() for t in targets if t.voip}
+
+
+def ring_pushes(
+    targets: Iterable[phone_devices.PushTarget], token: str, expires_at: int, uuids: dict[str, str]
+) -> list[Push]:
+    """One VoIP push per device that registered a PushKit token, with its uuid."""
     return [
-        Push(
-            t.voip, t.env, "voip", ring_payload(token, str(uuid.uuid4()).upper()), expires_at, device=t.device
-        )
+        Push(t.voip, t.env, "voip", ring_payload(token, uuids[t.device]), expires_at, device=t.device)
         for t in targets
-        if t.voip
+        if t.voip and t.device in uuids
+    ]
+
+
+def cancel_pushes(
+    targets: Iterable[phone_devices.PushTarget], uuids: dict[str, str], reason: str, expires_at: int
+) -> list[Push]:
+    """A cancel per device in `targets` that was rung (has a uuid in `uuids`). It expires
+    with the ring: a late one would only ring for a moment and end."""
+    return [
+        Push(t.voip, t.env, "voip", cancel_payload(uuids[t.device], reason), expires_at, device=t.device)
+        for t in targets
+        if t.voip and t.device in uuids
     ]
 
 

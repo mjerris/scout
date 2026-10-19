@@ -12,13 +12,17 @@
          claims the ring (it must be that device's, unexpired, unanswered) and the agent
          opens with the alert
       -> or Decline: the app posts the token (signed); the ring ends as declined
+      -> Ringer watches the ring: once a phone answers or declines, the other phones get a
+         cancel push (phone_push.cancel_pushes, the same CallKit uuid each was rung with)
+         and end the call as answered or declined elsewhere; nobody by RING_S, every
+         phone gets one and the call ends as missed
 
 There is no parked caller and no SignalWire leg while the phone rings: Scout's side of the
 call is the agent, which exists only once the app dials it. So nothing bills while it
 rings, and no leg is ever left that only an API could end (a parked leg reached through a
-Fabric SWML address can't be ended by REST: cloud-product#21780). An unanswered ring
-simply expires; the app's CallKit entry ends itself as missed (the wrapper's fusion
-timeout, 45 s).
+Fabric SWML address can't be ended by REST: cloud-product#21780). An unanswered ring is
+ended by its cancel push at RING_S; failing that, the app's CallKit entry ends itself as
+missed (the wrapper's fusion timeout, 45 s).
 
 The store is state/phone_rings.json (0600), shared by Scout (which starts rings and takes
 declines) and scout-phone (which claims them), under an flock.
@@ -30,6 +34,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import asyncio
 import json
 import logging
 import secrets
@@ -47,7 +52,9 @@ from .starlink import in_quiet_hours
 log = logging.getLogger("scout.ring")
 
 PATH = DATA / "state" / "phone_rings.json"
-RING_TTL_S = 60  # how long a ring can be answered (the app rings for 45 s)
+RING_TTL_S = 60  # how long a ring can be claimed (an answer at 39 s dials a few seconds later)
+RING_S = 40.0  # how long the phones ring before the cancel push ends it (the app's own end: 45 s)
+POLL_S = 0.5  # how often a ring is checked for an answer or decline (scout-phone claims it)
 KEPT_S = 24 * 3600  # ended rings are kept this long (the CLI shows them)
 TEXT_MAX = 600
 SOURCES = {
@@ -104,8 +111,16 @@ class Rings:
     def path(self) -> Path:
         return self._path or PATH
 
-    def start(self, who: str, text: str, devices: list[str], now: float | None = None) -> tuple[str, int]:
-        """A new ring: (token, expires_at). Any older ring still ringing is ended first."""
+    def start(
+        self,
+        who: str,
+        text: str,
+        devices: list[str],
+        now: float | None = None,
+        uuids: dict[str, str] | None = None,
+    ) -> tuple[str, int]:
+        """A new ring: (token, expires_at), with each device's CallKit uuid. Any older ring
+        still ringing is ended first."""
         now = time.time() if now is None else now
         token = secrets.token_urlsafe(32)
         expires = int(now + self.ttl_s)
@@ -117,12 +132,29 @@ class Rings:
                 "who": who,
                 "text": " ".join(text.split())[:TEXT_MAX],
                 "devices": devices,
+                "uuids": dict(uuids or {}),
                 "at": now,
                 "expires_at": expires,
                 "status": "ringing",
                 "by": "",
             }
         return token, expires
+
+    def replace_ringing(self, now: float | None = None) -> list[dict[str, Any]]:
+        """End the rings still ringing (a new one is starting): what they were, to cancel."""
+        out = []
+        with _locked(self.path, now) as rings:
+            for r in rings.values():
+                if r.get("status") == "ringing":
+                    r["status"] = "replaced"
+                    out.append(dict(r))
+        return out
+
+    def get(self, token: str) -> dict[str, Any] | None:
+        """The ring for this token, as it stands."""
+        with _locked(self.path) as rings:
+            r = rings.get(_hash(token))
+            return dict(r) if r is not None else None
 
     def _settle(
         self, token: Any, device: str, status: str, now: float | None
@@ -190,6 +222,10 @@ class RingPolicy:
 
 Targets = Callable[[], list[phone_devices.PushTarget]]
 
+# The rings being watched (Ringer._watch), held so a Ringer made for one request
+# (scoutctl phone ring) doesn't take its watch with it.
+_watching: set[asyncio.Task[None]] = set()
+
 
 class Ringer:
     """Rings the phone for an alert, when the policy says so (assistant.announce)."""
@@ -201,12 +237,16 @@ class Ringer:
         rings: Rings | None = None,
         targets: Targets = phone_devices.push_targets,
         clock: Callable[[], float] = time.monotonic,
+        ring_s: float = RING_S,
+        poll_s: float = POLL_S,
     ) -> None:
         self.policy = RingPolicy(cfg)
         self.send = send
         self.rings = rings or Rings()
         self.targets = targets
         self.clock = clock
+        self.ring_s = ring_s
+        self.poll_s = poll_s
 
     @classmethod
     def from_config(cls, cfg: PhoneConfig) -> Ringer | None:
@@ -233,12 +273,52 @@ class Ringer:
         targets = [t for t in self.targets() if t.voip]
         if not targets:
             return "no paired phone has registered for calls (open the app once)"
-        token, expires = self.rings.start(who, text, [t.device for t in targets])
+        for old in self.rings.replace_ringing():
+            await self._cancel(targets, old.get("uuids") or {}, "missed", int(old.get("expires_at", 0)))
+        uuids = phone_push.ring_uuids(targets)
+        token, expires = self.rings.start(who, text, [t.device for t in targets], uuids=uuids)
         self.policy.last_ring = self.clock()
-        results = await self.send(phone_push.ring_pushes(targets, token, expires))
+        results = await self.send(phone_push.ring_pushes(targets, token, expires, uuids))
         ok = sum(r.ok for r in results)
         log.info("ring: rang %d of %d phones for a %s alert", ok, len(results), who)
-        return "rang" if ok else "no phone took the push"
+        if not ok:
+            return "no phone took the push"
+        task = asyncio.create_task(self._watch(token, targets, uuids, expires))
+        _watching.add(task)
+        task.add_done_callback(_watching.discard)
+        return "rang"
+
+    async def _watch(
+        self, token: str, targets: list[phone_devices.PushTarget], uuids: dict[str, str], expires: int
+    ) -> None:
+        """Ends the ring on the phones that didn't settle it: once one answers (scout-phone
+        claims it) or declines, the others; nobody by ring_s, all of them."""
+        deadline = self.clock() + self.ring_s
+        while True:
+            r = await asyncio.to_thread(self.rings.get, token)
+            status = r.get("status") if r is not None else None
+            if status == "ringing" and self.clock() < deadline:
+                await asyncio.sleep(self.poll_s)
+                continue
+            if r is None or status not in ("ringing", "answered", "declined"):
+                return  # replaced (its cancel went with the new ring) or gone
+            if status == "ringing":
+                await self._cancel(targets, uuids, "missed", expires)
+            else:
+                rest = [t for t in targets if t.device != r.get("by")]
+                await self._cancel(rest, uuids, str(status), expires)
+            return
+
+    async def _cancel(
+        self, targets: list[phone_devices.PushTarget], uuids: dict[str, str], reason: str, expires: int
+    ) -> None:
+        pushes = phone_push.cancel_pushes(targets, uuids, reason, expires)
+        if not pushes or self.send is None:
+            return
+        results = await self.send(pushes)
+        log.info(
+            "ring: ended the ring (%s) on %d of %d phones", reason, sum(r.ok for r in results), len(results)
+        )
 
 
 def opening(ring: dict[str, Any]) -> str:
