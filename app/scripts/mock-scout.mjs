@@ -3,8 +3,10 @@
 // scout://pair link with a one-time code (single use, 10 minutes); asking to pair without
 // a code is approved after 3 seconds (Scout would ask the room). A token request is
 // checked for a signature shape and answered 409, the way Scout does when [phone] isn't
-// set up, so a call stops before SignalWire.
-//   node app/scripts/mock-scout.mjs [port]     (0 or none: a free port; prints it)
+// set up, so a call stops before SignalWire. With --ask, a made-up device asks to pair
+// 5 seconds after start, for the paired app's Approve / Deny (also from a notification:
+// xcrun simctl push, app/README.md). Push registrations and declined rings are logged.
+//   node app/scripts/mock-scout.mjs [port] [--ask]     (0 or none: a free port; prints it)
 import { randomBytes, randomInt } from 'node:crypto';
 import { createServer } from 'node:http';
 
@@ -14,6 +16,20 @@ const code = `${raw.slice(0, 4)}-${raw.slice(4)}`;
 const expires = Date.now() + 600_000;
 let used = false;
 const requests = new Map(); // request id -> {name, match, approved}
+const args = process.argv.slice(2);
+const ask = args.includes('--ask');
+let pending = []; // devices asking to pair, as Scout shows them to a paired phone
+let version = 0;
+if (ask) {
+  setTimeout(() => {
+    const at = Date.now() / 1000;
+    pending = [{ id: 'MOCKAB', name: 'Guest phone', match: '47', login: 'guest@example.com', owner: false,
+      peer: 'guest-phone', ip: '100.64.0.9', agent: 'Scout/1.0', at, expires_at: at + 120 }];
+    version++;
+    console.log('Guest phone asks to pair (request MOCKAB, code 47)');
+  }, 5000);
+}
+const signed = (b) => typeof b.device === 'string' && typeof b.sig === 'string';
 
 const paired = (name) => {
   const device = 'd' + randomBytes(8).toString('hex');
@@ -64,6 +80,32 @@ const server = createServer((req, res) => {
       requests.delete(b.request);
       return send(200, { status: 'approved', ...paired(r.name) });
     }
+    if (req.url === '/api/phone/pair/pending') {
+      if (!signed(b)) return send(401, null);
+      // A long poll: held while nothing changed (checked each second, up to `wait`).
+      const until = Date.now() + Math.min(25, Number(b.wait) || 0) * 1000;
+      const answer = () =>
+        b.since === version && Date.now() < until ? setTimeout(answer, 1000) : send(200, { requests: pending, version });
+      return answer();
+    }
+    if (req.url === '/api/phone/pair/decide') {
+      if (!signed(b)) return send(401, null);
+      if (!pending.some((r) => r.id === b.id)) return send(404, { status: 'unknown' });
+      pending = pending.filter((r) => r.id !== b.id);
+      version++;
+      console.log(`request ${b.id} ${b.approve ? 'approved' : 'denied'} by the phone`);
+      return send(200, b.approve ? { status: 'approved', device: 'dmockguest' } : { status: 'denied' });
+    }
+    if (req.url === '/api/phone/push') {
+      if (!signed(b)) return send(401, null);
+      console.log(`push registered: calls ${b.voip ? 'yes' : 'no'}, notifications ${b.alert ? 'yes' : 'no'}, ${b.env}`);
+      return send(200, { status: 'ok', ring: false, push: ask }); // with --ask the app asks for notifications
+    }
+    if (req.url === '/api/phone/ring/decline') {
+      if (!signed(b)) return send(401, null);
+      console.log('ring declined');
+      return send(404, { status: 'unknown' });
+    }
     if (req.url === '/api/phone/token') {
       if (typeof b.device !== 'string' || typeof b.sig !== 'string') return send(401, null);
       return send(409, { status: 'error', error: 'Mock Scout: no SignalWire here (a real Scout mints the token).' });
@@ -71,7 +113,7 @@ const server = createServer((req, res) => {
     send(404, { status: 'error', error: 'not found' });
   });
 });
-server.listen(Number(process.argv[2] ?? 0), '127.0.0.1', () => {
+server.listen(Number(args.find((a) => !a.startsWith('--')) ?? 0), '127.0.0.1', () => {
   const { port } = server.address();
   console.log(`mock Scout on http://localhost:${port}`);
   console.log(`pair link: scout://pair?server=${encodeURIComponent(`http://localhost:${port}`)}&code=${code}`);

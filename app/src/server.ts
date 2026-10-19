@@ -5,7 +5,7 @@
 // is open) shows other devices asking to pair, for an Approve or Deny signed the same way. It reaches the
 // Mac at its Tailscale name ([web] public_url, else the Tailscale Serve name,
 // https://<mac>.<tailnet>.ts.net).
-import { PAIR_REVIEW, pairDecidePurpose, signedFor, tokenRequest } from './sign';
+import { PAIR_REVIEW, pairDecidePurpose, pushRegisterPurpose, ringDeclinePurpose, signedFor, tokenRequest } from './sign';
 
 export class ServerError extends Error {
   constructor(
@@ -230,5 +230,38 @@ export class ScoutServer {
     }
     if (d && typeof d === 'object' && typeof (d as { status?: unknown }).status === 'string') return d as PairAnswer;
     throw new ServerError('Scout answered with something unexpected', 502);
+  }
+
+  /**
+   * Register this phone's push tokens with Scout (signed for exactly these tokens): the
+   * PushKit token Scout rings for its calls, and the APNs token for notifications
+   * (pairing requests). Empty strings unregister. `env` is the APNs environment the build
+   * is signed for.
+   */
+  async registerPush(voip: string, alert: string, env: 'sandbox' | 'production'): Promise<{ push: boolean }> {
+    if (!this.me) throw new ServerError('This phone is not paired', 401);
+    const d = (await this.post('/api/phone/push', {
+      ...signedFor(this.me, pushRegisterPurpose(voip, alert, env)),
+      voip,
+      alert,
+      env,
+    })) as { push?: unknown } | null;
+    // Whether Scout can send pushes at all (an APNs key is set up there).
+    return { push: d?.push === true };
+  }
+
+  /** Tell Scout the user declined its call (signed for exactly this ring). */
+  async declineRing(ring: string): Promise<string> {
+    if (!this.me) throw new ServerError('This phone is not paired', 401);
+    try {
+      const d = (await this.post('/api/phone/ring/decline', { ...signedFor(this.me, ringDeclinePurpose(ring)), ring })) as {
+        status?: unknown;
+      } | null;
+      return typeof d?.status === 'string' ? d.status : 'declined';
+    } catch (e) {
+      // 404: Scout doesn't know that ring; 409: it was answered, declined or expired already.
+      if (e instanceof ServerError && (e.status === 404 || e.status === 409)) return e.status === 404 ? 'unknown' : 'already';
+      throw e;
+    }
   }
 }

@@ -9,6 +9,8 @@ import { PairApprovals } from './PairApprovals';
 import { clearPairing, loadPairing, parsePairLink } from './pairing';
 import type { PairLink, Pairing } from './pairing';
 import { PairScreen } from './PairScreen';
+import { registerPush } from './push';
+import { ScoutServer } from './server';
 import { testFlags } from './testFlags';
 import { useTheme } from './theme';
 import { Button, Muted, Row, Section } from './ui';
@@ -83,6 +85,9 @@ function Main() {
 
 function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void }) {
   const t = useTheme();
+  const [pushError, setPushError] = useState('');
+  // Tell Scout where to reach this phone (its calls, pairing requests), on every launch.
+  useEffect(() => registerPush(new ScoutServer(pairing.server, pairing), setPushError), [pairing]);
   return (
     <>
     <PairApprovals pairing={pairing} />
@@ -92,6 +97,7 @@ function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void 
         {pairing.name} ({pairing.device}), calling {pairing.address}
       </Text>
       <Muted>Scout at {pairing.server}</Muted>
+      {pushError ? <Muted>{pushError}</Muted> : null}
       <Row>
         <Button testID="forget" title="Forget pairing" onPress={onForget} />
       </Row>

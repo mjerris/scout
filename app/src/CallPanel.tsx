@@ -10,6 +10,8 @@ import RNCallKeep from '@signalwire/react-native-callkeep';
 
 import { scoutCredentials } from './credentials';
 import { takeCallRequests, usePendingCallRequests } from './startRequests';
+import { takeRing, usePendingRings } from './ring';
+import type { RingAnswer } from './ring';
 import type { Pairing } from './pairing';
 import { ScoutServer } from './server';
 import type { MintedToken } from './server';
@@ -27,10 +29,14 @@ const CALLKIT: CallKitObserverOptions = { displayName: () => 'Scout' };
 // from either side reaches 'destroyed'.
 const ENDED = new Set(['ended', 'failed', 'destroyed']);
 const HANGUP_WAIT_MS = 5000;
+// How long an answered ring waits for SignalWire to connect (a cold start) before giving up.
+const RING_CONNECT_MS = 15000;
 
 interface Session {
   id: number;
   credentials: CredentialProvider;
+  /** Answering Scout's call: the CallKit entry the user answered, and the ring's token. */
+  ring?: RingAnswer;
 }
 
 /**
@@ -47,19 +53,21 @@ export function CallPanel({ pairing }: { pairing: Pairing }) {
   const [error, setError] = useState('');
   const attempt = useRef(0);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (ring?: RingAnswer) => {
     if (busy || session) return;
     const mine = ++attempt.current;
     setBusy(true);
     setError('');
-    setState('getting a token from Scout');
+    setState(ring ? 'answering Scout: getting a token' : 'getting a token from Scout');
     try {
       const server = new ScoutServer(pairing.server, pairing);
       const first: MintedToken = await server.token();
       if (mine !== attempt.current) return;
-      setSession({ id: mine, credentials: scoutCredentials(server, first) });
+      setSession({ id: mine, credentials: scoutCredentials(server, first), ring });
       setState('connecting');
     } catch (e) {
+      // The answered call can't go anywhere: end it in CallKit rather than leave it up.
+      if (ring) getCallKit().registry.endCall(ring.uuid, 'failed');
       if (mine !== attempt.current) return;
       setState('idle');
       setError((e as Error).message);
@@ -81,6 +89,14 @@ export function CallPanel({ pairing }: { pairing: Pairing }) {
     if (requests > 0 && takeCallRequests()) void start();
   }, [requests, start]);
 
+  // Scout's call, answered in CallKit: placed as soon as nothing else is going on.
+  const rings = usePendingRings();
+  useEffect(() => {
+    if (rings.length === 0 || busy || session) return;
+    const ring = takeRing();
+    if (ring) void start(ring);
+  }, [rings, busy, session, start]);
+
   return (
     <Section title="Call Scout">
       <Text testID="state" style={{ color: useTheme().ink }}>
@@ -88,7 +104,7 @@ export function CallPanel({ pairing }: { pairing: Pairing }) {
       </Text>
       {session ? (
         <SignalWireProvider key={session.id} credentialProvider={session.credentials} options={SW_OPTIONS} callKit={CALLKIT}>
-          <ActiveCall pairing={pairing} onState={setState} onEnded={ended} />
+          <ActiveCall pairing={pairing} ring={session.ring} onState={setState} onEnded={ended} />
         </SignalWireProvider>
       ) : (
         <Row>
@@ -110,10 +126,12 @@ export function CallPanel({ pairing }: { pairing: Pairing }) {
 
 function ActiveCall({
   pairing,
+  ring,
   onState,
   onEnded,
 }: {
   pairing: Pairing;
+  ring?: RingAnswer;
   onState: (s: string) => void;
   onEnded: (why?: string) => void;
 }) {
@@ -128,22 +146,54 @@ function ActiveCall({
     if (!isConnected || dialed.current) return;
     dialed.current = true;
     onState('dialing');
+    const bridge = getCallKit();
+    if (ring) {
+      // The user may have ended it in CallKit while this connected.
+      if (!bridge.registry.isLive(ring.uuid)) {
+        onEnded();
+        return;
+      }
+      // This call joins the CallKit entry the user already answered: claim it first, or
+      // CallKit is told about a second, outgoing call and refuses it.
+      bridge.beginBridgeDial(ring.uuid);
+    }
     dial(pairing.address, {
       audio: true,
       video: false,
-      // device, ts, nonce, sig: Scout's per-call check (docs/phone-design.md).
-      userVariables: { ...callVariables(pairing) },
-    }).then(
-      (placed) => {
-        if (gone.current) {
-          placed.hangup().catch(() => {});
-          return;
-        }
-        setCall(placed);
-      },
-      (e: unknown) => onEnded(`Couldn't place the call: ${String((e as Error)?.message ?? e)}`),
-    );
-  }, [isConnected, dial, pairing, onState, onEnded]);
+      // device, ts, nonce, sig: Scout's per-call check (docs/phone-design.md); ring: the
+      // call answers Scout's ring.
+      userVariables: { ...callVariables(pairing), ...(ring ? { ring: ring.ring } : {}) },
+    })
+      .finally(() => {
+        if (ring) bridge.endBridgeDial();
+      })
+      .then(
+        (placed) => {
+          if (gone.current || (ring && !bridge.bindBridgeCall(ring.uuid, placed))) {
+            // Hung up meanwhile (here, or the answered entry ended in CallKit).
+            placed.hangup().catch(() => {});
+            if (!gone.current) onEnded();
+            return;
+          }
+          setCall(placed);
+        },
+        (e: unknown) => {
+          if (ring) bridge.registry.endCall(ring.uuid, 'failed');
+          onEnded(`Couldn't place the call: ${String((e as Error)?.message ?? e)}`);
+        },
+      );
+  }, [isConnected, dial, pairing, ring, onState, onEnded]);
+
+  // An answered ring whose client never connects (no network on a cold start) ends as failed.
+  useEffect(() => {
+    if (!ring || isConnected) return;
+    const t = setTimeout(() => {
+      if (dialed.current) return;
+      getCallKit().registry.endCall(ring.uuid, 'failed');
+      onEnded("Couldn't reach SignalWire to answer Scout's call.");
+    }, RING_CONNECT_MS);
+    return () => clearTimeout(t);
+  }, [ring, isConnected, onEnded]);
 
   useEffect(() => {
     if (!call) return;

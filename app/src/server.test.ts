@@ -1,5 +1,5 @@
 import { normalizeServer, ScoutServer, ServerError } from './server';
-import { PAIR_REVIEW, pairDecidePurpose, sign, TOKEN_PURPOSE } from './sign';
+import { PAIR_REVIEW, pairDecidePurpose, pushRegisterPurpose, ringDeclinePurpose, sign, TOKEN_PURPOSE } from './sign';
 
 test('normalizeServer: https Tailscale names, localhost over http, nothing else in the clear', () => {
   expect(normalizeServer('mac.tail1234.ts.net')).toBe('https://mac.tail1234.ts.net');
@@ -113,4 +113,25 @@ test('pairing requests from other devices: listed and answered with signatures f
   const gone = fakeFetch(404, { status: 'unknown' });
   expect(await new ScoutServer('https://m', me, gone.impl).pairDecide('ZZZZZZ', true)).toEqual({ status: 'unknown' });
   await expect(new ScoutServer('https://m', null, gone.impl).pairPending()).rejects.toThrow(/not paired/);
+});
+
+test('push tokens and a declined ring are signed for exactly those', async () => {
+  const me = { device: 'd1234567890abcdef', secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8' };
+  const f = fakeFetch(200, { status: 'ok' });
+  const s = new ScoutServer('https://mac.ts.net', me, f.impl);
+  expect(await s.registerPush('ab'.repeat(32), 'cd'.repeat(32), 'sandbox')).toEqual({ push: false });
+  const reg = JSON.parse(f.calls[0]!.init.body as string);
+  expect(f.calls[0]!.url).toBe('https://mac.ts.net/api/phone/push');
+  expect(reg).toMatchObject({ voip: 'ab'.repeat(32), alert: 'cd'.repeat(32), env: 'sandbox', device: me.device });
+  expect(reg.sig).toBe(sign(me.secret, me.device, reg.ts, reg.nonce, pushRegisterPurpose('ab'.repeat(32), 'cd'.repeat(32), 'sandbox')));
+
+  expect(await s.declineRing('tok-1')).toBe('ok');
+  const dec = JSON.parse(f.calls[1]!.init.body as string);
+  expect(f.calls[1]!.url).toBe('https://mac.ts.net/api/phone/ring/decline');
+  expect(dec.ring).toBe('tok-1');
+  expect(dec.sig).toBe(sign(me.secret, me.device, dec.ts, dec.nonce, ringDeclinePurpose('tok-1')));
+
+  const gone = new ScoutServer('https://mac.ts.net', me, fakeFetch(409, { status: 'already' }).impl);
+  expect(await gone.declineRing('tok-1')).toBe('already');
+  await expect(new ScoutServer('https://mac.ts.net').registerPush('', '', 'sandbox')).rejects.toThrow(/not paired/);
 });

@@ -2,9 +2,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import RNCallKeep from '@signalwire/react-native-callkeep';
 import { BehaviorSubject, Subject } from 'rxjs';
 
-import { getCallKit } from '@signalwire/react-native/callkit';
+import { getCallKit, resetCallKitForTesting } from '@signalwire/react-native/callkit';
 
 import { CallPanel } from './CallPanel';
+import { resetRingsForTesting, watchRings } from './ring';
 import { sign } from './sign';
 
 // A stand-in for @signalwire/js: a client that connects at once and a call whose status
@@ -69,7 +70,16 @@ function respond(status: number, body: unknown) {
 }
 
 // What index.ts does at launch.
-beforeAll(() => getCallKit().setup({ appName: 'Scout', supportsVideo: false }));
+let stopRings: () => void = () => {};
+beforeAll(async () => {
+  await getCallKit().setup({ appName: 'Scout', supportsVideo: false });
+  stopRings = watchRings(getCallKit().registry, async () => PAIRING, mockDecline);
+});
+afterAll(() => {
+  stopRings();
+  resetCallKitForTesting(); // its timers (the push entries' fusion tick) stop with it
+});
+const mockDecline = jest.fn(async () => 'declined');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -150,4 +160,42 @@ test('a call asked for from Recents is placed, once', async () => {
   });
   await act(async () => {});
   expect(mockSw.dial).toHaveBeenCalledTimes(1);
+});
+
+const emit = (t: string, d: unknown) => (RNCallKeep as unknown as { __emit(t: string, d: unknown): void }).__emit(t, d);
+
+test("answering Scout's ring places a call to the agent with the ring, on the answered CallKit entry", async () => {
+  resetRingsForTesting();
+  globalThis.fetch = jest.fn(async () => respond(200, { token: 'sat', expires_at: 0 })) as unknown as typeof fetch;
+  // What the PushKit hook does natively, then the user answers on the lock screen (before
+  // the panel is up: a cold start).
+  const uuid = getCallKit().reportIncomingPush({ callId: 'tok-1', from: 'Scout', fromName: 'Scout', data: { scoutRing: 'tok-1' } });
+  emit('didDisplayIncomingCall', { callUUID: uuid, handle: 'Scout', fromPushKit: '1', payload: { call_id: 'tok-1' } });
+  await act(async () => emit('answerCall', { callUUID: uuid }));
+  await act(async () => emit('didActivateAudioSession', {})); // CallKit, once the answer is taken
+  render(<CallPanel pairing={PAIRING} />);
+  await waitFor(() => expect(mockSw.dial).toHaveBeenCalledTimes(1));
+  const [address, options] = mockSw.dial.mock.calls[0] as [string, { userVariables: Record<string, unknown> }];
+  expect(address).toBe('/private/scout');
+  const uv = options.userVariables as { device: string; ts: number; nonce: string; sig: string; ring: string };
+  expect(uv.ring).toBe('tok-1');
+  expect(uv.sig).toBe(sign(PAIRING.secret, PAIRING.device, uv.ts, uv.nonce, PAIRING.address)); // a signed call as ever
+  // It joins the entry the user answered: no second, outgoing CallKit call.
+  await waitFor(() => expect(getCallKit().registry.entryForUuid(uuid)?.call).toBeTruthy());
+  expect(RNCallKeep.startCall).not.toHaveBeenCalled();
+  await act(async () => mockSw.call!.status$.next('connected'));
+  expect(screen.getByTestId('state')).toHaveTextContent('State: connected');
+  await act(async () => mockSw.call!.status$.next('destroyed'));
+  await waitFor(() => expect(screen.getByTestId('call')).toBeTruthy());
+});
+
+test("declining Scout's ring tells Scout, and nothing is dialled", async () => {
+  resetRingsForTesting();
+  const uuid = getCallKit().reportIncomingPush({ callId: 'tok-2', from: 'Scout', data: { scoutRing: 'tok-2' } });
+  emit('didDisplayIncomingCall', { callUUID: uuid, handle: 'Scout', fromPushKit: '1', payload: { call_id: 'tok-2' } });
+  await act(async () => emit('endCall', { callUUID: uuid }));
+  await waitFor(() => expect(mockDecline).toHaveBeenCalledWith(PAIRING, 'tok-2'));
+  render(<CallPanel pairing={PAIRING} />);
+  await act(async () => {});
+  expect(mockSw.dial).not.toHaveBeenCalled();
 });

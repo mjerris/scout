@@ -5,8 +5,10 @@
 // cleaned every detail it sends (the requester chooses its own name); it is shown as
 // plain text.
 //
-// There is no push: the app long-polls Scout while it is in the foreground (each request
-// signed with this phone's secret), so a closed app doesn't see a request.
+// While the app is open it long-polls Scout (each request signed with this phone's secret).
+// A closed app gets the request as a notification with Approve and Deny (phone_push.py);
+// either action opens the app, which answers through the same signed endpoint.
+import * as Notifications from 'expo-notifications';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Text } from 'react-native';
 
@@ -36,7 +38,19 @@ export function describe(p: PendingPair): string[] {
   return lines;
 }
 
-function outcome(a: PairAnswer): string {
+/** A notification response to Scout's pairing request: the request and the answer, or null. */
+export function pairAction(r: Notifications.NotificationResponse | null): { id: string; approve: boolean } | null {
+  if (!r || (r.actionIdentifier !== 'approve' && r.actionIdentifier !== 'deny')) return null;
+  const data = r.notification.request.content.data as { scoutPair?: { id?: unknown } } | undefined;
+  const id = data?.scoutPair?.id;
+  return typeof id === 'string' && id ? { id, approve: r.actionIdentifier === 'approve' } : null;
+}
+
+// Responses already answered (a cold start sees the launch response twice: as the last
+// response and from the listener).
+const handled = new Set<string>();
+
+export function outcome(a: PairAnswer): string {
   switch (a.status) {
     case 'approved':
       return `Approved: paired as ${a.device}.`;
@@ -120,6 +134,25 @@ export function PairApprovals({ pairing, server }: { pairing: Pairing; server?: 
     },
     [note],
   );
+
+  // Approve or Deny on the notification: answered here, like the buttons below.
+  useEffect(() => {
+    const take = (r: Notifications.NotificationResponse | null) => {
+      const act = pairAction(r);
+      if (!r || !act || handled.has(r.notification.request.identifier)) return;
+      handled.add(r.notification.request.identifier);
+      void Notifications.clearLastNotificationResponseAsync().catch(() => {});
+      void decide(act.id, act.approve);
+    };
+    let sub: { remove(): void } | undefined;
+    try {
+      sub = Notifications.addNotificationResponseReceivedListener(take);
+      Notifications.getLastNotificationResponseAsync().then(take, () => {});
+    } catch {
+      // A build without expo-notifications' native module: no notifications to answer.
+    }
+    return () => sub?.remove();
+  }, [decide]);
 
   if (!requests.length && !notes.length) return null;
   return (

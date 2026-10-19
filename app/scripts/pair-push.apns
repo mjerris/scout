@@ -1,0 +1,12 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Pairing request",
+      "body": "A new device calling itself \"Guest phone\" wants to pair with Scout. It shows the code 47."
+    },
+    "category": "SCOUT_PAIR",
+    "sound": "default",
+    "interruption-level": "time-sensitive"
+  },
+  "scoutPair": { "id": "MOCKAB", "match": "47" }
+}

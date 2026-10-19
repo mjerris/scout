@@ -100,3 +100,13 @@ export function signedFor(
 ): CallVariables {
   return callVariables({ ...pairing, address: purpose }, now);
 }
+
+/** What a paired phone signs to register its push tokens (web.push_register_purpose). */
+export function pushRegisterPurpose(voip: string, alert: string, env: string): string {
+  return `scout:push|${voip}|${alert}|${env}`;
+}
+
+/** What a paired phone signs to decline Scout's call (web.ring_decline_purpose). */
+export function ringDeclinePurpose(ring: string): string {
+  return `scout:ring-decline|${ring}`;
+}

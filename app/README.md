@@ -61,6 +61,43 @@ Finding Scout uses react-native-zeroconf 0.14.0 (MIT, a small Objective-C module
 NSNetServiceBrowser) and the Local Network permission (asked the first time); a build
 without the module just finds nothing.
 
+## Push (Scout calls you; pairing requests)
+
+Push needs an Apple Developer Program team with Push Notifications on the app's App ID (a
+free personal team can't sign `aps-environment`; build for one with `SCOUT_IOS_PUSH=0`).
+What Scout does with it is in docs/phone-design.md, "Scout calls you". Once, in the Apple
+Developer portal for the team:
+
+1. **Identifiers → +, App IDs, App**: Bundle ID (explicit) = the id you build with
+   (`SCOUT_IOS_BUNDLE_ID`). Under Capabilities tick **Push Notifications**. VoIP needs
+   nothing more there: PushKit uses the same capability, with the `voip` background mode
+   the app declares.
+2. **Keys → +**: tick **Apple Push Notifications service (APNs)** (environment Sandbox &
+   Production, key restriction Team Scoped), register, and download the `.p8` (once only).
+   Note its **Key ID**. A key the team already has for APNs works too; one key serves
+   every app of the team, alert and VoIP pushes, sandbox and production.
+3. Put the key on the Mac, readable by you only, and tell Scout (its config is mode 600):
+
+       mkdir -p ~/Library/Application\ Support/Scout/apns
+       mv ~/Downloads/AuthKey_<KEYID>.p8 ~/Library/Application\ Support/Scout/apns/
+       chmod 600 ~/Library/Application\ Support/Scout/apns/AuthKey_<KEYID>.p8
+
+       [phone]
+       apns_team_id = "<team id>"
+       apns_key_id = "<key id>"
+       apns_key_file = "apns/AuthKey_<KEYID>.p8"
+       apns_topic = "<bundle id>"          # alert pushes; VoIP pushes go to "<bundle id>.voip"
+       ring_for = ["slack", "pulse"]       # which alerts ring the phone; [] (the default): never
+
+   Scout refuses a key file others can read, and never logs or sends the key.
+4. Build for the device with that team: `SCOUT_IOS_BUNDLE_ID=<bundle id>
+   SCOUT_IOS_TEAM_ID=<team id> npx expo prebuild --platform ios --clean`, then
+   `cd ios && pod install`, and run it from Xcode. `SCOUT_IOS_APS_ENV=production` for a
+   TestFlight or Ad Hoc build (the app tells Scout which environment its token is for).
+5. Open the app once (it asks to send notifications): it registers its tokens with Scout
+   (`scoutctl phone list` shows `push: alert, voip`). `scoutctl phone ring "Testing"` rings
+   it; `scoutctl phone rings` shows how each ring went.
+
 ## Patches (patch-package, applied on install)
 
 - `patches/@signalwire+js+4.0.0-rc.5.patch`: our SDK fixes that are open upstream
@@ -93,3 +130,10 @@ microphone):
     node scripts/mock-scout.mjs          # prints a scout://pair link with a one-time code
     xcrun simctl launch booted com.example.scoutphone -ScoutTestLink '<that link>' -ScoutTestPair 1
     xcrun simctl launch booted com.example.scoutphone -ScoutTestCall 1   # stops at Scout's token (409)
+
+The Simulator gets no real push, but takes a notification by hand. With
+`node scripts/mock-scout.mjs --ask` (a made-up device asks to pair after 5 s, and the app
+asks to send notifications: Allow), this shows the pairing notification with Approve and
+Deny (long-press it), as Scout sends it:
+
+    xcrun simctl push booted com.example.scoutphone scripts/pair-push.apns
