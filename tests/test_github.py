@@ -9,11 +9,12 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import pytest
+from loopback import LoopbackHTTPServer
 
 from scout import config, github, index, links, recordpage
 
@@ -69,7 +70,7 @@ class FakeGitHub:
             def log_message(self, *a: Any) -> None:
                 return None
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv = LoopbackHTTPServer(("127.0.0.1", 0), H)
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
         self.thread = threading.Thread(
             target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
@@ -231,7 +232,7 @@ def test_a_401_reads_the_token_again(store: index.Index, tmp_path: Path) -> None
         def log_message(self, *a: Any) -> None:
             return None
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = LoopbackHTTPServer(("127.0.0.1", 0), H)
     t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     t.start()
     try:

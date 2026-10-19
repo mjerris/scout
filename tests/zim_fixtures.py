@@ -10,12 +10,13 @@ import html
 import json
 import re
 import shutil
-import socketserver
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+
+from loopback import LoopbackHTTPServer
 
 DATA = Path(__file__).parent / "data" / "zims"
 
@@ -110,18 +111,6 @@ def library(folder: Path) -> Path:
 # --- a fake kiwix-serve --------------------------------------------------------------------
 
 
-class _LoopbackServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer without the reverse DNS lookup in server_bind: HTTPServer calls
-    socket.getfqdn(host) after binding and before listening, and on GitHub's macOS runners
-    getfqdn("127.0.0.1") takes 35 s, longer than kiwix.Server waits for a start (READY_S).
-    The name is only used for SERVER_NAME in CGI, which nothing here reads."""
-
-    def server_bind(self) -> None:
-        socketserver.TCPServer.server_bind(self)
-        host, port = self.server_address[:2]
-        self.server_name, self.server_port = str(host), int(port)
-
-
 def _text(body: str | bytes) -> list[str]:
     plain = re.sub(r"<[^>]+>", " ", body if isinstance(body, str) else "")
     return re.findall(r"[a-z0-9]+", html.unescape(plain).lower())
@@ -152,7 +141,7 @@ class FakeKiwix:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self._http = _LoopbackServer(("127.0.0.1", port), Handler)
+        self._http = LoopbackHTTPServer(("127.0.0.1", port), Handler)
         self.port = self._http.server_address[1]
         self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
 

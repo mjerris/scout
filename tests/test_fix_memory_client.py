@@ -9,11 +9,12 @@ import time
 import urllib.request
 import uuid
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import pytest
+from loopback import LoopbackHTTPServer
 
 from scout import memory_client
 from scout.mac import ToolError
@@ -30,7 +31,7 @@ def token() -> Iterator[Path]:
     shutil.rmtree(d, ignore_errors=True)
 
 
-def recorder() -> tuple[ThreadingHTTPServer, list[dict[str, Any]]]:
+def recorder() -> tuple[LoopbackHTTPServer, list[dict[str, Any]]]:
     """A local server that answers {"count": 3} and records who asked what."""
     seen: list[dict[str, Any]] = []
 
@@ -47,7 +48,7 @@ def recorder() -> tuple[ThreadingHTTPServer, list[dict[str, Any]]]:
         def log_message(self, *a: Any) -> None:
             return None
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = LoopbackHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, seen
 
