@@ -8,10 +8,11 @@
 #   bash app/scripts/vendor-signalwire.sh <checkout> [commit]          # vendor
 #   bash app/scripts/vendor-signalwire.sh --check <checkout>           # rebuild, compare
 # The build is reproducible (npm pack fixes file times), so --check proves the tarballs
-# are that commit's packages. After a re-vendor: `npm install` (package-lock records
-# the new integrity), compare the wrapper's patches/@signalwire+js+*.patch and
-# docs/patches/react-native-incall-manager+*.patch with app/patches/, then rebuild
-# the app (native code).
+# are that commit's packages. Vendoring also reinstalls them, so package-lock.json
+# records the new tarballs' integrity (npm keeps a lock entry whose version didn't
+# change, and `npm ci` then refuses the new bytes). Afterwards compare the wrapper's
+# patches/@signalwire+js+*.patch and docs/patches/react-native-incall-manager+*.patch
+# with app/patches/, then rebuild the app (native code).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 check=0
@@ -43,5 +44,13 @@ fi
 rm -f "$here"/vendor/signalwire-react-*.tgz
 cp "$out"/*.tgz "$here/vendor/"
 echo "$commit" > "$here/vendor/UPSTREAM_COMMIT"
+# Drop the old lock entries and copies, so npm records the new tarballs.
+node -e '
+const fs = require("fs"), f = process.argv[1], lock = JSON.parse(fs.readFileSync(f, "utf8"));
+for (const k of ["node_modules/@signalwire/react", "node_modules/@signalwire/react-native"]) delete lock.packages[k];
+fs.writeFileSync(f, JSON.stringify(lock, null, 2) + "\n");
+' "$here/package-lock.json"
+rm -rf "$here/node_modules/@signalwire/react" "$here/node_modules/@signalwire/react-native"
+(cd "$here" && npm install --no-audit --no-fund >/dev/null)
 ls "$here/vendor"/*.tgz
 echo "vendored $commit"
