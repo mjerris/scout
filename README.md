@@ -528,7 +528,8 @@ Pairing the phone app, in three steps (nothing to type, and the web token stays 
    until you say yes from something you already have: a phone already paired (its app
    shows the request while open), Scout's web page, the alert on the Mac, the room ("A new
    device calling itself <phone> wants to pair with Scout, code 47. Should I allow it?"),
-   or `scoutctl phone pair approve <id>`. Approve only if the phone shows the same code.
+   or `scoutctl phone pair approve <id>`; with push set up, the paired phones also get it
+   as a notification with Approve and Deny. Approve only if the phone shows the same code.
 3. Tap **Pair** in the app.
 
 ```sh
@@ -538,6 +539,13 @@ scripts/scoutctl.sh phone pair approve <id>  # or deny <id>; the first answer fr
 scripts/scoutctl.sh phone list
 scripts/scoutctl.sh phone forget <device>    # a lost phone stops working at once
 ```
+
+**Scout calls you.** With an APNs key in `[phone]` (app/README.md, "Push": the Apple
+portal steps), an alert listed in `[phone] ring_for` ("pulse", "slack", "starlink",
+"session") also rings the phone as a call from Scout when nobody has spoken in the room
+for `ring_after_quiet_min` minutes; answer, and Scout tells you. Off by default
+(`ring_for = []`). `scoutctl phone ring [text]` rings it by hand, `scoutctl phone rings`
+lists how recent rings went. The key file stays on the Mac, mode 600.
 
 The link is `scout://pair?server=<[web] public_url, else the Tailscale Serve name>&code=<code>`.
 A code works once; only its hash is stored, and wrong codes are rate-limited. Scout

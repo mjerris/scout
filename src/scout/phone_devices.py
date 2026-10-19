@@ -9,7 +9,9 @@ where key is the secret (base64url-decoded to its 32 bytes), ts is Unix seconds,
 fresh per call, and address is the agent address the app dialed ([phone] address).
 
 The registry is state/phone_devices.json (mode 0600, this user only):
-    {device_id: {name, secret, paired_at, revoked}}
+    {device_id: {name, secret, paired_at, revoked, push?}}
+where push is what the app registered for push (phone_push.py): {voip, alert, env, at},
+its PushKit and APNs device tokens and the APNs environment its build is signed for.
 Forgetting a device deletes its secret and marks it revoked, so a lost phone stops
 working at once. Manage it with `scoutctl phone pair | list | forget <device>` (pair
 shows a one-time pairing code; `pair list`, `pair approve <id>` and `pair deny <id>`
@@ -90,8 +92,78 @@ def forget(device: str, path: Path | None = None) -> bool:
         if d is None:
             return False
         d.update(secret="", revoked=True, revoked_at=int(time.time()))
+        d.pop("push", None)  # a forgotten phone is never rung or asked again
         _save(devices, path)
     return True
+
+
+_TOKEN = re.compile(r"[0-9a-fA-F]{32,200}")
+PUSH_ENVS = ("sandbox", "production")
+
+
+def set_push(device: str, voip: str, alert: str, env: str, path: Path | None = None) -> None:
+    """Keep the push tokens a paired app registered (either may be empty: not granted, or
+    a build without push). ValueError for a malformed one or an unknown device."""
+    for what, tok in (("voip", voip), ("alert", alert)):
+        if tok and not _TOKEN.fullmatch(tok):
+            raise ValueError(f"{what} must be a hex APNs token")
+    if env not in PUSH_ENVS:
+        raise ValueError(f"env must be one of {', '.join(PUSH_ENVS)}")
+    with _lock:
+        devices = load_devices(path)
+        d = devices.get(device)
+        if d is None or d.get("revoked"):
+            raise ValueError("unknown device")
+        if voip or alert:
+            d["push"] = {"voip": voip.lower(), "alert": alert.lower(), "env": env, "at": int(time.time())}
+        else:
+            d.pop("push", None)
+        _save(devices, path)
+
+
+def drop_push_token(token: str, path: Path | None = None) -> bool:
+    """APNs said this token is no longer valid (the app was removed, or the token
+    rotated): forget it wherever it is. True if one was dropped."""
+    token = token.lower()
+    dropped = False
+    with _lock:
+        devices = load_devices(path)
+        for d in devices.values():
+            p = d.get("push")
+            if not isinstance(p, dict):
+                continue
+            for kind in ("voip", "alert"):
+                if p.get(kind) == token:
+                    p[kind] = ""
+                    dropped = True
+            if not p.get("voip") and not p.get("alert"):
+                d.pop("push", None)
+        if dropped:
+            _save(devices, path)
+    return dropped
+
+
+@dataclass(frozen=True)
+class PushTarget:
+    device: str
+    name: str
+    voip: str
+    alert: str
+    env: str
+
+
+def push_targets(path: Path | None = None) -> list[PushTarget]:
+    """The paired, unrevoked devices that registered for push."""
+    out = []
+    for k, v in load_devices(path).items():
+        p = v.get("push")
+        if v.get("revoked") or not v.get("secret") or not isinstance(p, dict):
+            continue
+        env = str(p["env"]) if p.get("env") in PUSH_ENVS else "production"
+        out.append(
+            PushTarget(k, str(v.get("name", "")), str(p.get("voip") or ""), str(p.get("alert") or ""), env)
+        )
+    return out
 
 
 def listing(path: Path | None = None) -> list[dict[str, Any]]:
@@ -102,6 +174,7 @@ def listing(path: Path | None = None) -> list[dict[str, Any]]:
             "name": v.get("name", ""),
             "paired_at": v.get("paired_at"),
             "revoked": bool(v.get("revoked")),
+            "push": sorted(k for k in ("voip", "alert") if (v.get("push") or {}).get(k)),
         }
         for k, v in load_devices(path).items()
     ]
@@ -304,7 +377,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "list" and len(args) == 1:
         for d in listing():
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(d["paired_at"] or 0))
-            print(f"{d['device']}  {d['name']}  paired {when}{'  REVOKED' if d['revoked'] else ''}")
+            push = f"  push: {', '.join(d['push'])}" if d["push"] else ""
+            print(f"{d['device']}  {d['name']}  paired {when}{push}{'  REVOKED' if d['revoked'] else ''}")
         return 0
     if cmd == "forget" and len(args) == 2:
         if forget(args[1]):
@@ -320,8 +394,26 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{cid}  device {device}")
         print(f"{len(calls)} active call{'s' * (len(calls) != 1)}")
         return 0
+    if cmd == "ring":  # ring the phone now (push must be set up), for trying it on a device
+        status, got = _pair_api("/api/phone/ring", {"text": " ".join(args[1:])})
+        print(
+            "Ringing the phone."
+            if status == 200
+            else got.get("detail") or got.get("error") or f"HTTP {status}"
+        )
+        return 0 if status == 200 else 1
+    if cmd == "rings" and len(args) == 1:  # Scout's recent calls to the phone and how they went
+        from .phone_ring import Rings
+
+        for r in Rings().recent():
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(r.get("at") or 0)))
+            print(
+                f"{when}  {r.get('who')}  {r.get('status')}{' by ' + r['by'] if r.get('by') else ''}  {r.get('text', '')[:60]}"
+            )
+        return 0
     print(
-        "usage: scoutctl phone pair | pair list | pair approve <id> | pair deny <id> | list | forget <device> | calls",
+        "usage: scoutctl phone pair | pair list | pair approve <id> | pair deny <id> | list | forget <device>"
+        " | calls | ring [text] | rings",
         file=sys.stderr,
     )
     return 2

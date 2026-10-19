@@ -187,8 +187,11 @@ sent with each call in `userVariables` (the data `@signalwire/js` passes with `d
         and unanswered it expires in two minutes. The app long-polls `POST
         /api/phone/pair/status {request}` and gets the secret once. One request at a time,
         three per 10 minutes. With no device paired yet, the CLI and the room still work.
-        There is no push yet: the app has no push entitlement and Scout no APNs key or
-        sender, so a paired phone sees a request only while its app is open.
+        With push set up (see "Scout calls you"), every paired phone that registered for
+        notifications also gets the request as a notification with Approve and Deny
+        (`[phone] pair_push`); either action opens the app, which answers through the same
+        signed `/api/phone/pair/decide`. The lock screen shows only the cleaned name and the
+        two-digit number; the app shows the rest.
       - **What the prompt says about the requester.** The name is the requester's own
         choice, so it is cleaned (`phone_pairing.clean_name`: NFKC, plain letters, digits,
         spaces and ' _ ( ) -, at most 24 characters) and always follows a fixed prefix,
@@ -264,8 +267,50 @@ summaries only. The phone path is opt-in, and README states this plainly.
 2. **React Native**: `@signalwire/react-native` (github.com/lpradovera/signalwire-react-native-unofficial)
    on the same hooks, with CallKit and Bluetooth routing. In the truck, Scout is a
    hands-free call through the Kenwood.
-3. **Later, Scout calls you**: inbound push (PushKit and CallKit) for alerts that matter
-   when nobody is in the rig.
+3. **Scout calls you**: inbound push (PushKit and CallKit) for alerts that matter when
+   nobody is in the rig (below).
+
+## Scout calls you
+
+An alert that matters, when nobody is in the room, rings the phone as a call from "Scout";
+answering puts you on a call with Scout's agent, which opens with the alert.
+
+**When** (`phone_ring.RingPolicy`, deterministic, off by default): an alert Scout says in
+the room (`assistant.announce`) whose source is in `[phone] ring_for` ("pulse", "slack",
+"starlink", "session"), when nobody has spoken in the room for `ring_after_quiet_min`
+(15), not in `ring_quiet_hours`, at most once per `ring_min_gap_min` (20), and not while
+a phone call with Scout is going on. `ring_for = []` (the default): Scout never calls.
+`scoutctl phone ring [text]` rings by hand (for trying it), and `scoutctl phone rings`
+lists the recent rings and how they went.
+
+**How**:
+1. The app registers its PushKit token (and its notification token) with Scout, signed
+   with its device secret (`POST /api/phone/push`, purpose
+   `scout:push|<voip>|<alert>|<env>`), on every launch and whenever one changes. Scout
+   keeps them on the device's record; forgetting the device drops them, and a token APNs
+   calls dead (410, BadDeviceToken) is dropped.
+2. Scout starts a ring: a single-use token (only its SHA-256 is kept, in
+   `state/phone_rings.json`, 0600), bound to the alert's words and the devices rung, for
+   60 s. It sends each device a VoIP push (APNs, topic `<bundle id>.voip`) with
+   `call_id` and `scoutRing` = the token, a CallKit uuid, and "Scout" as the caller.
+3. The library's PushKit hook reports the call to CallKit before any JavaScript runs.
+   On Answer, the app dials Scout's agent as on any call (signed userVariables) plus
+   `ring` = the token, joined to the answered CallKit entry (`beginBridgeDial`,
+   `bindBridgeCall`). scout-phone verifies the call as always, then claims the ring
+   (that device's, unexpired, once) and the agent's prompt gets "Why Scout called" with
+   the alert, framed as data.
+4. Decline: the app posts the token (`POST /api/phone/ring/decline`, signed for that
+   ring). Unanswered: the ring expires; the CallKit entry ends itself as missed after 45 s.
+
+**Why no parked caller**: the library's own push flow parks a real caller on a SWML
+script and bridges the app to it. Scout has no caller to hold: its side of the call is
+the agent, created only when the app dials. So nothing is billed while the phone rings,
+and there is no leg that only an API could end (a parked caller reached through a Fabric
+SWML address runs on an internal leg that REST can't end: cloud-product#21780).
+
+**Not yet**: with two phones registered, both ring and the one not answered rings out
+(45 s); there is no cancel push. Real device testing waits for the build on the SignalWire
+Apple team (app/README.md, "Push").
 
 ## Setup the user does
 
@@ -293,4 +338,4 @@ summaries only. The phone path is opt-in, and README states this plainly.
 3. The browser app.
 4. Two-step action tools (done: prepare, read back, `confirm_action` behind a semantic gate).
 5. The React Native app with CallKit and Bluetooth.
-6. Scout calls you.
+6. Scout calls you (built; waits for device testing on the SignalWire Apple team).

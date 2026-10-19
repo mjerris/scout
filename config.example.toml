@@ -154,6 +154,17 @@ enabled = true
 #                         # the room, the Mac's alert or `scoutctl phone pair approve <id>` says yes), "code" (QR only)
 # owners = []             # Tailscale logins that count as you, besides this Mac's own (shown in the prompt)
 # pair_alert = true       # also ask about a pairing request in an alert on this Mac
+# Push to the phone app (app/README.md, "Push"): an APNs auth key from the app's Apple team.
+# apns_team_id = "<team id>"
+# apns_key_id = "<key id>"
+# apns_key_file = "apns/AuthKey.p8"        # in Scout's data folder; chmod 600 (others can't read it)
+# apns_topic = "<the app's bundle id>"     # VoIP pushes go to "<bundle id>.voip"
+# pair_push = true        # pairing requests on the phones as a notification with Approve / Deny
+# ring_for = []           # alerts that also ring the phone when the room is quiet: "pulse",
+#                         # "slack", "starlink", "session". Empty: Scout never calls.
+# ring_after_quiet_min = 15                # "the room is quiet": nobody spoke for this long
+# ring_quiet_hours = ""                    # "22:00-07:00": never ring then
+# ring_min_gap_min = 20                    # at most one ring this often
 
 [tasks]
 # Scout's task list (docs/tasks-design.md): found in meetings and email, ordered by plain code,

@@ -179,6 +179,10 @@ class Assistant:
         self.echo_cancelled = echo_cancelled
         self.echo_stats: Callable[[], dict[str, Any]] = dict  # the voice layer's stats(); set by the app
         self.last_onset = 0.0  # when speech last began in the room (monotonic)
+        # Scout calls you: alerts that ring the phone when the room is quiet ([phone] ring_for).
+        from . import phone_ring
+
+        self.ringer = phone_ring.Ringer.from_config(cfg.phone)
         self._message_barged: float | None = None
         self._confirm_barged: float | None = None  # onset of an answer said over the question
         self._barge_pending: float | None = None  # onset of speech over a reply, until its words are heard
@@ -424,7 +428,14 @@ class Assistant:
         self.said.add(refs.Said(time.time(), who, text, refs.clean(about), private, channel, request))
 
     async def announce(self, text: str, who: str = "announce") -> None:
-        """Say something unprompted (Starlink went down): it waits for the floor, like a timer."""
+        """Say something unprompted (Starlink went down): it waits for the floor, like a timer.
+        When nobody has spoken in the room for a while, an alert [phone] ring_for names also
+        rings the phone (phone_ring.py)."""
+        if self.ringer is not None:
+            from .slack_alerts import on_a_call
+
+            quiet = time.monotonic() - self.last_onset
+            self._spawn(self.ringer.consider(who, text, quiet, await asyncio.to_thread(on_a_call)))
         took = await self.floor.acquire(who, wait=300)
         try:
             self.speaker.chime("wake")

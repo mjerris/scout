@@ -98,7 +98,13 @@ def test_pair_list_forget(tmp_path: Path) -> None:
     device, secret = phone_devices.pair("Mike's phone", path)
     assert len(phone_devices._key(secret)) == 32
     [row] = phone_devices.listing(path)
-    assert row == {"device": device, "name": "Mike's phone", "paired_at": row["paired_at"], "revoked": False}
+    assert row == {
+        "device": device,
+        "name": "Mike's phone",
+        "paired_at": row["paired_at"],
+        "revoked": False,
+        "push": [],
+    }
     assert "secret" not in row
     assert phone_devices.forget(device, path) and not phone_devices.forget("dnope", path)
     stored = phone_devices.load_devices(path)[device]

@@ -31,7 +31,7 @@ import aiohttp
 from aiohttp import WSCloseCode, WSMsgType, web
 from aiohttp.typedefs import Handler
 
-from . import phone_devices, phone_pairing, tailnet
+from . import phone_devices, phone_pairing, phone_push, phone_ring, tailnet
 from .audio import SAMPLE_RATE, decode_to_pcm
 from .config import DATA, PhoneConfig, WebConfig
 
@@ -547,6 +547,16 @@ def pair_decide_purpose(rid: str, approve: bool) -> str:
     return f"scout:pair-decide|{rid}|{'approve' if approve else 'deny'}"
 
 
+def push_register_purpose(voip: str, alert: str, env: str) -> str:
+    """What a paired phone signs to register its push tokens: exactly these tokens."""
+    return f"scout:push|{voip}|{alert}|{env}"
+
+
+def ring_decline_purpose(ring: str) -> str:
+    """What a paired phone signs to decline Scout's call: exactly this ring."""
+    return f"scout:ring-decline|{ring}"
+
+
 def _netloc(scheme: str, host: str) -> str:
     host = host.strip().lower()
     for default in (":80",) if scheme == "http" else (":443",) if scheme == "https" else ():
@@ -857,6 +867,18 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             )
 
     pair_requests.listeners.append(on_pairing)
+
+    # Push: pairing requests to the paired phones as a notification with Approve / Deny
+    # (phone_push.py); the answer comes back through /api/phone/pair/decide like the app's own.
+    push_send = phone_push.sender(phone) if phone.enabled and phone.pair_push else None
+
+    def push_pairing(kind: str, data: dict[str, Any]) -> None:
+        if kind == "pair_request" and push_send is not None:
+            pushes = phone_push.pair_pushes(phone_devices.push_targets(), data)
+            if pushes:
+                hub.spawn(push_send(pushes))
+
+    pair_requests.listeners.append(push_pairing)
 
     async def owners() -> set[str]:
         """The logins that count as the owner: this Mac's own (tailscale status) and [phone] owners."""
@@ -1259,6 +1281,69 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
+    async def api_phone_push(req: web.Request) -> web.StreamResponse:
+        """A paired phone registers its push tokens: {voip, alert, env} (PushKit's token for
+        Scout's calls, the APNs token for notifications, the APNs environment its build is
+        signed for), signed for exactly those tokens. Empty tokens unregister."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            voip, alert, env = b.get("voip", ""), b.get("alert", ""), b.get("env", "")
+            if not all(isinstance(x, str) for x in (voip, alert, env)):
+                raise TypeError("voip, alert and env must be strings")
+        except (ValueError, TypeError):
+            raise web.HTTPUnauthorized() from None
+        verdict = token_check.check(b, address=push_register_purpose(voip, alert, env))
+        if not verdict.ok:
+            log.warning("web: a push registration refused: %s", verdict.reason)
+            raise web.HTTPUnauthorized()
+        try:
+            await asyncio.to_thread(phone_devices.set_push, verdict.device, voip, alert, env)
+        except ValueError as exc:
+            return refused(400, str(exc))
+        log.info("web: device %s registered for push (%s)", verdict.device,
+                 ", ".join(k for k, v in (("calls", voip), ("notifications", alert)) if v) or "nothing")  # fmt: skip
+        return web.json_response(
+            {"status": "ok", "ring": bool(phone.ring_for), "push": phone_push.problem(phone) is None}
+        )
+
+    async def api_phone_ring_decline(req: web.Request) -> web.StreamResponse:
+        """The user declined Scout's call on the phone: {ring} (the push's token), signed."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            ring = b.get("ring")
+            if not isinstance(ring, str):
+                raise TypeError("ring must be a string")
+        except (ValueError, TypeError):
+            raise web.HTTPUnauthorized() from None
+        verdict = token_check.check(b, address=ring_decline_purpose(ring))
+        if not verdict.ok:
+            log.warning("web: a ring decline refused: %s", verdict.reason)
+            raise web.HTTPUnauthorized()
+        got = await asyncio.to_thread(phone_ring.Rings().decline, ring, verdict.device)
+        log.info("web: Scout's call %s on %s", "declined" if got == "declined" else f"not declined ({got})",
+                 verdict.device)  # fmt: skip
+        return web.json_response({"status": got}, status={"declined": 200, "unknown": 404}.get(got, 409))
+
+    async def api_phone_ring(req: web.Request) -> web.StreamResponse:
+        """Ring the phone now with {text} (the web token: `scoutctl phone ring`), whatever
+        ring_for says: for trying push on a device."""
+        if not authed(req):
+            raise web.HTTPUnauthorized()
+        try:
+            text = (await json_body(req)).get("text") or "This is a test call from Scout."
+            if not isinstance(text, str):
+                raise TypeError("text must be a string")
+        except (ValueError, TypeError) as exc:
+            return refused(400, str(exc))
+        ringer = phone_ring.Ringer(phone, phone_push.sender(phone))
+        got = await ringer.ring("manual", text)
+        return web.json_response({"status": "rang" if got == "rang" else "error", "detail": got},
+                                 status=200 if got == "rang" else 409)  # fmt: skip
+
     def page_response(req: web.Request, text: str, csp: str) -> web.StreamResponse:
         if not authed(req, allow_query=True):
             return web.Response(
@@ -1486,6 +1571,9 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.post("/api/phone/pair/status", api_phone_pair_status),
             web.post("/api/phone/pair/pending", api_phone_pair_pending),
             web.post("/api/phone/pair/decide", api_phone_pair_decide),
+            web.post("/api/phone/push", api_phone_push),
+            web.post("/api/phone/ring", api_phone_ring),
+            web.post("/api/phone/ring/decline", api_phone_ring_decline),
             web.post("/api/phone/token", api_phone_token),
         ]
     )

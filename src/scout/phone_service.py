@@ -49,7 +49,7 @@ from signalwire.core.capabilities import user_variables
 from signalwire.core.function_result import FunctionResult
 from signalwire.core.semantic_gate import SemanticGate
 
-from . import behavior, extmcp, index, ledger, progress, sessions, shared_tools, speech
+from . import behavior, extmcp, index, ledger, phone_ring, progress, sessions, shared_tools, speech
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
 from .phone_devices import PATH as DEVICES
@@ -494,6 +494,7 @@ class PhoneAgent(AgentBase):
         reports: Path | None = None,
         journal: Callable[[list[dict[str, Any]]], int] | None = None,
         servers: Callable[[], list[extmcp.Server]] = lambda: [],
+        rings: phone_ring.Rings | None = None,
     ) -> None:
         super().__init__(
             name="scout",
@@ -512,6 +513,8 @@ class PhoneAgent(AgentBase):
         self.reports = reports  # each call's post-prompt report from SignalWire, kept here
         self.journal = journal or journal_call  # tests pass their own
         self.servers = servers  # the user's MCP servers on the phone, read per call (tools.toml)
+        self.rings = rings or phone_ring.Rings()  # Scout's calls to the phone (phone_ring.py)
+        self._answered: dict[str, dict[str, Any]] = {}  # call_id -> the ring it answered
         self._lookups: dict[str, asyncio.Task[dict[str, Any]]] = {}  # running, or done and not collected
         self._waiting: dict[str, list[str | None]] = {}  # the calls waiting on each lookup now
         self._owed: dict[str, set[str]] = {}  # calls that missed a lookup's deadline: pushed to
@@ -546,10 +549,17 @@ class PhoneAgent(AgentBase):
             if cid is None:
                 log.warning("phone: SWML fetch without a call_id; refused")
             elif self.calls.device(cid) is None:
-                v = self.check.check(user_variables(request_data))
+                uv = user_variables(request_data)
+                v = self.check.check(uv)
                 if v.ok:
                     self.calls.bind(cid, v.device)
                     log.info("phone: call %s verified for device %s", cid, v.device)
+                    # Answering Scout's own call: the ring it answers (once, that device's).
+                    if uv.get("ring") is not None and (ring := self.rings.claim(uv.get("ring"), v.device)):
+                        self._answered[cid] = ring
+                        while len(self._answered) > 20:
+                            self._answered.pop(next(iter(self._answered)))
+                        log.info("phone: call %s answers Scout's call (a %s alert)", cid, ring.get("who"))
                 else:
                     log.warning("phone: call %s refused (device %r): %s", cid, v.device, v.reason)
         return super().on_swml_request(request_data, callback_path, request)
@@ -618,6 +628,8 @@ class PhoneAgent(AgentBase):
             fillers={"default": ["Let me check.", "One moment."]},
         )
         agent.prompt_add_section("Now", body=now_line(local_now()))
+        if (ring := self._answered.get(call_id_of(body) or "")) is not None:
+            agent.prompt_add_section("Why Scout called", body=phone_ring.opening(ring))
         if rules := behavior.prompt_block(heading=False):  # read fresh for each call (behavior.py)
             agent.prompt_add_section("Rules", body=rules)
         agent.set_global_data({"device": device, "verified": True})

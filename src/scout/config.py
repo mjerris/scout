@@ -399,6 +399,10 @@ class ReferenceConfig:
     port: int = 8769
 
 
+# Scout's spoken alerts that [phone] ring_for can turn into a call (assistant.announce's `who`).
+RING_SOURCES = ("pulse", "slack", "starlink", "session")
+
+
 @dataclass
 class PhoneConfig:
     # Talk to Scout from the phone app through SignalWire (docs/phone-design.md). Off
@@ -431,6 +435,24 @@ class PhoneConfig:
     owners: list[str] = field(default_factory=list)
     # Also ask about a pairing request in an alert on this Mac (Approve / Deny).
     pair_alert: bool = True
+    # Push to the phone app (docs/phone-design.md, "Scout calls you"): an APNs auth key from
+    # the Apple Developer team the app is signed by. The key file stays on this Mac, mode
+    # 600 (a relative path is in Scout's data folder); Scout refuses a key others can read.
+    apns_team_id: str = ""
+    apns_key_id: str = ""
+    apns_key_file: str = ""
+    # The app's bundle id: alert pushes go to it, VoIP pushes to "<topic>.voip".
+    apns_topic: str = ""
+    # Send pairing requests to the paired phones as a notification with Approve / Deny.
+    pair_push: bool = True
+    # Which of Scout's spoken alerts also ring the phone (a CallKit call: answer, and Scout
+    # tells you), when nobody has spoken in the room for ring_after_quiet_min: any of
+    # "pulse" (calendar and the like), "slack", "starlink", "session" (a Claude session's
+    # message). Empty (the default): Scout never calls.
+    ring_for: list[str] = field(default_factory=list)
+    ring_after_quiet_min: int = 15
+    ring_quiet_hours: str = ""  # "HH:MM-HH:MM": never ring then
+    ring_min_gap_min: int = 20  # at most one ring this often
 
 
 @dataclass
@@ -646,6 +668,14 @@ def _quiet_hours_ok(spec: str) -> bool:
 def _check(cfg: Config) -> None:
     """Values a section can't use: warn and keep the default (a bad quiet_hours once
     stopped the Starlink watcher for good)."""
+    if not _quiet_hours_ok(cfg.phone.ring_quiet_hours):
+        log.warning("config phone.ring_quiet_hours = %r is not HH:MM-HH:MM; never ringing",
+                    cfg.phone.ring_quiet_hours)  # fmt: skip
+        cfg.phone.ring_for = []
+    if bad := [r for r in cfg.phone.ring_for if r not in RING_SOURCES]:
+        log.warning("config phone.ring_for: %s not one of %s; ignored", ", ".join(map(repr, bad)),
+                    ", ".join(RING_SOURCES))  # fmt: skip
+        cfg.phone.ring_for = [r for r in cfg.phone.ring_for if r in RING_SOURCES]
     for name, section in (("pulse", cfg.pulse), ("starlink", cfg.starlink)):
         if not _quiet_hours_ok(section.quiet_hours):
             default = type(section)().quiet_hours
