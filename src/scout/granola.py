@@ -17,6 +17,12 @@ note changes and dropped when it's deleted. The memory service runs a pass every
 A listed note Granola won't give yet (404: not processed) is kept in
 state/granola_pending.json with when it was first seen and asked for by id each pass,
 so the next pass's `updated_after` can move on past it; after PENDING_DAYS it's left.
+
+Notes stored before their attendees' addresses were kept (meta without "attendees") are
+read again once, RESYNC_PER_PASS a pass, so people.py links them by address instead of by
+full name: the list is made from the store the first time (state/granola_resync.json) and
+each note leaves it once asked for (a note Granola no longer gives is asked for again as an
+unfinished one, then left).
 """
 
 from __future__ import annotations
@@ -51,6 +57,8 @@ TIMEOUT_S = 30.0
 MAX_WAIT_S = 60.0  # the longest a 429's Retry-After is honored
 PENDING = DATA / "state" / "granola_pending.json"
 PENDING_DAYS = 7.0  # a note still unfinished after this long is left alone
+RESYNC = DATA / "state" / "granola_resync.json"
+RESYNC_PER_PASS = 30  # notes stored before attendees were kept, read again a pass
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 Fetch = Callable[[str, dict[str, Any]], dict[str, Any]]  # (path, query) -> JSON
@@ -268,6 +276,23 @@ def _save_pending(path: Path, pending: dict[str, float]) -> None:
     tmp.replace(path)
 
 
+def _load_resync(path: Path) -> list[str] | None:
+    """The notes still to read again (None: the list isn't made yet)."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    todo = data.get("todo") if isinstance(data, dict) else None
+    return [str(n) for n in todo] if isinstance(todo, list) else None
+
+
+def _save_resync(path: Path, todo: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"todo": todo}))
+    tmp.replace(path)
+
+
 def sync_pass(
     ix: index.Store,
     get: Fetch,
@@ -279,10 +304,15 @@ def sync_pass(
     """Bring notes changed after `since` (all, when None) into the store, and ask again for
     the ones Granola hadn't finished. Returns (notes, items changed, the newest updated_at
     listed: the next pass's `since`). Full notes are fetched `workers` at a time (the
-    fetcher keeps the request rate); they're stored here, in listing order."""
+    fetcher keeps the request rate); they're stored here, in listing order. Then up to
+    RESYNC_PER_PASS of the notes stored before attendees were kept are read again."""
     path = pending_path or PENDING
     now = time.time() if now is None else now
     pending = _load_pending(path)
+    todo = _load_resync(RESYNC)
+    if todo is None:  # the first pass that knows: the notes the store has without attendees
+        todo = ix.granola_without_attendees() if isinstance(ix, index.Index) else []
+        _save_resync(RESYNC, todo)
     notes = changed = 0
     newest = since
     asked: set[str] = set()
@@ -333,8 +363,13 @@ def sync_pass(
             fetch(nid)
         for nid in [n for n in pending if n not in asked]:
             fetch(nid)
+        again = [n for n in todo if n not in asked][:RESYNC_PER_PASS]
+        for nid in again:
+            fetch(nid)
         while queue:
             settle()
+        if todo:
+            _save_resync(RESYNC, [n for n in todo if n not in asked])
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
         _save_pending(path, pending)

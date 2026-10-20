@@ -176,6 +176,20 @@ before messages kept their authors' ids, link by name only to the one person who
 by it (the names Slack showed, from state/slack.json, for old Slack messages). You are
 never a person: `[tasks] me` (names and addresses), your Slack id, your GitHub login.
 
+**Names catch up.** The store notes which names each record shows (`name_refs`). When who
+goes by a name changes (someone new by it, a new name for someone, a merge that leaves one
+person by it, or a second person by it), the records that name it are linked again at once
+(`people_relink`, `Index.relink_people`: after each record's linking and each pass's merges,
+500 at most a call, the rest at the next). So a meeting that lists only "Pat Doe" links to
+Pat the moment her first mail makes her a person, and to nobody once a second Pat Doe
+appears. Only the records naming a changed name are read again, never the whole store.
+
+**Granola notes from before attendees' addresses were kept** (no `attendees` in their meta)
+are read from Granola again once, 30 a sync pass (`granola.RESYNC_PER_PASS`), so they link
+by address instead of by full name. The list is made from the store on the first pass that
+knows about it (state/granola_resync.json); each note leaves it once asked for (one Granola
+no longer gives is asked again as an unfinished note for a week, then left).
+
 **Joined by the app's pass.** Every six hours (and two minutes after the app starts) the
 app reads Slack's members (`users.list`; a profile's email needs the `users:read.email`
 scope), asks Contacts which contacts have the addresses Scout has seen (the helper's
@@ -204,7 +218,14 @@ rest of its person by an address or an account, never by a name:
 - **Commit emails.** For each repo the sync tracks (state/github.json's repos), the commit
   list (`/repos/<o>/<r>/commits`, GET): five pages of 100 the first time, then only what came
   since the newest commit seen (its date; the commits at that date are kept, so none is
-  counted twice). Each commit gives its author's and committer's (login, address). Skipped:
+  counted twice). The history before those five pages is read back a page at a time with
+  what's left of each pass's requests, a page of each repo in turn: `until` the oldest
+  commit date read, the commits at that date kept (a page all at one date moves on by page
+  number), the place saved after every page (state/github_people.json, each repo's `old`),
+  so a rate limit or a restart resumes there and nothing is read twice; a short page means
+  the first commit is reached (`old.done`). A commit pushed later with a date older than
+  the place isn't read. Counts kept before there was a place (state version 1) are read
+  again from the newest once, rather than added to, so no commit counts twice. Each commit gives its author's and committer's (login, address). Skipped:
   noreply addresses (`*@users.noreply.github.com`, `noreply@github.com`), bots (`[bot]`,
   type Bot, web-flow, github-actions...), automation addresses (ci@, build@, deploy@... and
   the machine addresses above), a commit without a GitHub user, and you (a login that commits
@@ -259,6 +280,8 @@ settings, so a restart resumes), in two passes (the second finds the people name
 name in the first), progress in the log as counts, each line naming its pass ("people:
 backfill pass 2: 500 of 5108 records", each pass counting from 0). It sets each record's links exactly,
 so it's idempotent; its first step drops the `same_person` links the old matcher made.
+Version 2 (`BACKFILL_VERSION`) runs it once more on a store whose backfill was done, to
+note the names each record shows; from then on names catch up as above.
 
 Where it's used:
 
@@ -284,9 +307,4 @@ links. "Joao Santos" is one person (his Slack user), linked to all 28 DMs with h
 ## Next
 
 - Tier 0 for "text Pat ..." and "call Pat" (today Claude does both with the tools).
-- Granola notes stored before attendee addresses were kept are linked by full name
-  until they're synced again.
-- A record that names someone only by name, stored before anyone went by that name, is
-  linked by the next backfill (it runs once; `restart_people_backfill` runs it again).
 - Slack's GitHub field once the token has `users.profile:read`.
-- The commit history before the first pass's 500 commits a repo isn't read.

@@ -68,6 +68,7 @@ class FakeGranola:
 @pytest.fixture
 def ix(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> index.Index:
     monkeypatch.setattr(granola, "PENDING", tmp_path / "pending.json")
+    monkeypatch.setattr(granola, "RESYNC", tmp_path / "resync.json")
     return index.Index(tmp_path / "m.db", None)
 
 
@@ -154,3 +155,63 @@ def test_meetings_stay_titles_only_outside_open_mode(
     assert "Budget review" in out and "line 0" not in out
     monkeypatch.setattr(privacy, "_current", privacy.Policy("strict"))
     assert "Budget review" not in asyncio.run(shared_tools._local_search({"query": "travel budget"}))
+
+
+def test_notes_stored_before_attendees_were_kept_are_read_again_once(
+    ix: index.Index, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scout import people
+
+    ix.people_ctx = lambda: people.Ctx(me_emails=frozenset({"me@example.com"}))
+    notes = [note(f"not_{i:014d}", f"2026-10-0{1 + i % 9}T10:00:00Z") for i in range(5)]
+    notes[4]["attendees"] = []  # a note nobody's listed on
+    for n in notes:  # as stored before: attendees by name only
+        granola.store_note(
+            ix, {**n, "attendees": [{"name": a["name"] or a["email"]} for a in n["attendees"]]}
+        )
+    for i in range(5):  # none has attendees in its meta
+        h = ix.get(f"granola:not_{i:014d}")
+        assert h is not None
+        ix.put(
+            h.id,
+            "meeting",
+            h.title,
+            h.body,
+            h.who,
+            h.ts,
+            {k: v for k, v in h.meta.items() if k != "attendees"},
+        )
+    assert sorted(ix.granola_without_attendees()) == sorted(n["id"] for n in notes)
+    monkeypatch.setattr(granola, "RESYNC_PER_PASS", 3)
+    api = FakeGranola(notes)
+    newest = max(n["updated_at"] for n in notes)
+    granola.sync_pass(ix, api, newest)  # nothing changed since: only the old notes are asked for
+    asked = [p for p, _ in api.calls if p != "/v1/notes"]
+    assert len(asked) == 3
+    api.calls.clear()
+    granola.sync_pass(ix, api, newest)
+    assert len([p for p, _ in api.calls if p != "/v1/notes"]) == 2
+    assert ix.granola_without_attendees() == ["not_00000000000004"]  # still nobody listed
+    # Linked by address now, not by name.
+    pat = [ln["id"] for ln in ix.links("granola:not_00000000000000") if ln["dir"] == "out"]
+    assert "person:email:pat@example.com" in pat
+    # Done: never asked again, even for a note that still lists nobody.
+    api.calls.clear()
+    granola.sync_pass(ix, api, newest)
+    assert [p for p, _ in api.calls] == ["/v1/notes"]
+
+
+def test_a_note_gone_from_granola_leaves_the_re_read(ix: index.Index) -> None:
+    n = note("not_eeeeeeeeeeeeee", "2026-10-03T10:00:00Z")
+    granola.store_note(ix, n)
+    h = ix.get("granola:not_eeeeeeeeeeeeee")
+    assert h is not None
+    ix.put(
+        h.id, "meeting", h.title, h.body, h.who, h.ts, {k: v for k, v in h.meta.items() if k != "attendees"}
+    )
+    api = FakeGranola([n], unfinished={n["id"]})
+    granola.sync_pass(ix, api, n["updated_at"])
+    api.calls.clear()
+    granola.sync_pass(ix, api, n["updated_at"])  # asked again as an unfinished note, not as a re-read
+    assert len([p for p, _ in api.calls if p != "/v1/notes"]) == 1
+    assert granola._load_resync(granola.RESYNC) == []

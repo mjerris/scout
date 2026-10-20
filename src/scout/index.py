@@ -69,6 +69,7 @@ UPKEEP_EVERY_S = 60.0  # upkeep() runs about this often (the background pass, or
 XREF_KINDS = ("slack", "mail", "meeting", "note")  # whose text is read for cross-references
 XREF_DAYS = 30.0  # how far back (the first pass backfills this much)
 XREF_BATCH = 300  # items read per pass
+RELINK_BATCH = 500  # records linked again at most per relink_people call (the rest wait for the next)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
@@ -129,6 +130,12 @@ CREATE TABLE IF NOT EXISTS xref_seen (id TEXT PRIMARY KEY, sig TEXT NOT NULL, ts
 -- github:<login>, contact:<id>) is one person's; a name (name:, slackname:) may be several's.
 CREATE TABLE IF NOT EXISTS person_keys (key TEXT NOT NULL, person TEXT NOT NULL, PRIMARY KEY (key, person));
 CREATE INDEX IF NOT EXISTS person_keys_person ON person_keys(person);
+-- The names records find people by when they show only a name (a meeting attendee without
+-- an address, an old Slack message's author): when who goes by a name changes, the records
+-- naming it go into people_relink and are linked again (Index.relink_people).
+CREATE TABLE IF NOT EXISTS name_refs (key TEXT NOT NULL, src TEXT NOT NULL, PRIMARY KEY (key, src));
+CREATE INDEX IF NOT EXISTS name_refs_src ON name_refs(src);
+CREATE TABLE IF NOT EXISTS people_relink (src TEXT PRIMARY KEY);
 """
 
 
@@ -432,6 +439,8 @@ class Index:
     web_base: Callable[[], str] = lambda: ""
     # Who the user is and who Slack's ids are, for linking records to people (people.py).
     people_ctx: Callable[[], people.Ctx] = people.context
+    # Set while this thread runs relink_people (whose linking would otherwise start another).
+    _relinking: threading.local = field(init=False, repr=False, default_factory=threading.local)
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -605,6 +614,8 @@ class Index:
             # from after the mail ages out: resolve() leaves out what's gone).
             self._conn.execute("DELETE FROM links WHERE src = ? OR (dst = ? AND rel = 'same_as')", (id, id))
             self._conn.execute("DELETE FROM xref_seen WHERE id = ?", (id,))
+            self._conn.execute("DELETE FROM name_refs WHERE src = ?", (id,))
+            self._conn.execute("DELETE FROM people_relink WHERE src = ?", (id,))
             if row and self._counts is not None:
                 self._counts[row[0]] -= 1
             self._changed(id)
@@ -1065,6 +1076,16 @@ class Index:
                 self._facts_tried.add(str(fid))
         return linked
 
+    def granola_without_attendees(self) -> list[str]:
+        """The Granola notes stored before their attendees were kept (granola.py reads them
+        again once), newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT substr(id, 9) FROM docs WHERE kind = 'meeting' AND substr(id, 1, 8) = 'granola:' "
+                "AND instr(id, '#') = 0 AND json_extract(meta, '$.attendees') IS NULL ORDER BY ts DESC"
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
     def link_meetings(self, since: float | None = None) -> int:
         """same_as links from meeting summaries that came by email to the Granola note of
         the same meeting (links.same_meeting: its start just before the email, a similar
@@ -1120,6 +1141,7 @@ class Index:
             got = self._join(meta, create=bool(p.get("contact")))
             if got and got not in keep:
                 keep.append(got)
+        self.relink_people()  # the records naming someone these merges gave a name
         removed = 0
         if complete:
             contacts = {str(p.get("contact")) for p in found if p.get("contact")}
@@ -1161,13 +1183,66 @@ class Index:
     def _put_person(self, id: str, meta: dict[str, Any]) -> None:
         """A person's record and the keys that find them."""
         r = people.record(meta)
+        names = people.name_keys(r["meta"])
         with self._tx():
+            had = self._name_keys_of(id)
             self.put(id, people.KIND, r["title"], r["body"], r["who"], None, r["meta"])
             self._conn.execute("DELETE FROM person_keys WHERE person = ?", (id,))
             self._conn.executemany(
                 "INSERT OR IGNORE INTO person_keys(key, person) VALUES (?, ?)",
-                [(k, id) for k in [*people.strong_keys(r["meta"]), *people.name_keys(r["meta"])]],
+                [(k, id) for k in [*people.strong_keys(r["meta"]), *names]],
             )
+            self._names_changed(set(had) ^ set(names))
+
+    def _name_keys_of(self, person: str) -> list[str]:
+        with self._lock:
+            return [str(k) for (k,) in self._conn.execute(
+                "SELECT key FROM person_keys WHERE person = ? AND (substr(key, 1, 5) = 'name:' "
+                "OR substr(key, 1, 10) = 'slackname:')",
+                (person,),
+            )]  # fmt: skip
+
+    def _names_changed(self, keys: Iterable[str]) -> None:
+        """Who goes by these names changed (someone new, a new name, a merge): the records
+        that name them are linked again (relink_people)."""
+        keys = list(keys)
+        if keys:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO people_relink(src) SELECT src FROM name_refs "
+                    "WHERE key IN (SELECT value FROM json_each(?))",
+                    (json.dumps(keys),),
+                )
+
+    def relink_people(self, limit: int = RELINK_BATCH) -> int:
+        """Link again the records waiting in people_relink (their names now mean someone
+        else, or someone at last), at most `limit` a call; what's left waits for the next.
+        Run after each record's linking and each pass's merges. Returns how many."""
+        if getattr(self._relinking, "on", False):
+            return 0
+        self._relinking.on = True
+        done = 0
+        try:
+            while done < limit:
+                with self._lock:
+                    rows = self._conn.execute(
+                        "SELECT r.src, d.kind, d.title, d.who, d.meta FROM people_relink r "
+                        "LEFT JOIN docs d ON d.id = r.src ORDER BY r.src LIMIT ?",
+                        (min(100, limit - done),),
+                    ).fetchall()
+                if not rows:
+                    break
+                for src, kind, title, who, meta in rows:
+                    if kind in people.SOURCES:  # it takes itself off the list (and back on
+                        # when its own linking changes a name it shows)
+                        self.link_participants(str(src), str(kind), str(title), str(who), _meta(meta))
+                    else:  # gone
+                        with self._lock:
+                            self._conn.execute("DELETE FROM people_relink WHERE src = ?", (src,))
+                    done += 1
+        finally:
+            self._relinking.on = False
+        return done
 
     def _join(self, meta: dict[str, Any], create: bool = True) -> str | None:
         """The one person with these identities: the records holding any of them merged
@@ -1199,6 +1274,7 @@ class Index:
     def _move_person(self, old: str, new: str) -> None:
         """Merge: old's links become new's, and old goes."""
         with self._tx():
+            self._names_changed(self._name_keys_of(old))
             for col in ("dst", "src"):
                 self._conn.execute(f"UPDATE OR IGNORE links SET {col} = ? WHERE {col} = ?", (new, old))  # noqa: S608 (a fixed column)
                 self._conn.execute(f"DELETE FROM links WHERE {col} = ?", (old,))  # noqa: S608
@@ -1228,15 +1304,27 @@ class Index:
         """A record's links to the people in it (people.participants): exactly those, one
         per person. Returns how many."""
         pairs: dict[str, str] = {}
-        for p in people.participants(kind, id, title, who, meta, self.people_ctx()):
+        parties = people.participants(kind, id, title, who, meta, self.people_ctx())
+        with self._tx():
+            # Noted first: linking this record may change who goes by a name it shows
+            # (someone new by its address), and then it's linked again.
+            self._conn.execute("DELETE FROM people_relink WHERE src = ?", (id,))
+            self._conn.execute("DELETE FROM name_refs WHERE src = ?", (id,))
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO name_refs(key, src) VALUES (?, ?)",
+                [(p.key, id) for p in parties if p.key.startswith(("name:", "slackname:"))],
+            )
+        for p in parties:
             pid = self._party_person(p)
             if pid and pid not in pairs:
                 pairs[pid] = p.rel
         self._set_links(id, people.RELS, list(pairs.items()), people_only=True)
+        self.relink_people()
         return len(pairs)
 
     # The backfill: records stored before they were linked to people, a batch at a time.
-    BACKFILL_VERSION = 1
+    # 2: once more, to note the names each record shows (name_refs) for relink_people.
+    BACKFILL_VERSION = 2
     _BACKFILL_KEY = "people_backfill"
 
     def _backfill_state(self) -> dict[str, Any]:
@@ -1371,6 +1459,7 @@ class Index:
                 self._untell(login)
                 undone += 1
         self._set_setting(self._TOLD_KEY, st)
+        self.relink_people()
         return {"added": added, "undone": undone}
 
     def _untell(self, login: str) -> None:
