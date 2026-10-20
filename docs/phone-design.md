@@ -333,11 +333,19 @@ SWML address runs on an internal leg that REST can't end: cloud-product#21780).
 
 ## SDK work (our PRs; IM Luca about RN changes when needed)
 
-- signalwire-python: a documented way to reject a call from the per-call config callback
-  (hang up without an agent), and an `on_call_start` wrapper for the platform's
-  `startup_hook` (`hangup_hook` already has one: `on_call_end`).
-- signalwire-python: document the SWAIG webhook timeout; and an aiohttp mount, or a
-  public framework-free SWAIG dispatch (today `_execute_swaig_function` is private).
+- Shipped in signalwire-python 3.7.2
+  ([#117](https://github.com/signalwire/signalwire-python/pull/117), landed through
+  [#118](https://github.com/signalwire/signalwire-python/pull/118)): `on_call_start`, the
+  wrapper for the platform's `startup_hook` (the counterpart of `on_call_end`); the documented
+  way to reject a call from the per-call config callback (a `play` + `hangup` goodbye and no
+  tools by default, which the callback clears only for a call it accepts); and the SWAIG
+  webhook timeout (30 s to connect, 120 s for the reply, up to 3 retries).
+- signalwire-python, open: a public framework-free SWAIG dispatch,
+  `await agent.handle_swaig_request(method, url, headers, body)` returning
+  `(status, headers, body)`, so a host other than `serve()` (such as aiohttp) gets the
+  built-in server's auth, signature and per-call token checks
+  ([branch `feat/public-swaig-dispatch`](https://github.com/signalwire/signalwire-python/tree/feat/public-swaig-dispatch)).
+  Scout keeps `serve()` until it ships in a release.
 - RN library (PR to Luca's repo): voice calls start on speakerphone (audio mode follows the app's
   video capability); iPhone hardware testing; set `userVariables` at dial from the hooks.
 
