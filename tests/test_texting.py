@@ -364,3 +364,207 @@ def test_reminder_urls_take_numbers_to_call_and_nothing_else() -> None:
     for bad in ("tel:+1 555", "javascript:alert(1)", "tel:", "facetime-audio://x/y", "file:///etc"):
         with pytest.raises(ToolError):
             reminders_mac._url_arg(bad)
+
+
+# --- tier 0: "text Pat ..." and "call Pat" in the room (local_intents.py) -------------------
+
+
+class Acts:
+    """Context.act stand-in: records the asking tool it was handed, runs nothing."""
+
+    def __init__(self, status: str = "ok") -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.status = status
+
+    async def __call__(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((name, args))
+        return {"status": self.status, "text": "done", "error": "Messages said no"}
+
+
+def _ctx(act: Acts | None) -> Any:
+    from scout import local_intents
+    from scout.tools import Timers
+
+    return local_intents.Context(Timers(lambda label: None), act=act)
+
+
+def _tier0(text: str, act: Acts | None, channel: str = "room") -> str | None:
+    from scout import local_intents
+
+    skip = local_intents.PHONE_SKIP if channel == PHONE else frozenset()
+    out: str | None = run(local_intents.answer(text, _ctx(act), skip=skip, channel=channel))
+    return out
+
+
+def _drafted(act: Acts) -> list[tuple[str, str]]:
+    """(who, text) of each draft the tier-0 sends were for."""
+    out = []
+    for name, args in act.calls:
+        assert name == "message_send"
+        d = messages_send._drafts[args["draft"]]
+        out.append((d.name, d.text))
+    return out
+
+
+@pytest.mark.parametrize(
+    ("said", "who", "text"),
+    [
+        ("Text Pat Doe I'm running late.", "Pat Doe", "I'm running late."),
+        ("text pat lee: on my way, ten minutes", "Pat Lee", "on my way, ten minutes"),
+        ("Can you text Sam saying see you at 5?", "Sam Roe", "see you at 5?"),
+        ("message Pat Lee are we still on for lunch", "Pat Lee", "are we still on for lunch"),
+        ("Please send a text to Sam Roe saying the gate code is 4 4 1 2", "Sam Roe", "the gate code is 4 4 1 2"),
+        ("send a message to Pat Doe to say I'll call back", "Pat Doe", "I'll call back"),
+    ],
+)  # fmt: skip
+def test_text_someone_drafts_it_and_sends_through_the_asking_tool(
+    texts: Sends, said: str, who: str, text: str
+) -> None:
+    act = Acts()
+    assert _tier0(said, act) == f"Sent to {who}."
+    assert _drafted(act) == [(who, text)]
+    assert texts.sent == []  # only message_send sends, and the fake act ran nothing
+
+
+def test_call_someone_prepares_it_and_starts_through_the_asking_tool(dial: Opens) -> None:
+    for said, who in (("Call Pat Doe", "Pat Doe"), ("can you call sam please", "Sam Roe"),
+                      ("give Pat Lee a call", "Pat Lee")):  # fmt: skip
+        act = Acts()
+        assert _tier0(said, act) == f"Calling {who}."
+        [(name, args)] = act.calls
+        assert name == "call_start" and calls._calls[args["call"]].name == who
+    assert dial.urls == []
+
+
+def test_a_no_or_no_answer_does_nothing_and_says_so(texts: Sends, dial: Opens) -> None:
+    assert _tier0("text Pat Doe hi", Acts("declined")) == "Okay, not sent."
+    assert _tier0("call Pat Doe", Acts("declined")) == "Okay, not calling."
+    assert _tier0("text Pat Doe hi", Acts("no_answer")) == ""  # "No answer, so I skipped that." was said
+    assert _tier0("call Pat Doe", Acts("no_answer")) == ""
+    assert _tier0("text Pat Doe hi", Acts("error")) == "Sorry, Messages said no"
+
+
+def test_a_name_that_fits_several_asks_which_and_nobody_goes_to_claude(texts: Sends, dial: Opens) -> None:
+    act = Acts()
+    which = "3 people in your contacts match Pat: Pat Doe (Acme), Patricia Moss, and Pat Lee. Which one?"
+    assert _tier0("text Pat I'm late", act) == which
+    assert _tier0("call Pat", act) == which
+    assert _tier0("text Zed hello there", act) is None  # nobody in Contacts: Claude takes it
+    assert _tier0("call Zed", act) is None
+    with pytest.raises(ToolError, match="Nobody Reachable has no phone number"):  # the room says "Sorry, ..."
+        _tier0("call Nobody Reachable", act)
+    assert act.calls == [] and messages_send._drafts == {} and calls._calls == {}
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "text Pat Doe",  # nothing to say: Claude asks what
+        "message Pat Doe on Slack saying hi",  # Slack, not Messages
+        "text Pat Doe on WhatsApp running late",
+        "text me the link",
+        "text messages from Pat Doe",
+        "message from Pat Doe",
+        "what did Pat Doe text me",
+        "call it a day",
+        "call me Mike",
+        "call Pat Doe tomorrow",  # more than a name: Claude takes it
+        "call Pat Doe on her cell",
+        "call the restaurant",
+        "call 555 010 2000",
+        "call an uber",
+        "calling Pat Doe",
+        "who called",
+        "remind me to call Pat Doe",
+        "what's Pat Doe's number",  # still the number, not a call
+    ],
+)
+def test_only_clear_text_and_call_requests_are_taken(texts: Sends, dial: Opens, said: str) -> None:
+    act = Acts()
+    out = _tier0(said, act)
+    assert act.calls == [] and messages_send._drafts == {} and calls._calls == {}
+    assert out is None or "number" in out
+
+
+def test_the_phone_and_an_unwired_context_leave_it_to_claude(texts: Sends, dial: Opens) -> None:
+    act = Acts()
+    assert _tier0("text Pat Doe I'm late", act, channel=PHONE) is None
+    assert _tier0("call Pat Doe", act, channel=PHONE) is None
+    assert _tier0("call Pat Doe", None) is None and _tier0("text Pat Doe hi", None) is None
+    assert act.calls == []
+
+
+def test_the_room_reads_the_text_back_and_sends_only_on_a_spoken_yes(texts: Sends) -> None:
+    import asyncio
+    import time
+
+    from test_routing import hear
+
+    async def go(answer: str) -> list[str]:
+        r = make()
+        task = asyncio.create_task(r.a._answer_locally("text Pat Doe I'm running late"))
+        await asyncio.sleep(0.02)
+        await hear(r, answer, started=time.monotonic())
+        assert await task
+        return r.spk.said
+
+    said = run(go("no"))
+    assert said[:2] == ["Send the text to Pat Doe?", "It says: I'm running late."]
+    assert said[-1] == "Okay, not sent." and texts.sent == []
+    said = run(go("yes"))
+    assert said[-1] == "Sent to Pat Doe." and texts.sent == [("+15550102000", "iMessage", "I'm running late")]
+
+
+def test_the_room_names_the_number_and_calls_only_on_a_spoken_yes(dial: Opens) -> None:
+    import asyncio
+    import time
+
+    from test_routing import hear
+
+    async def go(answer: str) -> list[str]:
+        r = make()
+        task = asyncio.create_task(r.a._answer_locally("call Pat Doe"))
+        await asyncio.sleep(0.02)
+        await hear(r, answer, started=time.monotonic())
+        assert await task
+        return r.spk.said
+
+    said = run(go("no"))
+    assert said[0] == "Call Pat Doe at five five five, oh one oh, two oh oh oh, mobile?"
+    assert said[-1] == "Okay, not calling." and dial.urls == []
+    said = run(go("yes"))
+    assert said[-1] == "Calling Pat Doe." and dial.urls == ["tel:+15550102000"]
+
+
+def test_words_that_arent_people_never_reach_contacts(texts: Sends, dial: Opens) -> None:
+    """Contacts' matching is fuzzy ("me" starts Melissa), so these never get that far: here
+    anyone at all is in Contacts under exactly what was said."""
+    from scout import local_intents
+    from scout.tools import Timers
+
+    asked: list[str] = []
+
+    async def anyone(who: str) -> list[dict[str, Any]]:
+        asked.append(who)
+        return [{"id": "x", "name": who.title(), "phones": [{"label": "mobile", "value": "555 010 9999"}]}]
+
+    act = Acts()
+    c = local_intents.Context(Timers(lambda label: None), contacts=anyone, act=act)
+    for said in ("call it a day", "call me Mike", "call him back", "call them", "call off the meeting",
+                 "call up", "call an uber", "text me when it's done", "message them that I'm late",
+                 "text everyone I'm late", "message from Pat Doe", "text back I'm late",
+                 "call the office at the main number please", "call pat doe at the main office",
+                 "call pat doe and sam roe"):  # fmt: skip
+        assert run(local_intents.answer(said, c)) is None, said
+    assert asked == [] and act.calls == []
+    assert run(local_intents.answer("call pat doe", c)) == "Calling Pat Doe."  # the fake does answer
+
+    async def twins(who: str) -> list[dict[str, Any]]:
+        return [{"id": "a", "name": "Pat Doe", "organization": "Acme"}, {"id": "b", "name": "Pat Doe"}]
+
+    c = local_intents.Context(Timers(lambda label: None), contacts=twins, act=act)
+    two = "2 people in your contacts match Pat Doe: Pat Doe (Acme) and Pat Doe. Which one?"
+    assert run(local_intents.answer("call pat doe", c)) == two
+    assert run(local_intents.answer("text pat doe see you soon", c)) == two
+    assert run(local_intents.answer("text pat doe", c)) is None  # a name, and nothing to say
+    assert [name for name, _ in act.calls] == ["call_start"]  # only the one call above

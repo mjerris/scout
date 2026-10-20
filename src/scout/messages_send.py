@@ -172,14 +172,28 @@ async def draft(a: dict[str, Any]) -> str:
         p = await contacts_mac.one_person(to, "message_draft")
         if isinstance(p, str):
             return p
-        handle, service, label = await pick_handle(p)
-        name = str(p.get("name") or to)
+        return _drafted(await draft_for(p, text))
+    return _drafted(_keep(name, handle, service, label, text))
+
+
+async def draft_for(p: dict[str, Any], text: str) -> Draft:
+    """A draft to one contact (Contacts' record), at the handle picked for them. Sends
+    nothing: message_draft for a name, and tier 0's "text Pat ..." (local_intents.py)."""
+    handle, service, label = await pick_handle(p)
+    return _keep(str(p.get("name") or handle), handle, service, label, _text(text))
+
+
+def _keep(name: str, handle: str, service: str, label: str, text: str) -> Draft:
     with _lock:
         now = time.time()
         for k in [k for k, d in _drafts.items() if now - d.made > DRAFT_TTL_S]:
             del _drafts[k]
         d = Draft(f"m{next(_ids)}", name, handle, service, label, text, now)
         _drafts[d.id] = d
+    return d
+
+
+def _drafted(d: Draft) -> str:
     return (
         f"Draft {d.id}: text {d.name} ({d.label} {d.handle}, {d.service}): {d.text}\n"
         f"Not sent. To send it, call message_send with draft {d.id}; the user confirms it first."

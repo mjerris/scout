@@ -59,6 +59,19 @@ either one is enough for names in texts.)
   address". Phone numbers are spoken in groups of digits ("5 5 5, 0 1 0, 2 0 0 0").
   A name that fits several people gets "which one?"; a name nobody in Contacts has
   ("my wife's number") goes to Claude.
+- **Tier 0 texting and calling** in the room: "text Pat I'm running late", "message
+  Pat Doe: on my way", "send a text to Sam saying see you at 5", "call Pat", "give Pat
+  Doe a call". Plain code finds the person (a name of up to three words, every word
+  of it in their name; the first may be its start, "Pat" for Patricia) and makes the
+  draft or the call the way `message_draft` and `call_prepare` do; the send and the
+  call go only through `message_send` and `call_start`, with the same read-back and
+  spoken yes as when Claude asks ("Send the text to Pat Doe? It says: I'm running
+  late."), then "Sent to Pat Doe." or "Okay, not sent." The text is kept as you said
+  it. Several people: "which one?". Left to Claude: a name nobody in Contacts has, a
+  name and nothing to say ("text Pat"), more than a name after "call" ("call Pat
+  tomorrow", "call Pat on her cell"), another app ("message Sam on Slack"), and words
+  that aren't people ("call it a day", "call me Mike", "text me when it's done"). On
+  the phone the agent does both as before (two steps; calls as a link).
 - **Tools** for the room, the phone and other Claude sessions (MCP): `contacts_search`
   (query: a name, nickname, organization, email address or phone number; or `group`
   for a group's members; best first, at most 25) and `contact_get` (one contact by id).
@@ -284,7 +297,6 @@ links. "Joao Santos" is one person (his Slack user), linked to all 28 DMs with h
 
 ## Next
 
-- Tier 0 for "text Pat ..." and "call Pat" (today Claude does both with the tools).
 - Granola notes stored before attendee addresses were kept are linked by full name
   until they're synced again.
 - A record that names someone only by name, stored before anyone went by that name, is

@@ -7,7 +7,10 @@ everything is syncing (syncstate.py).
 
 Tier 0 only reads. Adding or completing a reminder ("add milk to my shopping
 list") is left to Claude, whose reminder_add / reminder_complete calls are
-confirmed by voice every time; answering it here would skip that question.
+confirmed by voice every time; answering it here would skip that question. The one
+exception asks the same question: "text Pat I'm running late" and "call Pat" make the
+draft or the call here, and send or start it only through the asking tool, exactly as
+Claude's call would (Context.act: read back, then done only on a spoken yes).
 
 Matching is deliberately narrow (whole-request patterns, no guessing): anything
 that doesn't clearly fit goes to Claude as before. Answers are short spoken
@@ -19,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,11 +30,13 @@ from typing import Any
 from . import (
     briefing,
     calendar_mac,
+    calls,
     contacts_mac,
     freebusy,
     mac,
     mail_mac,
     maps,
+    messages_send,
     notes,
     trust,
     reminders_mac,
@@ -153,6 +159,11 @@ class Context:
     store: Callable[[], Any] = lambda: _refs._store()  # where records resolve (index.default)
     sync: Callable[[], list[syncstate.Status]] = syncstate.statuses
     contacts: Callable[[str], Awaitable[list[dict[str, Any]]]] = contacts_mac.person_named
+    # Runs one of the shared tools the way the room's own Claude does: a tool that asks
+    # (message_send, call_start) is read back and run only on a yes (Assistant._room_tool).
+    # {"status": "ok" | "declined" | "no_answer" | "error", "text" or "error"}. None (no
+    # room to ask in): "text Pat ..." and "call Pat" go to Claude.
+    act: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
 
 
 Handler = Callable[[re.Match[str], Context], Awaitable[str | None]]  # None: Claude takes it
@@ -1053,11 +1064,125 @@ async def _where_that(m: re.Match[str], c: Context) -> str | None:
     return await _refs.where_from(r, c.store())
 
 
+# --- texting and calling: "text Pat I'm running late", "call Pat" ------------------------
+# Tier 0 finds the person and makes the draft or the call (messages_send.py, calls.py, the
+# code message_draft and call_prepare run); sending and starting go through Context.act,
+# the asking tools message_send and call_start, read back and done only on a yes. Only a
+# whole request that is clearly that: anything else ("call it a day", "message Sam on
+# Slack", "call Pat tomorrow", a name nobody in Contacts has) is left to Claude.
+
+_WHO_WORDS = 3  # a name is at most this many words
+_NOT_A_PERSON = _NOT_A_NAME | {
+    "me", "him", "them", "us", "you", "an", "back", "off", "up", "from", "to", "about",
+    "message", "messages", "text", "texts", "everyone", "everybody", "someone", "somebody",
+}  # fmt: skip
+_ELSEWHERE = re.compile(
+    r"\b(?:on|in|via|over|through|by|with|using) (?:slack|whatsapp|signal|teams|telegram|discord|"
+    r"e-?mail|mail|facetime|messenger)\b"
+)
+_SAYING = re.compile(r"^(?:saying|to say|and say|that says)\s+", re.IGNORECASE)
+
+
+def _fold(word: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", word) if not unicodedata.combining(ch))
+
+
+def _names_them(p: dict[str, Any], words: list[str]) -> bool:
+    """Every word is a word of their name or nickname (the first may be its start: "Pat Lee"
+    is Patricia Lee); so "pat call" isn't Pat Callahan."""
+    have = {_fold(w) for w in _clean(f"{p.get('name') or ''} {p.get('nickname') or ''}").split()}
+    first, *rest = [_fold(w) for w in words]
+    return any(h.startswith(first) for h in have) and set(rest) <= have
+
+
+async def _named(c: Context, words: list[str]) -> tuple[dict[str, Any] | None, str | None]:
+    """_person for a name of one or more words; a name of several words means only
+    the people it names whole, and when it names nobody, (None, None): Claude takes it."""
+    if len(words) == 1:
+        return await _person(c, words[0])
+    who = " ".join(words)
+    people = [p for p in await c.contacts(who) if _names_them(p, words)]
+    if not people:
+        return None, None
+    if len(people) > 1:
+        names = [contacts_mac.describe(p) for p in people[:4]]
+        return None, f"{len(people)} people in your contacts match {who.title()}: {join(names)}. Which one?"
+    return people[0], ""
+
+
+def _said_after(request: str, words: int) -> str | None:
+    """The request as said, from its `words`-th word on (as _clean counts them): the
+    message in the user's own case and punctuation. None if it doesn't line up."""
+    tokens = request.split()
+    seen = 0
+    for i, tok in enumerate(tokens):
+        if seen == words:
+            return " ".join(tokens[i:])
+        seen += len(_clean(tok).split())
+        if seen > words:
+            return None
+    return None
+
+
+Act = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+async def _done(act: Act, tool: str, args: dict[str, Any], ok: str, no: str) -> str:
+    r = await act(tool, args)
+    status = r.get("status")
+    if status == "ok":
+        return ok
+    if status == "declined":
+        return no
+    if status == "error":
+        return f"Sorry, {r.get('error')}"
+    return ""  # no answer or stopped: the question said what happened
+
+
+@_rule(r"(?:text|message|send (?:a |an )?(?:text|message|imessage) to) (?P<rest>.+)")
+async def _text_person(m: re.Match[str], c: Context) -> str | None:
+    rest = m.group("rest")
+    words = rest.split()
+    if c.act is None or words[0] in _NOT_A_PERSON or _ELSEWHERE.search(rest):
+        return None
+    if len(words) <= _WHO_WORDS and any(await _named(c, words)):
+        return None  # only a name ("text Pat Doe"): Claude asks what to say
+    p, n, instead = None, 0, None
+    for n in range(min(_WHO_WORDS, len(words) - 1), 0, -1):
+        p, instead = await _named(c, words[:n])
+        if p is not None or instead or n == 1:
+            break
+    if p is None:
+        return instead  # which one, or nobody (Claude)
+    before = len(_clean(c.request).split()) - len(words) + n
+    said = _said_after(c.request, before)
+    text = _SAYING.sub("", (said if said is not None else " ".join(words[n:])).lstrip(" :,-"))
+    if not text.strip() or _clean(text) in ("saying", "to say"):
+        return None
+    d = await messages_send.draft_for(p, text)
+    return await _done(c.act, "message_send", {"draft": d.id}, f"Sent to {d.name}.", "Okay, not sent.")
+
+
+@_rule(
+    r"(?:call (?:up )?(?P<who>[a-z][a-z .'-]{0,60}?)|give (?P<who2>[a-z][a-z .'-]{0,60}?) a (?:call|ring))"
+)
+async def _call_person(m: re.Match[str], c: Context) -> str | None:
+    words = (m.group("who") or m.group("who2") or "").split()
+    if c.act is None or not words or len(words) > _WHO_WORDS or words[0] in _NOT_A_PERSON:
+        return None
+    p, instead = await _named(c, words)
+    if p is None:
+        return instead
+    call = calls.call_for(p)
+    return await _done(c.act, "call_start", {"call": call.id}, f"Calling {call.name}.", "Okay, not calling.")
+
+
 # What a request from the phone may not do here: change the room (timers that ring in it,
 # volume, playback), repeat what the room last heard, or change what asks first.
 PHONE_SKIP = frozenset({
     "_timer", "_timer2", "_cancel_timers", "_volume_step", "_volume_set", "_mute",
     "_play_pause", "_skip", "_repeat", "_trust_on", "_trust_off",
+    "_text_person", "_call_person",  # the phone texts in two steps of its own; never calls from here
 })  # fmt: skip
 
 
