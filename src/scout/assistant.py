@@ -208,7 +208,7 @@ class Assistant:
         # What was said lately with the records it was about (refs.py): "give me a link to that".
         self.said = refs.use(refs.Log())
         self._local = local_intents.Context(
-            self.timers, last_spoken=lambda: self.last_spoken, said=lambda: self.said
+            self.timers, last_spoken=lambda: self.last_spoken, said=lambda: self.said, act=self._room_tool
         )
         # (time, request, answer, from private data): private ones reach Claude only if
         # the privacy mode allows.
@@ -1363,6 +1363,23 @@ class Assistant:
             text, said or "(done)", "room", private, about=about if tier is not None else ()
         )
         return True
+
+    async def _room_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Tier 0's "text Pat ..." and "call Pat" (local_intents.Context.act): a shared tool
+        run the way the room's own Claude runs it. One that asks is asked about with the
+        same question and trust log (Brain._ask: the read-back, never skipped by a rule or
+        "always") and runs only on a yes."""
+        t = shared_tools.BY_NAME[name]
+        if t.asks:
+            ok = await self.brain._ask(f"mcp__{SERVER}__{name}", args)
+            if ok is None:
+                return {"status": "no_answer"}
+            if not ok:
+                return {"status": "declined"}
+        try:
+            return {"status": "ok", "text": await t.run(args)}
+        except ToolError as exc:
+            return {"status": "error", "error": str(exc)}
 
     # --- behavior rules (behavior.py, corrections.py) ------------------------------------
 

@@ -82,21 +82,37 @@ async def prepare(a: dict[str, Any]) -> str:
         p = await contacts_mac.one_person(to, "call_prepare")
         if isinstance(p, str):
             return p
-        name = str(p.get("name") or to)
-        phones = contacts_mac.phone_choices(p)
-        emails = [str(x["value"]) for x in p.get("emails") or [] if x.get("value")]
-        if phones:
-            number, label = contacts_mac.dial_number(phones[0][0]), phones[0][1] or "phone"
-        elif emails:
-            number, label = emails[0], "FaceTime audio"
-        else:
-            raise contacts_mac.Unclear(f"{name} has no phone number in Contacts")
+        return _prepared(call_for(p))
+    return _prepared(_keep(name, number, label))
+
+
+def call_for(p: dict[str, Any]) -> Call:
+    """A call to one contact (Contacts' record): their iPhone or mobile number first, else
+    another number, else a FaceTime audio call to their email address. Starts nothing:
+    call_prepare for a name, and tier 0's "call Pat" (local_intents.py)."""
+    name = str(p.get("name") or "them")
+    phones = contacts_mac.phone_choices(p)
+    emails = [str(x["value"]) for x in p.get("emails") or [] if x.get("value")]
+    if phones:
+        number, label = contacts_mac.dial_number(phones[0][0]), phones[0][1] or "phone"
+    elif emails:
+        number, label = emails[0], "FaceTime audio"
+    else:
+        raise contacts_mac.Unclear(f"{name} has no phone number in Contacts")
+    return _keep(name, number, label)
+
+
+def _keep(name: str, number: str, label: str) -> Call:
     with _lock:
         now = time.time()
         for k in [k for k, c in _calls.items() if now - c.made > CALL_TTL_S]:
             del _calls[k]
         c = Call(f"c{next(_ids)}", name, number, label, now)
         _calls[c.id] = c
+    return c
+
+
+def _prepared(c: Call) -> str:
     return (
         f"Call {c.id}: {c.name}, {c.label}, {c.number}. Not started. In the room, call_start with "
         f"call {c.id} starts it on the Mac through the user's iPhone (the user confirms first). On the "
