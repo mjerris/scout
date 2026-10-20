@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/vcal"
+. "$ROOT/scripts/sign.sh"
 OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -22,6 +23,6 @@ mkdir -p "$OUT"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name vcal \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$SRC/Info.plist" \
     -o "$OUT/vcal.part" "$SRC/main.swift"
-codesign --force -s - -i com.local.scout.vcal "$OUT/vcal.part"
+scout_codesign "$OUT/vcal.part" com.local.scout.vcal
 mv "$OUT/vcal.part" "$OUT/vcal"
 echo "built $OUT/vcal"

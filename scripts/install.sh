@@ -67,11 +67,17 @@ if compgen -G "$DATA/reference/*.zim" >/dev/null; then
         echo "kiwix-serve not installed; the offline reference stays off (scripts/install-kiwix.sh)"
 fi
 
-# Rebuild a helper only when its source changed, so macOS keeps its permissions.
+# Rebuild a helper only when its source or its signing certificate changed, so macOS
+# keeps its permissions (an ad hoc signed helper loses them on every rebuild; scripts/sign.sh).
+# shellcheck source=scripts/sign.sh
+. "$DATA/current/scripts/sign.sh"
+SIGN_ID="$(scout_sign_identity)"
 BUILT=""
 build_if_changed() {  # NAME SOURCE-DIR [BINARY-NAME]
     local name="$1" src="$2" bin="${3:-$1}" sum
-    sum="$( (cd "$src" && find . -type f \( -name '*.swift' -o -name '*.plist' \) -print0 | sort -z | xargs -0 shasum -a 256) | shasum -a 256 | cut -d' ' -f1)"
+    sum="$( (cd "$src" && find . -type f \( -name '*.swift' -o -name '*.plist' \) -print0 | sort -z | xargs -0 shasum -a 256
+        # Ad hoc adds nothing, so the sums of helpers built before signing existed still match.
+        if [ "$SIGN_ID" != "-" ]; then echo "sign $SIGN_ID"; fi) | shasum -a 256 | cut -d' ' -f1)"
     if [ -x "$DATA/bin/$bin" ] && [ "$(cat "$DATA/bin/$name.source-sha256" 2>/dev/null)" = "$sum" ]; then
         return
     fi
@@ -83,8 +89,8 @@ build_if_changed() {  # NAME SOURCE-DIR [BINARY-NAME]
 if command -v swiftc >/dev/null; then
     build_if_changed vcal "$DATA/current/native/vcal"
     build_if_changed voiceio "$DATA/current/native/voiceio"
-    # A rebuilt Messages helper is a new binary to macOS: Full Disk Access must be
-    # granted again (Scout walks the user through it on the next messages question).
+    # Signed ad hoc, a rebuilt Messages helper is a new binary to macOS: Full Disk Access
+    # must be granted again (Scout walks the user through it on the next messages question).
     build_if_changed messages "$DATA/current/native/messages" scout-messages
     # Contacts: its own permission, asked for on the first contacts question (docs/contacts.md).
     build_if_changed contacts "$DATA/current/native/contacts" scout-contacts

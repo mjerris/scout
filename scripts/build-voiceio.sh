@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/voiceio/Sources"
+. "$ROOT/scripts/sign.sh"
 OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -23,5 +24,7 @@ sources=("$SRC"/*.swift)
 # binary portable and uses the long-standing (pre-27) AVAudioEngine API.
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name voiceio \
     -o "$OUT/voiceio.part" "${sources[@]}"
+# Signed like the other helpers (scripts/sign.sh), so a rebuild keeps its microphone grant.
+scout_codesign "$OUT/voiceio.part" com.local.scout.voiceio
 mv "$OUT/voiceio.part" "$OUT/voiceio"
 echo "built $OUT/voiceio"

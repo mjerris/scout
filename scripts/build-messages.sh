@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Build the Messages helper (native/messages) used by the messages_* tools.
 # Output: bin/scout-messages in Scout's data folder. Full Disk Access is granted to
-# this exact binary, and an ad hoc signature changes with every build, so the
-# installer rebuilds only when the source changed. Works from any directory.
+# this helper; signed with a certificate (scripts/sign.sh) the grant survives a rebuild,
+# signed ad hoc it doesn't, so the installer rebuilds only when the source changed.
+# Works from any directory.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/messages"
+. "$ROOT/scripts/sign.sh"
 OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -25,7 +27,6 @@ mkdir -p "$OUT"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name scout_messages \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$SRC/Info.plist" \
     -o "$OUT/scout-messages.part" "$SRC/main.swift"
-codesign --force -s - -o runtime --entitlements "$SRC/entitlements.plist" \
-    -i com.local.scout.messages "$OUT/scout-messages.part"
+scout_codesign "$OUT/scout-messages.part" com.local.scout.messages -o runtime --entitlements "$SRC/entitlements.plist"
 mv "$OUT/scout-messages.part" "$OUT/scout-messages"
 echo "built $OUT/scout-messages"

@@ -69,3 +69,32 @@ quiet moment (nobody talking, nothing going on, not in `[pulse] quiet_hours`): "
 <name> server in Scout too?". Yes adds it as above; no is remembered and never asked
 again; no answer asks again a day later. The servers Claude Code had when this feature
 first ran on an install already in use are not "new": the walkthrough offers them.
+
+## Signing the native helpers
+
+macOS keeps a helper's privacy grants (Full Disk Access and Contacts for scout-messages,
+Contacts for scout-contacts, Calendars and Reminders for vcal) only while the rebuilt
+binary meets the grant's designated requirement. Signed ad hoc, that requirement is the
+binary's hash, so every rebuild asks for the grants again. Signed with a certificate it is
+the identifier plus the certificate, which a rebuild keeps:
+
+```
+designated => identifier "com.local.scout.messages" and anchor apple generic and
+  certificate leaf[subject.CN] = "Apple Development: ..." and certificate 1[...] /* exists */
+```
+
+Any code signing certificate in your login keychain works (a free Apple Development one
+from Xcode, Settings, Accounts). Name it in `config.toml`, never in the code:
+
+```toml
+[helpers]
+sign_identity = "Apple Development: Your Name (ABCDE12345)"  # or its SHA-1
+```
+
+`SCOUT_SIGN_IDENTITY` overrides it for one build. `scripts/sign.sh` signs all four
+helpers with it (stable identifiers `com.local.scout.*`; scout-messages and scout-contacts
+keep the hardened runtime and their entitlement). A name that isn't a valid identity in
+the keychain fails the build rather than signing ad hoc; with none set the build warns
+and signs ad hoc. Setting or changing the certificate makes the next install rebuild every
+helper once, and that once each grant is asked for again; after that rebuilds keep them.
+Check a helper with `codesign -d -r- "$HOME/Library/Application Support/Scout/bin/vcal"`.

@@ -544,6 +544,15 @@ class ContactsConfig:
 
 
 @dataclass
+class HelpersConfig:
+    # Read by scripts/sign.sh, not by the app: the code signing certificate the native
+    # helpers are signed with (a name or SHA-1 from `security find-identity -v -p
+    # codesigning`). Signed with one, a rebuilt helper keeps its privacy grants; "" signs
+    # ad hoc, and each rebuild asks for them again. SCOUT_SIGN_IDENTITY overrides it.
+    sign_identity: str = ""
+
+
+@dataclass
 class PrivacyConfig:
     # What of your private data Claude sees (src/scout/privacy.py):
     # "strict": no email text (not even summaries of it), calendar notes or memories;
@@ -584,6 +593,7 @@ class Config:
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     contacts: ContactsConfig = field(default_factory=ContactsConfig)
+    helpers: HelpersConfig = field(default_factory=HelpersConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     starlink: StarlinkConfig = field(default_factory=StarlinkConfig)
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)

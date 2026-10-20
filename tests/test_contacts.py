@@ -87,7 +87,9 @@ def binary() -> Iterator[Path]:
         check=False,
     )
     assert r.returncode == 0, r.stderr
-    assert "warning:" not in r.stderr + r.stdout, r.stderr
+    # No compiler warnings; signing ad hoc (no certificate here, scripts/sign.sh) warns too.
+    lines = (r.stderr + r.stdout).splitlines()
+    assert not [ln for ln in lines if "warning:" in ln and " ad hoc; " not in ln], r.stderr
     exe = home / "bin" / "scout-contacts"
     sig = subprocess.run(  # noqa: S603
         ["/usr/bin/codesign", "-dv", "--entitlements", "-", str(exe)],

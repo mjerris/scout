@@ -14,9 +14,10 @@ it only when its source changes.
 - It's a command-line helper like the calendar's (`vcal`): Scout runs it for each
   lookup and it answers with JSON. Scout's Python, Claude and the terminal never get
   the permission.
-- Signed ad hoc as `com.local.scout.contacts`, with the hardened runtime (nothing can
-  be injected into it) and the Contacts entitlement. Its embedded Info.plist carries
-  the text macOS shows in the prompt.
+- Signed as `com.local.scout.contacts` (with your certificate when one is set, else ad
+  hoc; docs/setup.md), with the hardened runtime (nothing can be injected into it) and
+  the Contacts entitlement. Its embedded Info.plist carries the text macOS shows in the
+  prompt.
 - It reads names, nickname, organization, job title and department, phone numbers and
   email addresses with their labels, postal addresses, the birthday, and which groups
   a contact is in. A contact's **notes are never read**: macOS only lets apps read

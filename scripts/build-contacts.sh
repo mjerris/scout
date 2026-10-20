@@ -6,6 +6,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/native/contacts"
+. "$ROOT/scripts/sign.sh"
 OUT="${SCOUT_HOME:-$HOME/Library/Application Support/Scout}/bin"
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -25,7 +26,6 @@ mkdir -p "$OUT"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -module-name scout_contacts \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$SRC/Info.plist" \
     -o "$OUT/scout-contacts.part" "$SRC/main.swift"
-codesign --force -s - -o runtime --entitlements "$SRC/entitlements.plist" \
-    -i com.local.scout.contacts "$OUT/scout-contacts.part"
+scout_codesign "$OUT/scout-contacts.part" com.local.scout.contacts -o runtime --entitlements "$SRC/entitlements.plist"
 mv "$OUT/scout-contacts.part" "$OUT/scout-contacts"
 echo "built $OUT/scout-contacts"

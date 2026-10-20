@@ -119,6 +119,12 @@ enabled = true
 # refuse, and texts and mail show numbers and addresses as they are.
 enabled = true
 
+[helpers]
+# The certificate the native helpers (vcal, voiceio, scout-messages, scout-contacts) are
+# signed with, so a rebuild keeps their privacy grants (docs/setup.md). "" = ad hoc: each
+# rebuild asks for Full Disk Access, Contacts and Calendars again.
+# sign_identity = "Apple Development: Your Name (ABCDE12345)"
+
 [starlink]
 # The Starlink dish's local API: status, outages, data used. Off unless turned on.
 # enabled = true
