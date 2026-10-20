@@ -95,6 +95,19 @@ class Spoken(str):
         return s
 
 
+class Done(Spoken):
+    """The short line for an action the user said yes to that went through ("Sent to Pat
+    Doe."). In the room the confirm sound says it instead (Assistant._confirmed); `rest`
+    is the part of it that's said anyway (news beyond "it's done")."""
+
+    rest: str
+
+    def __new__(cls, text: str, refs: Iterable[str] = (), private: bool = False, rest: str = "") -> Done:
+        s = str.__new__(cls, text)
+        s.refs, s.private, s.rest = clean(refs), private, rest
+        return s
+
+
 def refs_of(text: Any) -> tuple[str, ...]:
     return tuple(getattr(text, "refs", ()))
 

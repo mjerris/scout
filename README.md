@@ -344,6 +344,23 @@ whole text is on the web page and in the session. An answer said over the read-b
 counts once the question has been said, if it's a clear yes or no and not Scout's own
 words coming back, and it ends the read-back.
 
+Once something you said yes to has gone through (a text, an email, a Slack message, a
+call, an event, a reminder, a rule kept), Scout doesn't say so: it plays one sound, the
+same for all of them, instead of "Sent to Pat Doe." That's macOS's Glass, played from
+`/System/Library/Sounds/Glass.aiff` (never copied), through Scout's own speakers the way
+its chimes are: the output device, its `output_delay_ms`, and the mic gating that keeps
+Scout from hearing itself. The tool's result tells Claude (the room's and other
+sessions') that the sound already said it, so it doesn't say "sent" too. A no, no
+answer, or an error is still said. Pick another sound, or `""` for the short spoken line
+(also used when the file is missing; logged once):
+
+```toml
+[confirm]
+sound = "/System/Library/Sounds/Glass.aiff"
+```
+
+On the phone the room's sound can't reach the call, so the phone agent says just "Done."
+
 Typed approval (opt-in): when you approve a send in a Claude Code session's chat, you
 can skip the spoken question. With
 
@@ -355,7 +372,8 @@ typed = true
 the session's `mail_send`, `slack_send`, `message_send` and `call_start` take
 `approved: "typed"`, which the tool descriptions allow only when you explicitly approved
 that exact message (or call) in your own words in that chat. Scout logs that the
-approval was typed, sends, and says one line ("Sent to Joao Santos."). Nothing else
+approval was typed, sends, and plays the confirm sound (or, with it off, says "Sent to
+Joao Santos."). Nothing else
 takes it, the phone and the room never do, and without the key `approved: "typed"`
 still asks aloud.
 

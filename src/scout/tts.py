@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Sequence
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,24 @@ def _tone(freqs: Sequence[float], sr: int, dur: float = 0.09, gain: float = 0.25
     return np.concatenate([gain * env * np.sin(2 * np.pi * f * t) for f in freqs]).astype(np.float32)
 
 
+def load_sound(path: str, sr: int) -> np.ndarray | None:
+    """A sound file as float32 mono at `sr`, for the play queue; None if it can't be read."""
+    import soundfile as sf
+
+    from .audio_io import resample
+
+    try:
+        data, rate = sf.read(Path(path).expanduser(), dtype="float32", always_2d=True)
+    except (OSError, RuntimeError, ValueError) as exc:  # missing, or not audio libsndfile reads
+        log.warning("confirm sound %s can't be played (%s); saying it instead", path, exc)
+        return None
+    mono = np.asarray(data.mean(axis=1), np.float32)
+    if mono.size == 0:
+        log.warning("confirm sound %s is empty; saying it instead", path)
+        return None
+    return resample(mono, int(rate), sr)
+
+
 class Speaker:
     """speak() queues text; a synth worker and a playback worker run in parallel
     so the next sentence is ready while the current one plays."""
@@ -71,6 +90,7 @@ class Speaker:
         echo_tail_ms: int,
         chimes: bool,
         pronounce: Pronouncer | None = None,
+        confirm_sound: str = "",
     ) -> None:
         self.kokoro = Kokoro(model, voices)
         self.pronounce = pronounce
@@ -78,6 +98,8 @@ class Speaker:
         self.io = io  # the voice layer: one engine for mic and speakers
         self.echo_tail = echo_tail_ms / 1000
         self.chimes = chimes
+        self.confirm_sound = confirm_sound  # config [confirm] sound: "" = off
+        self._sounds: dict[tuple[str, int], np.ndarray | None] = {}  # read once (a failure too)
         self.sr = 24000
         self._text: asyncio.Queue[tuple[int, _Item]] = asyncio.Queue()
         # (generation, samples, original wording or None for a tone, progress tag)
@@ -181,6 +203,22 @@ class Speaker:
             return
         freqs = {"wake": [660, 880], "ack": [880], "done": [880, 660], "error": [300, 220]}[kind]
         self._enqueue(_tone(freqs, self.sr))
+
+    def confirm_tone(self) -> bool:
+        """Queue the confirm sound (an action the user said yes to went through): through
+        the voice layer like a chime, so it plays on the output device with its delay, and
+        the mic treats it as our own sound. Separate from `chimes`. False when it's off or
+        can't be read (logged once): then the caller says its short line instead."""
+        if not self.confirm_sound:
+            return False
+        key = (self.confirm_sound, self.sr)
+        if key not in self._sounds:
+            self._sounds[key] = load_sound(self.confirm_sound, self.sr)
+        samples = self._sounds[key]
+        if samples is None:
+            return False
+        self._enqueue(samples)
+        return True
 
     def stop(self) -> None:
         with self._play_lock:

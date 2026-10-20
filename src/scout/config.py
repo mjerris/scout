@@ -573,9 +573,15 @@ class ConfirmConfig:
     # session is confirmed by your spoken yes in the room. typed = true also lets a session
     # send without asking aloud when you have already approved that exact message (or
     # call) in your own words in its chat: it passes approved: "typed", Scout logs that,
-    # sends, and says one short line ("Sent to Joao Santos."). Only those four tools,
+    # sends, and plays the sound below (or says "Sent to Joao Santos."). Only those four tools,
     # never from the phone or the room; without this, approved: "typed" still asks aloud.
     typed: bool = False
+    # Once an action you said yes to has gone through (a text, an email, a call, an
+    # event, a reminder...), Scout plays this sound instead of saying so ("Sent to Pat
+    # Doe."): one sound for all of them, through Scout's own speakers. It's played from
+    # where it is, never copied. "" = off: the short spoken line instead (also when the
+    # file is missing). A no or an error is still said.
+    sound: str = "/System/Library/Sounds/Glass.aiff"
 
 
 @dataclass

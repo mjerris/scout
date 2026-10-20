@@ -756,6 +756,14 @@ NOT_DESK: tuple[SharedTool, ...] = (
 
 BY_NAME = {t.name: t for t in (*SHARED, *NOT_DESK)}
 
+# Added to the result of a tool that asks, once it's done, when Scout played its confirm
+# sound for it in the room ([confirm] sound): the user has heard that it went.
+TONE_NOTE = (
+    "\n(Scout played its confirmation sound, so the user knows this went through: don't "
+    "say it was sent, added or done. Say nothing more about it unless there's something "
+    "else they need to know.)"
+)
+
 # The tools a Claude session may run on the user's typed approval in its own chat, when
 # config [confirm] typed is on (Assistant.run_shared_tool). Nothing else, ever.
 TYPED_TOOLS = ("mail_send", "slack_send", "message_send", "call_start")

@@ -235,5 +235,11 @@ enabled = true
 # Sends and calls for a Claude session (mail_send, slack_send, message_send, call_start)
 # are confirmed by your spoken yes in the room. typed = true lets a session skip that when
 # you already approved the exact message in its chat (it passes approved: "typed"): Scout
-# logs it, sends, and says "Sent to <who>." Never for other tools, the phone or the room.
+# logs it, sends, and plays the sound below. Never for other tools, the phone or the room.
 # typed = false
+# Once anything you said yes to has gone through (a text, an email, a call, an event, a
+# reminder...), Scout plays this one sound through its own speakers instead of saying
+# "Sent to Pat Doe.". It's played from where it is (never copied). "" = off: the short
+# spoken line instead, as also when the file is missing. A no or an error is still said.
+# On the phone the agent says just "Done.".
+# sound = "/System/Library/Sounds/Glass.aiff"

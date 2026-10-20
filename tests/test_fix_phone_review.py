@@ -73,7 +73,7 @@ def test_only_the_latest_prepared_action_can_be_confirmed(paired: Paired) -> Non
         "pending_action": "Add a reminder: call Sam, Friday at 3 PM?",
         "pending_code": _code(second),
     }
-    assert "isn't valid" in old and new == "Added reminder: call Sam."
+    assert "isn't valid" in old and new == "Added reminder: call Sam." + ps.DONE_NOTE
     ran = [c[1]["name"] for c in scout.calls if c[1].get("confirmed")]
     assert ran == ["note_delete"]  # the earlier, replaced action never ran
 

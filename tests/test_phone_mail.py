@@ -324,7 +324,11 @@ def test_the_agent_confirms_the_read_back_addresses_once(paired: tuple[Path, str
         return first, done, again
 
     first, done, again = asyncio.run(go())
-    assert "pat@acme.example" in first and done == "Sent to pat@acme.example." and "isn't valid" in again
+    assert (
+        "pat@acme.example" in first
+        and done == "Sent to pat@acme.example." + ps.DONE_NOTE
+        and "isn't valid" in again
+    )
     _, ran = scout.calls
     assert ran[1] == {"agent": "phone", "name": "mail_send", "args": resolved, "confirmed": True}
 

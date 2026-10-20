@@ -66,7 +66,8 @@ either one is enough for names in texts.)
   draft or the call the way `message_draft` and `call_prepare` do; the send and the
   call go only through `message_send` and `call_start`, with the same read-back and
   spoken yes as when Claude asks ("Send the text to Pat Doe? It says: I'm running
-  late."), then "Sent to Pat Doe." or "Okay, not sent." The text is kept as you said
+  late."), then the confirm sound (`[confirm] sound`; "Sent to Pat Doe." when it's
+  off or missing) or "Okay, not sent." The text is kept as you said
   it. Several people: "which one?". Left to Claude: a name nobody in Contacts has, a
   name and nothing to say ("text Pat"), more than a name after "call" ("call Pat
   tomorrow", "call Pat on her cell"), another app ("message Sam on Slack"), and words

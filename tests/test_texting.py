@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from test_routing import make, run
+from test_routing import TONE, make, run
 
 from scout import (
     brain,
@@ -511,8 +511,12 @@ def test_the_room_reads_the_text_back_and_sends_only_on_a_spoken_yes(texts: Send
     said = run(go("no"))
     assert said[:2] == ["Send the text to Pat Doe?", "It says: I'm running late."]
     assert said[-1] == "Okay, not sent." and texts.sent == []
-    said = run(go("yes"))
-    assert said[-1] == "Sent to Pat Doe." and texts.sent == [("+15550102000", "iMessage", "I'm running late")]
+    said = run(go("yes"))  # done: the confirm sound, not a spoken "Sent to Pat Doe."
+    assert (
+        said[-1] == TONE
+        and "Sent to Pat Doe." not in said
+        and texts.sent == [("+15550102000", "iMessage", "I'm running late")]
+    )
 
 
 def test_the_room_names_the_number_and_calls_only_on_a_spoken_yes(dial: Opens) -> None:
@@ -533,7 +537,7 @@ def test_the_room_names_the_number_and_calls_only_on_a_spoken_yes(dial: Opens) -
     assert said[0] == "Call Pat Doe at five five five, oh one oh, two oh oh oh, mobile?"
     assert said[-1] == "Okay, not calling." and dial.urls == []
     said = run(go("yes"))
-    assert said[-1] == "Calling Pat Doe." and dial.urls == ["tel:+15550102000"]
+    assert said[-1] == TONE and "Calling Pat Doe." not in said and dial.urls == ["tel:+15550102000"]
 
 
 def test_words_that_arent_people_never_reach_contacts(texts: Sends, dial: Opens) -> None:

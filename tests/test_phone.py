@@ -840,7 +840,7 @@ def test_an_action_is_prepared_then_done_once_with_its_code(paired: tuple[Path, 
             }
         }
     ]
-    assert done["response"] == "Added reminder: call Sam."
+    assert done["response"] == "Added reminder: call Sam." + ps.DONE_NOTE  # the agent says just "Done."
     assert "isn't valid" in again["response"]  # single use
     previewed, ran = scout.calls
     assert previewed[1] == {

@@ -149,6 +149,10 @@ STILL_GOING = {
     ),
     "mail_send": "That's still going, so it may have been sent. Tell the user; don't send it again.",
 }
+# What confirm_action adds once an action the caller said yes to is done: one word over
+# the call, as the confirm sound is one sound in the room (the read-back said the rest).
+# Not session_ask: its result says a reply is on its way.
+DONE_NOTE = '\n(It went through. Say just "Done." and nothing more about it.)'
 ACT_TIMEOUT_S = {"session_ask": 60.0}  # the send plus the wait for the reply (default 30 s)
 REPLY_FOLLOW_S = 600.0  # a call keeps waiting this long for a Claude session's reply
 TWO_STEPS = (
@@ -192,7 +196,7 @@ own words: Scout answers those on the Mac from its own records when it can. A to
 looking; tell the user you're checking, and the answer is sent to you when it's ready.
 Adding calendar events or reminders, completing reminders and deleting notes take two
 steps: the tool says what it would do; read that back, and only after the user clearly
-says yes, call confirm_action with its code. Saving a note and adding, finishing or
+says yes, call confirm_action with its code; once it's done, say just "Done.". Saving a note and adding, finishing or
 changing a task are done in one step (they're Scout's own lists): be sure what the user
 wants before calling them. A Slack message is slack_draft first, then slack_send, in the
 two steps like the others; a text is message_draft, then message_send, the same way. You
@@ -814,7 +818,10 @@ class PhoneAgent(AgentBase):
         )
         if r is None:
             return FunctionResult(STILL_GOING.get(name, MAYBE_DONE))
-        return FunctionResult(tool_text(r)).update_global_data(
+        text = tool_text(r)
+        if r.get("status") == "ok" and name != "session_ask":
+            text += DONE_NOTE
+        return FunctionResult(text).update_global_data(
             {"semantic_state": {"pending_action": None, "pending_code": None}}
         )
 

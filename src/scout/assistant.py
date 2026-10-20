@@ -229,7 +229,12 @@ class Assistant:
         self._phone_refs: list[str] = []  # ...and the phone's request's (asks run one at a time)
         self._turn_refs: list[str] = []  # records the room's Claude turn read about (its tools' results)
         server, names = build_server(
-            self.timers, self.relay, self.memory, self._turn_refs.extend, cfg.claude.always_load_tools
+            self.timers,
+            self.relay,
+            self.memory,
+            self._turn_refs.extend,
+            cfg.claude.always_load_tools,
+            on_done=self._tool_done,
         )
         # The user's own MCP servers (tools.toml): the room's session gets them by its rules.
         self.external = extmcp.External(cfg.claude.cwd, lambda: self.privacy.mode)
@@ -460,6 +465,35 @@ class Assistant:
     def chime(self, kind: str) -> None:
         if self._out["mini"]:
             self.speaker.chime(kind)
+
+    def _confirmed(self, line: str, out: dict[str, Any] | None = None) -> bool:
+        """An action the user said yes to went through: in the room the confirm sound
+        ([confirm] sound) instead of `line` ("Sent to Pat Doe."), and then only its
+        refs.Done rest; `line` itself when the sound is off or missing. A web page gets the
+        line as text. `out`: where (default: where the current turn's replies go). True
+        if the sound played."""
+        where = out or self._out
+        toned = False
+        if where["mini"]:
+            toned = self.speaker.confirm_tone()
+            rest = getattr(line, "rest", "") if toned else line
+            if rest:
+                self.speaker.speak(rest)
+        if where["client"]:
+            self.emit("say", text=line, to=where["client"])
+        if out is None:
+            self._turn_spoke = True
+            if not self._turn_answer_at:
+                self._turn_answer_at = time.monotonic()
+        return toned
+
+    def _tool_done(self, name: str) -> bool:
+        """The room's own Claude ran a tool that asks, and it went through (build_server
+        on_done): the confirm sound in the room, unless the turn answers a web page only
+        or was stopped. True if it played (its result then tells Claude)."""
+        if self._silence_turn or not self._out["mini"]:
+            return False
+        return bool(self.speaker.confirm_tone())
 
     def _reply(self, text: str, speak: bool, client: str | None) -> None:
         """Answer the person who just spoke (mic: the mini; web: their page)."""
@@ -1350,9 +1384,13 @@ class Assistant:
             log.info("stopped before the local answer was ready; not saying it")
         else:
             if said:
+                done = said if isinstance(said, refs.Done) else None  # a confirmed action went through
                 said = speech.speak_dates(said)  # "09/30/2026" -> "September 30th"
                 self._set_state("speaking")
-                self.say(said)
+                if done is not None:
+                    self._confirmed(refs.Done(said, rest=speech.speak_dates(done.rest)))
+                else:
+                    self.say(said)
                 if tier is not None:  # a repeat keeps what it repeats, refs and all
                     self._spoke("Scout", said, about, private, text)
                     self.last_private = private
@@ -1402,8 +1440,10 @@ class Assistant:
                 r, new = await asyncio.to_thread(b.add, rule, "told")
             except ToolError as exc:
                 return f"Sorry, {exc}."
-            said = "Okay, I'll keep that rule." if new else "That was a rule already; I'll keep it."
-            return refs.Spoken(said + b.over_cap_note(), [r.id])
+            note = b.over_cap_note()
+            if new:  # the confirm sound says it (and the note after it)
+                return refs.Done("Okay, I'll keep that rule." + note, [r.id], rest=note.strip())
+            return refs.Spoken("That was a rule already; I'll keep it." + note, [r.id])
         if behavior.is_listing(text):
             return await asyncio.to_thread(behavior.spoken_listing)
         if behavior.is_review(text):
@@ -1433,8 +1473,10 @@ class Assistant:
                 await asyncio.to_thread(b.add, c.rule, "from corrections", "", c.turns)
                 kept += 1
             await asyncio.to_thread(cands.resolve, c.id, bool(answer))
-        if kept and (out or self._out).get("mini"):
-            self.speaker.speak("Okay, I'll keep that." if kept == 1 else f"Okay, I'll keep those {kept}.")
+        where = out or self._out
+        if kept and where.get("mini"):
+            line = "Okay, I'll keep that." if kept == 1 else f"Okay, I'll keep those {kept}."
+            self._confirmed(line, {"mini": True, "client": None})
         return kept
 
     async def _review_rules(self, out: dict[str, Any] | None = None, monthly: bool = False) -> str:
@@ -2187,13 +2229,16 @@ class Assistant:
         try:
             said = shared_tools.recipient(name, args) if typed else ""  # before the draft is used up
             text = await run(args)
-            if typed:  # no question was asked aloud: say, briefly, that it went
+            if t.asks and agent != PHONE:  # done: the confirm sound in the room says so
                 owner = self.floor.owner()
-                line = f"Calling {said}." if name == "call_start" else f"Sent to {said}."
-                if owner in (None, agent):
+                # Typed approval asked nothing aloud: without the sound, the short line.
+                line = (f"Calling {said}." if name == "call_start" else f"Sent to {said}.") if typed else ""
+                if owner not in (None, agent):
+                    log.info("no confirm sound (%s has the floor) for %s", owner, name)
+                elif self.speaker.confirm_tone():
+                    text += shared_tools.TONE_NOTE
+                elif line:
                     self.speaker.speak(line)
-                else:
-                    log.info("not said (%s has the floor): %s", owner, line)
             return {"status": "ok", "text": text}
         except ToolError as exc:
             return {"status": "error", "error": str(exc)}

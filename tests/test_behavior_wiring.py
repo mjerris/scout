@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from test_phone import ADDRESS, AUTH, KEY, PUBLIC, FakeScout, _ai, uvars
-from test_routing import hear, make, run
+from test_routing import TONE, hear, make, run
 
 import scout.phone_service as ps
 from scout import behavior, brain, corrections, index, links, phone_devices, shared_tools
@@ -111,7 +111,7 @@ def test_from_now_on_reads_the_rule_back_and_keeps_it_on_yes() -> None:
 
     said = run(go())
     assert said[0] == "Rule: call you Mike. Keep it?"
-    assert said[-1].startswith("Okay, I'll keep that rule")
+    assert said[-1] == TONE  # kept: the confirm sound says so
     [r] = rules().rules()
     assert r.text == "Call me Mike" and r.origin == "told"
 

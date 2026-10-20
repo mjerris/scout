@@ -1128,10 +1128,12 @@ Act = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 async def _done(act: Act, tool: str, args: dict[str, Any], ok: str, no: str) -> str:
+    """`ok` once it's done (the room plays the confirm sound for it: refs.Done), `no` for
+    a no, the error said, or "" when nobody answered."""
     r = await act(tool, args)
     status = r.get("status")
     if status == "ok":
-        return ok
+        return _refs.Done(ok)
     if status == "declined":
         return no
     if status == "error":

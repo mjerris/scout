@@ -131,6 +131,7 @@ async def _amain(cfg: config_mod.Config) -> None:
         io,
         cfg.audio.echo_tail_ms,
         cfg.tts.chimes,
+        confirm_sound=cfg.confirm.sound,
     )
     speaker.start()
     messages_mac.HELPER.announce = speaker.speak  # "Got it" once Full Disk Access is on

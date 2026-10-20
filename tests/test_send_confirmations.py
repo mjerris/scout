@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 import pytest
-from test_routing import Rig, _shared, hear, make, run
+from test_routing import TONE, Rig, _shared, hear, make, run
 
 from scout import brain, shared_tools, speech
 from scout.config import Config
@@ -91,7 +91,7 @@ def test_a_yes_said_over_the_read_back_counts(monkeypatch: pytest.MonkeyPatch) -
         return await asyncio.wait_for(task, 2), r.spk.said, r.spk.stopped
 
     result, said, stopped = run(go())
-    assert result == {"status": "ok", "text": "done"} and len(ran) == 1
+    assert result == {"status": "ok", "text": "done" + shared_tools.TONE_NOTE} and len(ran) == 1
     assert said[0] == "From proj: Send email to sam@example.com, subject Bots?"
     assert said[1].startswith("It starts: Hey Joao")
     assert stopped >= 1  # the rest of the read-back isn't read once answered
@@ -193,9 +193,9 @@ def test_typed_approval_sends_without_the_read_back(monkeypatch: pytest.MonkeyPa
 
     with caplog.at_level("INFO"):
         result, said = run(go())
-    assert result == {"status": "ok", "text": "done"}
+    assert result == {"status": "ok", "text": "done" + shared_tools.TONE_NOTE}
     assert ran == [MAIL]  # the approval isn't passed on to the tool
-    assert said == ["Sent to sam@example.com."]
+    assert said == [TONE]  # no question was asked: the confirm sound says it went
     assert any("approved by typing" in m for m in caplog.messages)
 
 
@@ -214,13 +214,16 @@ def test_typed_approval_for_each_send_tool(
     who = line.removeprefix("Sent to ").removeprefix("Calling ").rstrip(".")
     monkeypatch.setattr(shared_tools, "recipient", lambda n, a: who)
 
-    async def go() -> tuple[dict[str, Any], list[str]]:
+    async def go(tone_ok: bool) -> tuple[dict[str, Any], list[str]]:
         r = make()
         _typed(r, True)
+        r.spk.tone_ok = tone_ok
         return await r.a.run_shared_tool("proj#42", name, {**args, "approved": "typed"}), r.spk.said
 
-    result, said = run(go())
-    assert result["status"] == "ok" and ran == [args] and said == [line]
+    result, said = run(go(True))
+    assert result["status"] == "ok" and ran == [args] and said == [TONE]
+    result, said = run(go(False))  # the confirm sound off or missing: the short line
+    assert result["status"] == "ok" and said == [line]
 
 
 def test_without_the_config_typed_approval_still_asks_by_voice(monkeypatch: pytest.MonkeyPatch) -> None:

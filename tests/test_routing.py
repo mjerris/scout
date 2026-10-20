@@ -25,6 +25,9 @@ from scout.tts import Speaker
 T = TypeVar("T")
 
 
+TONE = "(confirm tone)"  # what FakeSpeaker.said shows where the confirm sound played
+
+
 class FakeSpeaker:
     voice = "af_heart"
 
@@ -37,6 +40,12 @@ class FakeSpeaker:
         self.words: bool | None = None  # None: words whenever busy
         self.ducked = False
         self.ducks = 0
+        self.tone_ok = True  # False: the confirm sound is off or missing
+
+    def confirm_tone(self) -> bool:
+        if self.tone_ok:
+            self.said.append(TONE)
+        return self.tone_ok
 
     def duck(self, on: bool) -> None:
         self.ducked = on
@@ -731,7 +740,9 @@ def test_a_sessions_send_is_confirmed_by_voice_in_the_room(monkeypatch: pytest.M
         assert r.spk.said[0] == "From proj: Send email to sam@example.com, subject Lunch?"
         return result
 
-    assert run(go()) == {"status": "ok", "text": "done"}
+    from scout import shared_tools
+
+    assert run(go()) == {"status": "ok", "text": "done" + shared_tools.TONE_NOTE}  # the sound played
     assert ran == [SEND]
 
 

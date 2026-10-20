@@ -93,5 +93,7 @@ def test_a_promoted_action_runs_without_asking_for_other_sessions(monkeypatch: p
         return out, asked
 
     out, asked = run(go())
-    assert out == {"status": "ok", "text": "Added."} and asked == []
+    assert (
+        out == {"status": "ok", "text": "Added." + shared_tools.TONE_NOTE} and asked == []
+    )  # with the sound
     assert trust.default().log[-1]["how"] == "auto" and trust.default().log[-1]["by"] == "desk#1"

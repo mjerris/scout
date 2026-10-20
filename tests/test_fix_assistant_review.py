@@ -14,7 +14,7 @@ from test_routing import SEND, _answer, _shared, hear, make, run
 
 import scout.assistant as assistant_mod
 import scout.memory as memory_mod
-from scout import ledger, local_intents
+from scout import ledger, local_intents, shared_tools
 from scout.audio import Utterance
 from scout.gate import AudioStats
 from scout.mac import ToolError
@@ -125,7 +125,7 @@ def test_a_stopped_room_turn_does_not_decline_a_later_session_send(monkeypatch: 
         return await _answer(r, task, "yes"), r.spk.said
 
     result, said = run(go())
-    assert result == {"status": "ok", "text": "done"}
+    assert result == {"status": "ok", "text": "done" + shared_tools.TONE_NOTE}
     assert "From proj: Send email to sam@example.com, subject Lunch?" in said
     assert ran == [SEND]
 
@@ -155,7 +155,7 @@ def test_a_session_question_waits_for_the_floor_so_the_yes_is_not_misrouted(
     asked_over, a, asked_after, b = run(go())
     assert not asked_over
     assert a == {"status": "ok", "text": "yes"}
-    assert asked_after and b == {"status": "ok", "text": "done"}
+    assert asked_after and b == {"status": "ok", "text": "done" + shared_tools.TONE_NOTE}
     assert ran == [SEND]
 
 

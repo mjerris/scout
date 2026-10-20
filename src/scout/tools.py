@@ -17,7 +17,7 @@ from claude_agent_sdk.types import McpSdkServerConfig
 from . import mac, privacy, refs
 from .config import DATA
 from .memory import Memory, fact_id
-from .shared_tools import NOT_DESK, SHARED
+from .shared_tools import NOT_DESK, SHARED, TONE_NOTE
 
 log = logging.getLogger(__name__)
 
@@ -101,20 +101,26 @@ def build_server(
     memory: Memory | None = None,
     on_refs: Callable[[list[str]], None] | None = None,
     always_load: Collection[str] = (),
+    on_done: Callable[[str], bool] | None = None,
 ) -> tuple[McpSdkServerConfig, list[str]]:
     """The tool server. `on_refs` gets the record ids each tool result was about
     (refs.from_tool), so what the turn said can be linked to later. The `always_load`
-    tools are listed in the prompt from the start; the rest load through ToolSearch."""
+    tools are listed in the prompt from the start; the rest load through ToolSearch.
+    `on_done(name)`: a tool that asks (sends, adds...) went through; True when it played
+    the confirm sound, and then the result tells Claude so (shared_tools.TONE_NOTE)."""
 
     def wrap(
         fn: Callable[[dict[str, Any]], Awaitable[str]],
         name: str = "",
+        asks: bool = False,
     ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             try:
                 text = await fn(args)
                 if on_refs is not None and name and (got := refs.from_tool(name, args, text)):
                     on_refs(got)
+                if asks and on_done is not None and on_done(name):
+                    text += TONE_NOTE
                 return _ok(text)
             except mac.ToolError as exc:
                 return _err(str(exc))
@@ -207,11 +213,13 @@ def build_server(
     if memory is not None:
         tools += [tool(n, d, schema)(wrap(fn)) for n, d, schema, fn in memory_tools(memory)]
     # Mail and calendar: the same definitions the MCP server offers other sessions.
-    tools += [tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in SHARED]
+    tools += [tool(t.name, t.description, t.schema)(wrap(t.run, t.name, t.asks)) for t in SHARED]
     # The other sessions' tools too; not the phone's remember, forget and timer (the room's own above).
     own = {"remember", "forget", "recall", "phone_timer"}
     tools += [
-        tool(t.name, t.description, t.schema)(wrap(t.run, t.name)) for t in NOT_DESK if t.name not in own
+        tool(t.name, t.description, t.schema)(wrap(t.run, t.name, t.asks))
+        for t in NOT_DESK
+        if t.name not in own
     ]
     server = create_sdk_mcp_server(SERVER, tools=tools)
     mark_always_load(server, set(always_load) & {t.name for t in tools})
