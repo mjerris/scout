@@ -5,7 +5,11 @@ scout-memory's GitHub sync (github.loop), every PASS_EVERY_S; read-only, GET onl
 Commit emails: for each repo the sync tracks (state/github.json's repos), the commit list
 (`/repos/{o}/{r}/commits`), newest first, MAX_PAGES pages of 100 the first time, then only
 what came since the newest commit seen (its date, `since`; the commits at that date are
-remembered so none is counted twice). Each commit gives (author login, commit author email)
+remembered so none is counted twice). The history before the first pass's pages is read
+back a page at a time with what's left of a pass's requests (`until` the oldest date seen,
+the commits at that date remembered; a page all at one date moves on by page number), its
+place kept page by page, so a rate limit or a restart resumes there and nothing is counted
+twice; `old.done` once a short page reaches the first commit. Each commit gives (author login, commit author email)
 and (committer login, committer email). Skipped: noreply addresses
 (`*@users.noreply.github.com`, `noreply@github.com`), bots (`[bot]`, type Bot, web-flow,
 github-actions...), automation addresses (ci@, build@, deploy@..., and people.automated's),
@@ -47,6 +51,9 @@ MAX_REQUESTS = 60  # a pass, commits and profiles together (304s included)
 MAX_PAGES = 5  # of commits, per repo per pass
 PER_PAGE = 100
 MIN_COMMITS = 2  # an address that isn't a login's most used needs this many commits
+# 2: each repo keeps its place in the older history ("old"). The counts from before were
+# read without one, so they're read again once (not added to: that would count twice).
+VERSION = 2
 
 _NOREPLY = re.compile(r"(?:@users\.noreply\.github\.com|^noreply@github\.com|@noreply\.github\.com)$", re.I)
 _AUTO_LOGIN = re.compile(
@@ -173,10 +180,13 @@ def entries(st: dict[str, Any], ctx: people.Ctx) -> list[dict[str, Any]]:
 
 def _commits(get: github.Fetch, repo: str, rs: dict[str, Any], budget: int) -> tuple[list[Any], int]:
     """The repo's commits since the newest seen (all of the first MAX_PAGES pages the
-    first time), and the requests it took."""
+    first time), and the requests it took. The first time, it also sets where the older
+    history starts (rs["old"]), or that there's none."""
+    first = not rs.get("since")
     path = f"/repos/{repo}/commits?per_page={PER_PAGE}" + (f"&since={rs['since']}" if rs.get("since") else "")
     out: list[Any] = []
     asked = 0
+    ended = False
     for page in range(1, MAX_PAGES + 1):
         if asked >= budget:
             break
@@ -186,15 +196,64 @@ def _commits(get: github.Fetch, repo: str, rs: dict[str, Any], budget: int) -> t
             break
         out += r.data
         if len(r.data) < PER_PAGE:
+            ended = True
             break
+    if first and out:
+        oldest = _oldest(out)
+        rs["old"] = (
+            {"done": True} if ended or oldest is None else {"until": oldest[0], "edge": oldest[1], "page": 1}
+        )
     return out, asked
+
+
+def _dated(commits: list[Any]) -> list[tuple[str, str]]:
+    """(committer date, sha) of each commit that has a date."""
+    out = [(str(((c.get("commit") or {}).get("committer") or {}).get("date") or ""), str(c.get("sha") or ""))
+           for c in commits if isinstance(c, dict)]  # fmt: skip
+    return [(d, sha) for d, sha in out if d]
+
+
+def _oldest(commits: list[Any]) -> tuple[str, list[str]] | None:
+    """The oldest committer date in these commits, with the commits at it."""
+    dated = _dated(commits)
+    if not dated:
+        return None
+    at = min(dated, key=lambda x: _ts(x[0]))[0]
+    return at, [sha for d, sha in dated if _ts(d) == _ts(at)]
+
+
+def _older(get: github.Fetch, repo: str, rs: dict[str, Any], st: dict[str, Any], ctx: people.Ctx) -> int:
+    """One page of the repo's history before what's been read (rs["old"]): counted, and the
+    place moved past it. Returns the commits counted."""
+    old = rs["old"]
+    page = int(old.get("page") or 1)
+    r = get(
+        f"/repos/{repo}/commits?per_page={PER_PAGE}&until={old['until']}"
+        + (f"&page={page}" if page > 1 else ""),
+        "",
+    )
+    if r.status != 200 or not isinstance(r.data, list):
+        rs["old"] = {"done": True}  # gone, or no longer readable
+        return 0
+    edge = set(old.get("edge") or [])
+    n = tally(st, [c for c in r.data if isinstance(c, dict) and c.get("sha") not in edge], ctx)
+    oldest = _oldest(r.data)
+    if len(r.data) < PER_PAGE or oldest is None:
+        rs["old"] = {"done": True}
+    elif _ts(oldest[0]) < _ts(old["until"]):
+        rs["old"] = {"until": oldest[0], "edge": oldest[1], "page": 1}
+    else:  # a whole page at the one date: the next page of it
+        rs["old"] = {
+            "until": old["until"],
+            "edge": list(dict.fromkeys([*edge, *oldest[1]])),
+            "page": page + 1,
+        }
+    return n
 
 
 def _advance(rs: dict[str, Any], commits: list[Any]) -> None:
     """The newest commit date seen (the next `since`), with the commits at that date."""
-    dated = [(str(((c.get("commit") or {}).get("committer") or {}).get("date") or ""), str(c.get("sha") or ""))
-             for c in commits if isinstance(c, dict)]  # fmt: skip
-    dated = [(d, s) for d, s in dated if d]
+    dated = _dated(commits)
     if not dated:
         return
     newest = max(dated, key=lambda x: _ts(x[0]))[0]
@@ -258,6 +317,10 @@ def run_pass(
         return {}
     if now < float(st.get("limited_until") or 0):
         return {}
+    if st.get("v") != VERSION:
+        for k in ("emails", "names", "repos"):
+            st.pop(k, None)
+        st["v"] = VERSION
     ctx: people.Ctx = ix.people_ctx()
     repos = sorted(
         r
@@ -282,6 +345,14 @@ def run_pass(
             lg for lg in seen if not ctx.is_me(f"github:{lg}") and lg not in set(st.get("me_logins") or [])
         }
         asked += _profiles(get, sorted(seen), st, now, MAX_REQUESTS - asked)
+        # What's left goes to the older history, a page of each repo in turn.
+        while asked < MAX_REQUESTS:
+            behind = [r for r in repos if "until" in (st["repos"].get(r) or {}).get("old", {})]
+            if not behind:
+                break
+            for repo in behind[: MAX_REQUESTS - asked]:
+                counted += _older(get, repo, st["repos"][repo], st, ctx)
+                asked += 1
     except github.RateLimited as exc:
         st["limited_until"] = exc.reset
         log.info(

@@ -26,7 +26,8 @@ gives each user's profile email, Contacts the contact an address belongs to. The
 merges the records those join into one (`Index.put_people`): the contact's
 (`person:<contact id>`) when there is one, else the Slack user's, with every link moved
 to it. A backfill (`Index.backfill_people`, run by scout-memory at startup) links what
-was stored before.
+was stored before. A record found by a name alone is linked again whenever who goes by that
+name changes (Index.relink_people), so it never waits for another backfill.
 
 A GitHub login joins its person by an address or account, never a name
 (github_people.py: commit emails and the public profile; slack_github: a Slack profile

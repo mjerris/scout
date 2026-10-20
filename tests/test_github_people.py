@@ -366,3 +366,145 @@ def test_claudes_context_asks_about_a_same_name_person_the_request_names(
     got = asyncio.run(go("what did Brian West say about the release"))
     assert "  - Is Brian West on GitHub the same as briank?" in got
     assert "Is Brian" not in asyncio.run(go("what's the weather"))
+
+
+# --- 1b. the history before the first pass's pages ------------------------------------------------
+
+
+class History:
+    """A repo's commit list as GitHub serves it: newest first, `since` and `until` (both
+    inclusive), pages of `per_page`. Commits 640 to 790 share one date (a rebase), more
+    than a page. `limit_at`: the request (by count) answered with a rate limit."""
+
+    def __init__(self, n: int, limit_at: int = 0, slip_in: bool = False) -> None:
+        import datetime as dt
+
+        base = dt.datetime(2026, 10, 10, 12, tzinfo=dt.UTC)
+        self.commits: list[dict[str, Any]] = []
+        for i in range(n):
+            at = base - dt.timedelta(minutes=640 if 640 <= i <= 790 else i)
+            login = f"dev{i % 2}"
+            ident = {"name": f"Dev {i % 2}", "email": f"{login}@acme.example",
+                     "date": at.strftime("%Y-%m-%dT%H:%M:%SZ")}  # fmt: skip
+            self.commits.append({"sha": f"c{i}", "commit": {"author": ident, "committer": ident},
+                                 "author": {"login": login, "type": "User"},
+                                 "committer": {"login": login, "type": "User"}})  # fmt: skip
+        self.asked: list[str] = []
+        self.limit_at = limit_at
+        self.slip_in = slip_in  # a commit at the shared date pushed while it's being read
+        self.empty = 0  # pages asked for that had nothing
+
+    def __call__(self, path: str, etag: str = "") -> github.Response:
+        from urllib.parse import parse_qs, urlsplit
+
+        self.asked.append(path)
+        if self.limit_at and len(self.asked) == self.limit_at:
+            raise github.RateLimited(NOW + 1800)
+        if not path.startswith("/repos/o/api/commits"):
+            return github.Response(404, None, "")
+        q = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+        cs = self.commits
+        if "since" in q:
+            cs = [
+                c
+                for c in cs
+                if github_people._ts(c["commit"]["committer"]["date"]) >= github_people._ts(q["since"])
+            ]
+        if "until" in q:
+            cs = [
+                c
+                for c in cs
+                if github_people._ts(c["commit"]["committer"]["date"]) <= github_people._ts(q["until"])
+            ]
+        per, page = int(q["per_page"]), int(q.get("page", 1))
+        if self.slip_in and "until" in q and page == 2:
+            self.slip_in = False
+            late = json.loads(json.dumps(self.commits[640]))
+            late["sha"] = "late"
+            self.commits.insert(640, late)
+            return self(path, etag)
+        got = cs[(page - 1) * per : page * per]
+        self.empty += not got
+        return github.Response(200, got, "")
+
+
+def counted(state: Path) -> int:
+    st = json.loads(state.read_text())
+    return sum(int(n) for logins in st["emails"].values() for n, _ in logins.values())
+
+
+def test_older_history_is_read_a_page_at_a_time_after_the_first_pass(
+    store: index.Index, state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github_people, "MAX_REQUESTS", 8)
+    gh, fake = tracked(state), History(1250)
+    got = github_people.run_pass(store, fake, state, gh, now=NOW)
+    # The newest five pages, the two logins' profiles, then one page further back (from
+    # the oldest commit's date: the commit at it isn't counted again).
+    assert got["commits"] == 599 and len(fake.asked) == 8
+    assert "&until=" in fake.asked[-1] and counted(state) == 599
+    t = NOW
+    while "done" not in json.loads(state.read_text())["repos"]["o/api"]["old"]:
+        t += 7 * 3600
+        github_people.run_pass(store, fake, state, gh, now=t)
+    # Every commit counted once: the ones at a shared date across pages too. The last
+    # page was short, which ended it (no page asked for past the first commit).
+    assert counted(state) == 1250 and fake.empty == 0
+    # Done: later passes ask only for what's new.
+    fake.asked.clear()
+    github_people.run_pass(store, fake, state, gh, now=t + 7 * 3600)
+    assert all("until=" not in p for p in fake.asked) and counted(state) == 1250
+
+
+def test_a_rate_limit_keeps_the_place_in_the_older_history(
+    store: index.Index, state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github_people, "MAX_REQUESTS", 8)
+    gh = tracked(state)
+    github_people.run_pass(store, History(1250), state, gh, now=NOW)
+    fake = History(1250, limit_at=4)  # what's new, two older pages, then the limit
+    github_people.run_pass(store, fake, state, gh, now=NOW + 7 * 3600)
+    st = json.loads(state.read_text())
+    assert st["limited_until"] == NOW + 1800 and 599 < counted(state) < 1250
+    assert "until" in st["repos"]["o/api"]["old"]  # the place after the second page
+    assert github_people.run_pass(store, fake, state, gh, now=NOW + 7.1 * 3600) == {}  # waits for the reset
+    t = NOW + 7 * 3600
+    while "done" not in json.loads(state.read_text())["repos"]["o/api"]["old"]:
+        t += 7 * 3600
+        github_people.run_pass(store, History(1250), state, gh, now=t)
+    assert counted(state) == 1250
+
+
+def test_counts_from_before_the_history_was_kept_are_read_again_once(store: index.Index, state: Path) -> None:
+    gh = tracked(state)
+    # A pass from before the place in the older history was kept: 500 counted, no place.
+    old = History(1250)
+    st: dict[str, Any] = {}
+    github_people.tally(st, old.commits[:500], CTX)
+    st["repos"] = {"o/api": {"since": old.commits[0]["commit"]["committer"]["date"], "edge": ["c0"]}}
+    st["users"] = {"dev0": {"name": "", "email": "", "etag": "", "checked": NOW}}
+    st["at"] = NOW - 7 * 3600
+    state.write_text(json.dumps(st))
+    t = NOW
+    github_people.run_pass(store, old, state, gh, now=t)
+    while "done" not in json.loads(state.read_text())["repos"]["o/api"]["old"]:
+        t += 7 * 3600
+        github_people.run_pass(store, old, state, gh, now=t)
+    st = json.loads(state.read_text())
+    assert counted(state) == 1250 and st["users"]["dev0"]["checked"] == NOW  # profiles kept
+
+
+def test_a_commit_pushed_into_a_shared_date_while_it_is_read_is_not_counted_twice(
+    store: index.Index, state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(github_people, "MAX_REQUESTS", 8)
+    gh, fake = tracked(state), History(1250, slip_in=True)
+    t = NOW
+    github_people.run_pass(store, fake, state, gh, now=t)
+    while "done" not in json.loads(state.read_text())["repos"]["o/api"]["old"]:
+        t += 7 * 3600
+        github_people.run_pass(store, fake, state, gh, now=t)
+    assert not fake.slip_in  # it was pushed: the next page starts one commit earlier
+    # The first page's last commit, seen again, isn't counted again. (The pushed one lands
+    # among the commits already read, so it isn't read: an old-dated push is the one gap.)
+    assert counted(state) == 1250

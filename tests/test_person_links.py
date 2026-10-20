@@ -301,3 +301,70 @@ def test_the_backfills_progress_says_which_pass(
     progress = [m for m in said if " of 5 records," in m]
     assert progress[0].startswith("people: backfill pass 1: 2 of 5 records")
     assert any(m.startswith("people: backfill pass 2: 2 of 5 records") for m in progress)
+
+
+def test_a_name_only_record_is_linked_when_someone_comes_to_go_by_that_name(store: index.Index) -> None:
+    # Stored before anyone went by "Pat Doe": nobody to link.
+    meeting(store, "n1", [{"name": "Pat Doe"}, {"name": "Lee Park"}])
+    assert to_people(store, "granola:n1") == {}
+    # Pat's first mail makes her a person by that name: the meeting catches up, no backfill.
+    store.put("mail:1", "mail", "Hi", "x", "Pat Doe <pat@acme.example>", NOW)
+    assert to_people(store, "granola:n1") == {"person:email:pat@acme.example": "with"}
+    # A second Pat Doe: the name is no longer one person's, so it links neither.
+    store.put("mail:2", "mail", "Hi", "x", "Pat Doe <pat@other.example>", NOW)
+    assert to_people(store, "granola:n1") == {}
+    # They turn out to be one person (one contact): linked again, to the merged record.
+    store.put_people(
+        people.build({"pat@acme.example": {"id": "c1", "name": "Pat Doe", "emails": ["pat@other.example"]}})
+    )
+    assert to_people(store, "granola:n1") == {"person:c1": "with"}
+    # A Slack user's directory names reach old Slack records stored with names only.
+    store.put("slack:C5:1.0", "slack", "#general", "leep: hi", "leep", NOW, {"channel": "C5"})
+    assert to_people(store, "slack:C5:1.0") == {}
+    store.put("slack:C5:2.0", "slack", "#general", "x", "x", NOW, {"channel": "C5", "lines": [["U4", []]]})
+    store.put_people(
+        people.build({}, [{"id": "U4", "profile": {"display_name": "leep", "real_name": "Lee Park"}}])
+    )
+    assert to_people(store, "slack:C5:1.0") == {"person:slack:U4": "from"}
+    assert to_people(store, "granola:n1") == {"person:c1": "with", "person:slack:U4": "with"}
+    # A deleted record leaves nothing to relink.
+    store.delete("granola:n1")
+    with store._lock:
+        assert not store._conn.execute("SELECT 1 FROM name_refs WHERE src = 'granola:n1'").fetchall()
+
+
+def test_the_backfill_runs_once_more_to_note_the_names_records_stored_before_show(
+    store: index.Index,
+) -> None:
+    meeting(store, "n1", [{"name": "Pat Doe"}])
+    while not store.backfill_people()["done"]:
+        pass
+    # A store from before name_refs: its backfill done at version 1, no names noted.
+    with store._lock:
+        store._conn.execute("DELETE FROM name_refs")
+        store._conn.execute(
+            "UPDATE settings SET value = json_set(value, '$.v', 1) WHERE key = 'people_backfill'"
+        )
+    assert not store.backfill_people(0)["done"]  # a new version: it runs again
+    while not store.backfill_people()["done"]:
+        pass
+    store.put("mail:1", "mail", "Hi", "x", "Pat Doe <pat@acme.example>", NOW)
+    assert to_people(store, "granola:n1") == {"person:email:pat@acme.example": "with"}
+
+
+def test_a_merge_into_a_record_that_keeps_its_id_relinks_the_names_it_settles(store: index.Index) -> None:
+    store.put("mail:1", "mail", "Hi", "x", "Pat Doe <pat@acme.example>", NOW)
+    store.put("mail:2", "mail", "Hi", "x", "Pat Doe <pat@other.example>", NOW)
+    meeting(store, "n1", [{"name": "Pat Doe"}])
+    assert to_people(store, "granola:n1") == {}  # two people go by the name
+    # The two addresses turn out to be one person's (not a contact): the first record stays.
+    store.put_people([{"contact": "", "emails": ["pat@acme.example", "pat@other.example"]}], complete=False)
+    assert to_people(store, "granola:n1") == {"person:email:pat@acme.example": "with"}
+
+
+def test_a_name_its_own_record_makes_ambiguous_links_nobody_by_it(store: index.Index) -> None:
+    store.put("mail:1", "mail", "Hi", "x", "Pat Doe <pat@acme.example>", NOW)
+    # One Pat Doe by name, another by an address seen for the first time: the name is two
+    # people's once this meeting is linked, so it finds neither.
+    meeting(store, "n1", [{"name": "Pat Doe"}, {"name": "Pat Doe", "email": "pat@other.example"}])
+    assert to_people(store, "granola:n1") == {"person:email:pat@other.example": "with"}

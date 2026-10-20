@@ -119,18 +119,19 @@ def test_the_store_joins_a_contact_to_what_is_theirs_and_keeps_it_current(store:
     assert store.people_candidates() == ["pat@acme.example", "pat@home.example", "pat@elsewhere.example",
                                          "me@x.example", "pat.doe@other.example"]  # fmt: skip
     got = store.put_people(people.build(FOUND, SLACK))
-    assert got == {"people": 2, "removed": 0, "links": 3, "merged": 1}
+    assert got == {"people": 2, "removed": 0, "links": 6, "merged": 1}
     # Both of Pat's addresses: their mail and the meeting that lists one. Not the mail
-    # from another address under Pat's name, nor the other Pat Doe's meeting.
-    assert theirs(store, "person:c1") == {"mail:1", "mail:2", "granola:n1"}
-    # Slack messages stored by name only (before Slack kept ids) join at the backfill.
-    relink(store)
+    # from another address under Pat's name, nor the other Pat Doe's meeting. Slack
+    # messages stored by name only (before Slack kept ids) join as soon as Slack's
+    # directory gives the name to one person, without a backfill.
     assert theirs(store, "person:c1") == {"mail:1", "mail:2", "granola:n1", "slack:C1:1.0"}
     assert theirs(store, "person:c3") == {"slack:C1:2.0", "granola:n2"}  # the one Sam Roe
     # A meeting without addresses names "Pat Doe", whom two people go by: nobody's.
     assert "granola:n2" not in theirs(store, "person:c1")
+    relink(store)  # the backfill run again finds nothing more
+    assert theirs(store, "person:c1") == {"mail:1", "mail:2", "granola:n1", "slack:C1:1.0"}
     again = store.put_people(people.build(FOUND, SLACK))  # idempotent
-    assert again == {**got, "links": 6, "merged": 0} and theirs(store, "person:c1") == {
+    assert again == {**got, "merged": 0} and theirs(store, "person:c1") == {
         "mail:1",
         "mail:2",
         "granola:n1",
@@ -249,7 +250,7 @@ def test_the_apps_pass_never_asks_and_counts_only(
     monkeypatch.setattr(people, "_resolve", resolve)
     monkeypatch.setattr(people, "_slack_users", slack_users)
     got = asyncio.run(people.refresh(store))
-    assert got == {"emails": 7, "people": 2, "removed": 0, "links": 3, "merged": 1}
+    assert got == {"emails": 7, "people": 2, "removed": 0, "links": 6, "merged": 1}
     assert "other@corp.example" in asked[0]  # Slack's addresses are asked about too
 
     async def none() -> tuple[None, dict[str, str]]:
@@ -292,7 +293,7 @@ def test_people_over_the_memory_service(tmp_path: Any) -> None:
         try:
             assert "pat@acme.example" in await asyncio.to_thread(store.people_candidates, 10)
             got = await asyncio.to_thread(store.put_people, people.build(FOUND, SLACK), True)
-            assert got == {"people": 2, "removed": 0, "links": 3, "merged": 1}
+            assert got == {"people": 2, "removed": 0, "links": 6, "merged": 1}
             named = await asyncio.to_thread(store.people_named, "Pat Doe")
             assert named[0]["id"] == "person:c1"
             hits = await asyncio.to_thread(
