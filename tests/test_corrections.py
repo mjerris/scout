@@ -112,7 +112,7 @@ def test_the_pass_drafts_a_rule_with_the_turns_it_came_from(tmp_path: Path) -> N
     assert corrections.offer_text(got[0]) == (
         "Twice yesterday you corrected how I read ticket numbers. Should I always read ticket numbers digit by digit?"
     )
-    assert [c.rule for c in cands.pending()] == ["Always read ticket numbers digit by digit"]
+    assert [c.rule for c in cands.pending(DAY)] == ["Always read ticket numbers digit by digit"]
     assert cands.last_pass() == DAY.isoformat()
 
 
@@ -140,7 +140,7 @@ def test_a_declined_or_kept_rule_is_not_offered_again(tmp_path: Path) -> None:
     rules = behavior.Behavior(tmp_path / "b.md", seed=False)
     first = run(corrections.nightly(FakeModel(out), DAY, tmp_path, cands=cands, rules=rules))
     cands.resolve(first[0].id, accepted=False)
-    assert cands.pending() == []
+    assert cands.pending(DAY) == []
     again = run(corrections.nightly(FakeModel(out), DAY, tmp_path, cands=cands, rules=rules))
     assert again == []  # declined: never again
     rules.add("Call me Mike")
