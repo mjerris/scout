@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import functools
 import logging
 import re
@@ -35,6 +36,7 @@ SPLIT_OVER = 60  # sentences longer than this are split
 SPLIT_MIN = 40  # ...at a clause break at least this far in
 _CLAUSE = re.compile(r"(?:,|\s[-\u2013\u2014])\s+(?=\S)")  # a comma, or a spaced dash
 CLAUSE_PAUSE_S = 0.1  # the pause Kokoro itself puts at a comma between batches
+HOLD_MAX_S = 20.0  # longest a hold() keeps queued audio waiting
 
 
 def split_first(sentence: str) -> list[str]:
@@ -92,6 +94,8 @@ class Speaker:
         self._last_end = 0.0
         self._idle = asyncio.Event()
         self._idle.set()
+        self._open = asyncio.Event()  # cleared by hold(): queued audio waits
+        self._open.set()
         self._synth_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._tasks: list[asyncio.Task[Any]] = []
         # [start, end, text] per sentence actually played; end is inf while playing.
@@ -189,6 +193,15 @@ class Speaker:
             self.io.stop_playback()
         self.duck(False)
 
+    def hold(self, on: bool) -> None:
+        """Keep audio queued, not playing, while something hogs the GIL: the voice layer's
+        callback is Python, and loading the local model starved it (heard live as stuttering
+        speech at startup: the audio thread waited on the GIL ~45% of the time)."""
+        if on:
+            self._open.clear()
+        else:
+            self._open.set()
+
     DUCK_GAIN = 0.2  # about -14 dB: quiet enough to talk over, loud enough to resume
 
     def duck(self, on: bool) -> None:
@@ -265,6 +278,9 @@ class Speaker:
         ahead: asyncio.Future[bool] | None = None  # when the piece before this one has gone out
         while True:
             gen, samples, text, tag = await self._audio.get()
+            if not self._open.is_set():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._open.wait(), HOLD_MAX_S)
             if tag is not None and ahead is not None:
                 # A progress line isn't queued ahead: real speech may still overtake it.
                 await asyncio.wait([ahead])

@@ -1109,20 +1109,20 @@ class Assistant:
             return
         onset = time.monotonic()
         self._barge_pending = onset
-        # Before the canceller has adapted, only a stop interrupts. It still ducks: on the
-        # TV the canceller often never got past 12 dB (most onsets over two weeks were held),
-        # and a "stop" said over full-volume playback was heard as "Let's go." (heard live).
+        # Before the canceller has adapted, only a stop interrupts (on the TV it often never
+        # got past 12 dB: most onsets over two weeks were held, a stop included). It doesn't
+        # duck then: our own voice leaking through set it off three times in two restarts,
+        # dropping the reply to 20% for 1-3 s (heard live as stuttering).
         self._barge_strict = not self.echo_settled()
-        duck = getattr(self.speaker, "duck", None)
-        if duck is not None:
-            duck(True)
         if self._barge_strict:
             log.info(
-                "barge-in?: playback lowered; the echo canceller is still adapting (%s), "
-                "so only a stop counts",
+                "barge-in?: the echo canceller is still adapting (%s), so only a stop counts",
                 self._echo_note(),
             )
         else:
+            duck = getattr(self.speaker, "duck", None)
+            if duck is not None:
+                duck(True)
             log.info("barge-in?: playback lowered until the words are heard")
         asyncio.get_running_loop().call_later(BARGE_WAIT_S, self._barge_expire, onset)
 
@@ -1678,11 +1678,17 @@ class Assistant:
         model = tier1.LocalModel(name, extra=self.cfg.claude.local_recall)
         model.recall_floor = self.cfg.claude.recall_min_similarity
         model.rewrite, model.said = self.cfg.claude.local_rewrite, self.said  # follow-ups (followup.py)
+        hold = getattr(self.speaker, "hold", None)
+        if hold is not None:
+            hold(True)  # loading holds the GIL for seconds at a time: speech would stutter
         try:
             await model.load()
         except Exception as exc:
             log.warning("tier 1 model %s unavailable (%s); run scripts/fetch-models.sh", name, exc)
             return
+        finally:
+            if hold is not None:
+                hold(False)
         self.tier1 = model
         self.privacy.summaries.model = model
         log.info("tier 1 ready: %s", name)

@@ -570,6 +570,8 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
         spk._in_flight = 0
         spk._last_end = 0.0
         spk._idle = asyncio.Event()
+        spk._open = asyncio.Event()
+        spk._open.set()
         spk._idle.set()
         spk._played = deque(maxlen=10)
         spk._play_lock = __import__("threading").Lock()
@@ -644,6 +646,8 @@ def test_the_next_sentence_is_queued_while_the_tv_is_still_playing_this_one() ->
         spk._in_flight = 0
         spk._last_end = 0.0
         spk._idle = asyncio.Event()
+        spk._open = asyncio.Event()
+        spk._open.set()
         spk._played = deque(maxlen=10)
         spk._play_lock = __import__("threading").Lock()
         spk.consecutive_failures = 0
@@ -666,6 +670,41 @@ def test_the_next_sentence_is_queued_while_the_tv_is_still_playing_this_one() ->
     starts = [e[0] for e in spk._played]
     assert 0.04 < starts[1] - starts[0] < 0.1  # a queued sentence starts when the one before went out
     assert all(e[1] != float("inf") for e in spk._played)
+
+
+def test_held_speech_waits_until_the_hold_is_released() -> None:
+    """Loading the local model starves the audio callback of the GIL: speech waits it out."""
+    import numpy as np
+
+    async def go() -> tuple[int, int, bool]:
+        io = DelayedIO(out_s=0.01, delay_s=0.01)
+        spk = Speaker.__new__(Speaker)
+        spk.io = cast("AudioIO", io)
+        spk.sr = 24000
+        spk._audio = asyncio.Queue()
+        spk._gen = spk._pending = spk._speech = spk._progress = spk._in_flight = 0
+        spk._kinds = deque()
+        spk._playing = False
+        spk._last_end = 0.0
+        spk._idle = asyncio.Event()
+        spk._open = asyncio.Event()
+        spk._open.set()
+        spk._played = deque(maxlen=10)
+        spk._play_lock = __import__("threading").Lock()
+        spk.consecutive_failures = 0
+        task = asyncio.create_task(spk._play_loop())
+        spk.hold(True)
+        spk._pending, spk._speech = 1, 1
+        spk._kinds.append(True)
+        spk._audio.put_nowait((0, np.zeros(240, np.float32), "Good morning.", None))
+        await asyncio.sleep(0.05)
+        held = len(io.calls)
+        spk.hold(False)
+        await asyncio.wait_for(spk._idle.wait(), 2)
+        task.cancel()
+        return held, len(io.calls), spk._open.is_set()
+
+    assert run(go()) == (0, 1, True)
 
 
 def test_barge_in_over_speech_that_answered_nothing_opens_no_follow_up() -> None:
@@ -746,13 +785,13 @@ async def _talk_over(stats: dict[str, Any], text: str) -> tuple[int, int, bool]:
 @pytest.mark.parametrize(("stats", "stops"), [(s, False) for s in UNSETTLED] + [(s, True) for s in SETTLED])
 def test_before_the_echo_canceller_adapts_only_a_stop_barges_in(stats: dict[str, Any], stops: bool) -> None:
     ducks, stopped, ducked = run(_talk_over(stats, "wait, actually make it Saturday"))
-    assert ducks == 1 and (stopped >= 1) is stops and not ducked
+    assert ducks == int(stops) and (stopped >= 1) is stops and not ducked
 
 
 @pytest.mark.parametrize("stats", UNSETTLED + SETTLED)
 def test_stop_said_over_a_reply_stops_it_however_adapted_the_canceller_is(stats: dict[str, Any]) -> None:
     ducks, stopped, _ = run(_talk_over(stats, "Stop."))
-    assert ducks == 1 and stopped >= 1
+    assert ducks == int(stats in SETTLED) and stopped >= 1
 
 
 def test_a_bare_stop_over_a_reply_needs_no_wake_word() -> None:
