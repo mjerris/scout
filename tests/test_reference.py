@@ -7,6 +7,7 @@ reads the archives; here a fake one answers its API from the same pages
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import socket
@@ -17,7 +18,7 @@ from typing import Any
 
 import pytest
 from test_web import token_file  # noqa: F401 (the fixture)
-from zim_fixtures import BOOKS, FakeKiwix
+from zim_fixtures import BOOKS, Book, FakeKiwix
 from zim_fixtures import library as build_library
 
 from scout import (
@@ -161,6 +162,142 @@ def test_search_one_book_and_a_path_needing_quoting(lib: reference.Library) -> N
     assert refs.clean([mercury.ref]) == (mercury.ref,)  # a valid record id
     with pytest.raises(ToolError, match="no book"):
         lib.search("pump", book="nope")
+
+
+def page(title: str, text: str) -> str:
+    return f"<html><body><h1>{title}</h1><p>{text}</p></body></html>"
+
+
+def qa_book(file: str, title: str, pages: dict[str, tuple[str, str]], **kw: Any) -> Book:
+    """A book of {path: (title, text)} pages."""
+    return Book(file, title, [(p, t, page(t, x), "text/html") for p, (t, x) in pages.items()], **kw)
+
+
+@contextlib.contextmanager
+def serve(tmp_path: Path, *books: Book) -> Iterator[reference.Library]:
+    """A Library over `books`, served by a fake kiwix-serve (the folder holds only ZIM magic)."""
+    folder = tmp_path / "zims"
+    folder.mkdir()
+    for b in books:
+        (folder / b.file).write_bytes(reference.ZIM_MAGIC)
+    EXE.parent.mkdir(parents=True, exist_ok=True)
+    EXE.touch()
+    with FakeKiwix(list(books)) as fake:
+        lib = reference.Library(folder, port=fake.port, exe=EXE)
+        lib.fake = fake  # type: ignore[attr-defined]
+        yield lib
+
+
+@pytest.fixture
+def mixed(tmp_path: Path) -> Iterator[reference.Library]:
+    """An encyclopedia, two Q&A sites (one with a tag page and a question about the same
+    thing), a book with only a title index, and a multi-language book."""
+    with serve(
+        tmp_path,
+        qa_book("wikipedia_en_x_2026-01.zim", "Wikipedia", {
+            "Bee_sting": ("Bee sting", "A bee sting is the wound caused by a bee. Remove the stinger."),
+            "Honey": ("Honey", "Honey is made by bees. Some people react to a bee sting."),
+            "Category:Bees": ("Category:Bees", "bee sting bee sting bee sting"),
+        }),
+        qa_book("outdoors.stackexchange.com_en_all_2026-01.zim", "Outdoors", {
+            "questions/tagged/bee-sting_page=2": ("Questions tagged bee-sting", "bee sting bee sting"),
+            "questions/9/how-to-handle-a-stung-camper": ("How to handle a stung camper", "A bee sting on a hike."),
+        }),
+        qa_book("libretexts.org_en_bio_2025-01.zim", "LibreTexts", {"index/page_1": ("Bee sting venom", "x")}, fulltext=False),
+        qa_book("ted_mul_x_2026-01.zim", "TED", {"talk": ("A talk about stings", "bee sting")}, language="eng,spa"),
+    ) as lib:  # fmt: skip
+        yield lib
+
+
+def test_search_asks_each_language_once_and_every_title_index(mixed: reference.Library) -> None:
+    mixed.search("bee sting")
+    searches = [r for r in mixed.fake.requests if r.startswith("/search")]  # type: ignore[attr-defined]
+    assert len(searches) == 2, searches  # eng (the two full-text books together), eng,spa
+    assert sum("books.name=outdoors" in r and "books.name=wikipedia" in r for r in searches) == 1
+    assert not any("libretexts" in r for r in searches)  # no full-text index there
+    suggests = [r for r in mixed.fake.requests if r.startswith("/suggest")]  # type: ignore[attr-defined]
+    assert len(suggests) == 4  # all four books have a title index
+
+
+def test_search_ranks_all_archives_on_one_scale_without_listing_pages(mixed: reference.Library) -> None:
+    hits = mixed.search("bee sting", limit=10)
+    assert (hits[0].book, hits[0].title) == ("wikipedia_en_x", "Bee sting")  # the title is the query
+    titles = [h.title for h in hits]
+    assert "Bee sting venom" in titles  # the title-only book is found by its title index
+    assert "How to handle a stung camper" in titles
+    assert not any("tagged" in h.path or h.title.startswith("Category") for h in hits)
+
+
+def test_search_one_archive_only_asks_that_one(mixed: reference.Library) -> None:
+    hits = mixed.search("bee sting", book="outdoors.stackexchange.com_en_all")
+    assert {h.book for h in hits} == {"outdoors.stackexchange.com_en_all"}
+    assert [h.title for h in hits] == ["How to handle a stung camper"]
+
+
+def test_search_drops_words_across_all_the_books_together(mixed: reference.Library) -> None:
+    hits = mixed.search("how do I treat a bee sting zzyzx")
+    assert hits and hits[0].title == "Bee sting"
+
+
+def test_the_same_article_in_two_variants_of_an_archive_counts_once(tmp_path: Path) -> None:
+    pages = {"Bee_sting": ("Bee sting", "A bee sting is the wound caused by a bee.")}
+    with serve(
+        tmp_path,
+        qa_book("wikipedia_en_all_maxi_2026-01.zim", "Wikipedia", pages),
+        qa_book("wikipedia_en_top_nopic_2026-01.zim", "Wikipedia (top)", pages),
+    ) as lib:
+        assert [(h.book, h.title) for h in lib.search("bee sting")] == [
+            ("wikipedia_en_all_maxi", "Bee sting")
+        ]
+
+
+def test_rank_puts_the_title_that_is_the_query_first_and_listing_pages_nowhere() -> None:
+    def book(name: str) -> reference.Book:
+        return reference.Book(name, Path(name), name, "", 1, 1, True, name)
+
+    wiki, qa = book("wikipedia_en_all"), book("diy.stackexchange.com_en_all")
+    cands = [
+        reference.Candidate(qa, "questions/tagged/x", "Torque", rank=0),
+        reference.Candidate(qa, "questions/1/a", "Is a torque wrench needed for this?", rank=1),
+        reference.Candidate(wiki, "Torque_wrench", "Torque wrench", rank=2),
+        reference.Candidate(wiki, "Torque", "Torque", titled=0),
+    ]
+    got = reference.rank(cands, ["torque", "wrench"])
+    assert [c.title for c in got] == ["Torque wrench", "Is a torque wrench needed for this?", "Torque"]
+
+
+def test_distinct_leaves_out_variants_and_parts_of_a_work_that_is_there_whole() -> None:
+    def book(name: str) -> reference.Book:
+        return reference.Book(name, Path(name), name, "", 1, 1, True, name)
+
+    names = [
+        "wikipedia_en_all_maxi", "wikipedia_en_top_nopic", "wikipedia_en_medicine_maxi",
+        "wikibooks_en_all_nopic", "wikibooks_en_all_maxi", "ifixit_en_all", "wikipedia_fr_all_maxi",
+    ]  # fmt: skip
+    assert [b.name for b in reference.distinct([book(n) for n in names])] == [
+        "wikipedia_en_all_maxi", "wikibooks_en_all_nopic", "ifixit_en_all", "wikipedia_fr_all_maxi",
+    ]  # fmt: skip
+    # Without an "_all" the parts are all there is.
+    parts = [book("wikipedia_en_top_nopic"), book("wikipedia_en_medicine_maxi")]
+    assert reference.distinct(parts) == parts
+
+
+@pytest.mark.parametrize(
+    ("path", "title", "listing"),
+    [
+        ("questions/tagged/bears_page=2", "questions/tagged/bears_page=2", True),
+        ("questions_page=61", "questions_page=61", True),
+        ("questions", "Highest Voted 'bears' Questions", True),
+        ("users/5/someone", "User someone - Outdoors Stack Exchange", True),
+        ("Category:Bees", "Category:Bees", True),
+        ("index.html", "Index", True),
+        ("questions/12/how-to-treat-a-bee-sting", "How to treat a bee sting?", False),
+        ("Bee_sting", "Bee sting", False),
+        ("Index_fund", "Index fund", False),
+    ],
+)
+def test_listing_pages_are_not_articles(path: str, title: str, listing: bool) -> None:
+    assert reference.is_listing(path, title) is listing
 
 
 def test_read_gives_intro_and_section_list_then_one_section(lib: reference.Library) -> None:

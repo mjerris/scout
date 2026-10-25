@@ -61,6 +61,16 @@ class Entry:
     date: str  # 2026-06-01
     articles: int
     fulltext: bool
+    language: str = ""  # eng, or a list for a multi-language book: eng,spa,fra
+
+
+@dataclass(frozen=True)
+class Hit:
+    """One result of /search: an article of one book."""
+
+    book: str  # the book's id
+    path: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -83,7 +93,7 @@ class Client:
         self._open = urllib.request.build_opener(_NoRedirect()).open
 
     def _get(self, path: str, query: dict[str, Any] | None = None) -> tuple[int, dict[str, str], bytes]:
-        url = self.base + path + ("?" + urllib.parse.urlencode(query) if query else "")
+        url = self.base + path + ("?" + urllib.parse.urlencode(query, doseq=True) if query else "")
         try:
             with self._open(url, timeout=TIMEOUT_S) as r:
                 return r.status, dict(r.headers), r.read()
@@ -111,31 +121,33 @@ class Client:
                     date=(e.findtext(f"{_ATOM}updated") or "")[:10],
                     articles=int(e.findtext(f"{_ATOM}articleCount") or 0),
                     fulltext="_ftindex:yes" in tags,
+                    language=(e.findtext(f"{_ATOM}language") or "").strip(),
                 )
             )
         return out
 
-    def search(self, book: str, words: Sequence[str], limit: int) -> tuple[int, list[tuple[str, str]]]:
-        """(how many articles have all the words, the first `limit` as (path, title)), by
-        the archive's own full-text (Xapian) index."""
+    def search(self, books: str | Sequence[str], words: Sequence[str], limit: int) -> tuple[int, list[Hit]]:
+        """(how many articles have all the words, the first `limit` of them), by the
+        archives' own full-text (Xapian) indexes. Several books are searched in one
+        request: Xapian merges them with shared statistics, so the order is one ranking
+        across all of them. kiwix-serve refuses books in different languages together
+        (HTTP 400), so `books` must share one (Entry.language)."""
+        ids = [books] if isinstance(books, str) else list(books)
         status, _, body = self._get(
             "/search",
-            {"books.name": book, "pattern": " ".join(words), "pageLength": limit, "format": "xml"},
+            {"books.name": ids, "pattern": " ".join(words), "pageLength": limit, "format": "xml"},
         )
         if status != 200:
-            log.info("kiwix: search in %s answered %d", book, status)
+            log.info("kiwix: search in %d books answered %d", len(ids), status)
             return 0, []
         rss = ET.fromstring(body)  # noqa: S314  (our own kiwix-serve's results)
         # A count of thousands comes with separators: "2,000".
         total = int(re.sub(r"\D", "", rss.findtext(f"channel/{_OPENSEARCH}totalResults") or "") or 0)
-        prefix = f"/content/{book}/"
         hits = []
         for item in rss.iter("item"):
-            link = item.findtext("link") or ""
-            if link.startswith(prefix):
-                hits.append(
-                    (urllib.parse.unquote(link[len(prefix) :]), (item.findtext("title") or "").strip())
-                )
+            book, _, path = (item.findtext("link") or "").removeprefix("/content/").partition("/")
+            if book in ids and path:
+                hits.append(Hit(book, urllib.parse.unquote(path), (item.findtext("title") or "").strip()))
         return total, hits[:limit]
 
     def suggest(self, book: str, term: str, count: int) -> list[tuple[str, str]]:

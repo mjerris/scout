@@ -71,6 +71,8 @@ class Book:
     pages: list[tuple[str, str, str | bytes, str]]  # (path, title, content, mimetype)
     redirects: list[tuple[str, str, str]] = field(default_factory=list)  # (path, title, target)
     date: str = "2026-06-01"
+    language: str = "eng"
+    fulltext: bool = True  # False: a title index only, as kiwix-serve says for a book without one
 
     @property
     def id(self) -> str:
@@ -155,7 +157,8 @@ class FakeKiwix:
 
     def answer(self, url: str) -> tuple[int, dict[str, str], bytes]:
         parts = urllib.parse.urlsplit(url)
-        q = dict(urllib.parse.parse_qsl(parts.query))
+        many = urllib.parse.parse_qs(parts.query)
+        q = {k: v[0] for k, v in many.items()}
         path = urllib.parse.unquote(parts.path)
         if path == "/catalog/v2/entries":
             return (
@@ -164,7 +167,7 @@ class FakeKiwix:
                 self._catalog(),
             )
         if path == "/search":
-            return self._search(q.get("books.name") or q.get("content", ""), q.get("pattern", ""),
+            return self._search(many.get("books.name") or [q.get("content", "")], q.get("pattern", ""),
                                 int(q.get("pageLength") or 25))  # fmt: skip
         if path == "/suggest":
             return self._suggest(q.get("content", ""), q.get("term", ""), int(q.get("count") or 10))
@@ -183,7 +186,7 @@ class FakeKiwix:
         entries = "".join(
             f"""<entry><id>urn:uuid:{n}</id><title>{html.escape(b.title)}</title>
 <updated>{b.date}T00:00:00Z</updated><name>{b.id}</name>
-<tags>_ftindex:yes;_pictures:no</tags>
+<language>{b.language}</language><tags>_ftindex:{"yes" if b.fulltext else "no"};_pictures:no</tags>
 <articleCount>{sum(m == "text/html" for *_, m in b.pages) + len(b.redirects)}</articleCount>
 <link type="text/html" href="/content/{b.id}" /></entry>"""
             for n, b in enumerate(self.books.values())
@@ -192,18 +195,23 @@ class FakeKiwix:
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/">
 <title>All Entries</title>{entries}</feed>""".encode()
 
-    def _search(self, book: str, pattern: str, limit: int) -> tuple[int, dict[str, str], bytes]:
-        if book not in self.books:
+    def _search(self, ids: list[str], pattern: str, limit: int) -> tuple[int, dict[str, str], bytes]:
+        """Like kiwix-serve: several books are searched together (in the order given here;
+        the real one merges them by score), but only when they share a language."""
+        if any(i not in self.books for i in ids):
             return 400, {"Content-Type": "text/html"}, b"No such book"
+        if len({self.books[i].language for i in ids}) > 1:
+            return 400, {"Content-Type": "text/html"}, b"Two or more books in different languages"
         words = re.findall(r"[a-z0-9]+", pattern.lower())
         hits = [
-            (p, t) for p, t, body, mime in self.books[book].pages
+            (i, p, t) for i in ids for p, t, body, mime in self.books[i].pages
             if mime == "text/html" and words and set(words) <= set(_text(t) + _text(body))
         ]  # fmt: skip
         items = "".join(
-            f"<item><title>{html.escape(t)}</title><link>/content/{book}/{urllib.parse.quote(p)}</link>"
-            f"<description>...</description><book><title>x</title></book></item>"
-            for p, t in hits[:limit]
+            f"<item><title>{html.escape(t)}</title><link>/content/{i}/{urllib.parse.quote(p)}</link>"
+            f"<description>...{' '.join(f'<b>{w}</b>' for w in words)} in {html.escape(t)}...</description>"
+            f"<book><title>{html.escape(self.books[i].title)}</title></book></item>"
+            for i, p, t in hits[:limit]
         )
         body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"><channel>

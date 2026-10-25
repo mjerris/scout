@@ -32,8 +32,54 @@ are kept apart with `|`.
 **Search.** Scout searches with the question's topic words ("how do I treat a bee
 sting" is `treat bee sting`). The index needs every word in an article. When no
 article has them all, Scout drops the words no article has, then one word at a time,
-but keeps all of two words and at least half of more. Title matches come first when
-the title is exactly the words asked. With several archives, results take turns.
+but keeps all of two words and at least half of more (those requests go out together).
+
+With many archives (71 here) it is federated, in three steps:
+
+1. **Candidates.** kiwix-serve 3.8.2 searches several books in one `/search` request
+   (repeat `books.name`) and Xapian merges them with shared statistics, so one request
+   covers every archive with a full-text index. Books in different languages can't be
+   searched together (HTTP 400), so there is one request per language (TED's
+   multi-language archives are their own). Each archive's title index (`/suggest`) is
+   asked too. All of it runs in a bounded thread pool, 15 candidates per request.
+   Archives that only repeat another (`wikibooks_en_all_nopic` beside `..._maxi`, the
+   top and medicine cuts of Wikipedia beside `wikipedia_en_all`) are left out: the
+   merged full-text request took 344 ms median over 36 books and 257 ms over 32 (40
+   candidates), and finds the same articles.
+2. **One scale.** Tag, question-list, user and index pages, other wiki namespaces and
+   disambiguation pages are dropped. The rest are scored on how much of the query is in
+   the title (shared stems, penalising long titles), whether the title is exactly the
+   query (parentheses ignored: "Mercury (planet)"), whether the archive's title index
+   offered it, and, as a tie-breaker, its place in the full-text order
+   (`reference.score`). The same title in two variants of one work counts once.
+   kiwix-serve returns order only, no score. It also returns a snippet around the
+   matched words, but scoring the query's words against it added nothing measurable, so
+   it isn't used and no page is read to rank.
+3. **Pages for the winners.** Only the top few are read, several at once, for their
+   first lines.
+
+Measured with `scripts/eval_reference.py` against the real library (181 queries: 150
+known-item titles drawn at random from Wikipedia top and all, Stack Exchange and
+LibreTexts, and 31 questions with hand-picked answers), search called with `limit=5`,
+`nice -n 10`, a shared Mac (load average 5 to 8), second of two passes:
+
+| | MRR@5 | recall@5 | p50 | p95 |
+|---|---|---|---|---|
+| before (a book at a time, taking turns) | 0.146 | 0.282 | 922 ms | 1606 ms |
+| now | 0.909 | 0.939 | 129 ms | 407 ms |
+
+Topic questions alone: MRR 0.103 to 0.890, p95 1606 ms to 344 ms. The three queries that
+took 0.8 to 2.5 s and returned an alphabetical mix now take about 100 ms and lead with
+the Wikipedia (or, for torque specs, the mechanics Stack Exchange) article. The 300 ms
+p95 target holds for topic questions and for Wikipedia and Stack Exchange titles, not for
+LibreTexts titles (p95 1.0 s: short generic titles match many pages, and some of the 25
+sampled aren't findable by their words at all). The weights were chosen by ablation on
+this same query set (with the first weights, dropping the title term cost 0.07 MRR,
+the exact-title term 0.05, the title-index term 0.02; the snippet term and a large
+full-text-order weight each cost 0.05), so the numbers are a little optimistic for new
+queries. What is left wrong is mostly queries words can't tell apart ("capital of
+Australia" finds articles with those words, not Canberra). Embedding similarity would
+need Scout's embedder loaded in this process, which the reference doesn't do.
 
 **Tools.** The room, the phone and other Claude sessions (through the MCP server) get
 two tools. Neither asks for a yes: they only read.

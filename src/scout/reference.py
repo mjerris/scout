@@ -2,7 +2,10 @@
 Mac and read in place through kiwix-serve (kiwix.py), so "look up X" works with the
 internet down.
 
-    Library.search(query)       -> the best articles, by the archive's own full-text index
+    Library.search(query)       -> the best articles across all the archives: candidates
+                                   from kiwix-serve's merged full-text search and each
+                                   title index, ranked on one scale (score), pages read
+                                   only for the winners
     Library.article(book, path) -> one article cut into sections at its headings
     search_text / read_text     -> the reference_search and reference_read tools
     answer(question, model)     -> a spoken answer from a passage, checked against it
@@ -23,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import itertools
 import logging
 import math
 import posixpath
@@ -32,6 +34,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -68,6 +71,7 @@ class Book:
     size: int
     fulltext: bool
     id: str = ""  # its name in kiwix-serve's URLs: the file name without .zim
+    language: str = ""  # eng (kiwix-serve searches only books of one language together)
 
 
 @dataclass(frozen=True)
@@ -294,7 +298,7 @@ def _is_zim(path: Path) -> bool:
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower().replace("\u2019", "'").replace("'s ", " "))
+    return re.findall(r"[^\W_]+", text.lower().replace("\u2019", "'").replace("'s ", " "))
 
 
 _ASKING = frozenset({
@@ -309,6 +313,99 @@ def query_words(text: str) -> list[str]:
     """The words of a question worth searching for: "how do I treat a bee sting" ->
     treat, bee, sting."""
     return list(dict.fromkeys(w for w in _words(text) if w not in _FILLER and len(w) > 1))[:8]
+
+
+# --- ranking the candidates of many archives on one scale ----------------------------------
+
+WORKERS = 8  # requests to kiwix-serve in flight at once
+POOL = 15  # candidates asked of the full-text indexes, per language
+SUGGESTED = 3  # title-index matches asked of each archive
+# Pages that list articles or describe the site, not articles: Stack Exchange's tag and
+# question listings, user pages, Wikipedia's other namespaces, an archive's index.
+_LISTING_PATH = re.compile(
+    r"(?:^|/)(?:tagged|tags|users|badges|unanswered|index\.html?)(?:/|$)|_page=|^questions(?:$|[?_])", re.I
+)
+_LISTING_TITLE = re.compile(
+    r"^(?:highest voted\b.*questions|questions|tags|users|index|contents|table of contents|home|main page)$"
+    r"|\(disambiguation\)$"
+    r"|^(?:category|portal|template|wikipedia|help|talk|file|draft|user|module|mediawiki|special):",
+    re.I,
+)
+# Weights of score(), chosen by ablation on scripts/eval_reference.py (docs/reference.md).
+W_RANK, W_TITLE, W_EXACT, W_TITLED = 0.3, 1.5, 1.0, 0.5
+
+
+def is_listing(path: str, title: str) -> bool:
+    return bool(_LISTING_PATH.search(path) or _LISTING_TITLE.match(title.strip()))
+
+
+def _stems(text: str) -> set[str]:
+    return {recall._stem(w) for w in _words(text) if w not in _FILLER}
+
+
+def family(book: Book) -> str:
+    """The archive's name without its variant (wikipedia_en_all_maxi, wikipedia_en_top_nopic:
+    wikipedia; cooking.stackexchange.com_en_all: cooking.stackexchange.com), so the same
+    article in two variants of one work counts once."""
+    return book.name.split("_en")[0]
+
+
+_VARIANT = re.compile(r"_(?:maxi|nopic|mini)$")
+
+
+def distinct(books: list[Book]) -> list[Book]:
+    """`books` without the ones whose articles another one has anyway: a variant of a work
+    that comes in several (wikibooks_en_all_nopic beside wikibooks_en_all_maxi), and the
+    parts of one whose "_all" is there (wikipedia_en_top and wikipedia_en_medicine beside
+    wikipedia_en_all). Searching them too costs time and finds the same articles twice."""
+    whole = {family(b) for b in books if "_all" in _VARIANT.sub("", b.name)}
+    out: dict[str, Book] = {}
+    for b in books:
+        stem = _VARIANT.sub("", b.name)
+        if "_all" in stem or family(b) not in whole:
+            out.setdefault(stem, b)
+    return list(out.values())
+
+
+@dataclass
+class Candidate:
+    book: Book
+    path: str
+    title: str
+    rank: int | None = None  # its place in the full-text results (0: first); None: not there
+    titled: int | None = None  # its place among its archive's title-index matches; None: not there
+
+
+def score(c: Candidate, words: Sequence[str]) -> float:
+    """How well a candidate answers `words`, on one scale for every archive: the full-text
+    index's own order (a tie-breaker), how much of the query its title has, whether the title
+    is the query itself, and whether the archive's title index offered it. The snippet
+    kiwix-serve returns adds nothing measurable, so it isn't used."""
+    query = _stems(" ".join(words))
+    if not query:
+        return 0.0
+    title = _stems(c.title)
+    shared = len(query & title)
+    name = " ".join(_words(re.sub(r"\s*\([^)]*\)$", "", c.title)))  # "Mercury (planet)" is "mercury"
+    return (
+        W_RANK * (10 / (10 + c.rank) if c.rank is not None else 0.0)
+        + W_TITLE * shared / len(query) * (0.5 + 0.5 * shared / max(len(title), 1))
+        + W_EXACT * (name == " ".join(words))
+        + W_TITLED * (c.titled is not None)
+    )
+
+
+def rank(cands: Sequence[Candidate], words: Sequence[str]) -> list[Candidate]:
+    """The candidates that are articles, best first, with an article that two variants of
+    one archive both have (same title) once."""
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for c in sorted((c for c in cands if not is_listing(c.path, c.title)), key=lambda c: -score(c, words)):
+        key = (family(c.book), " ".join(_words(c.title)))
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
 
 
 class Library:
@@ -383,7 +480,7 @@ class Library:
                     if e is not None:
                         books.append(Book(
                             _DATED.sub("", f.stem), f, e.title or f.stem, e.date, e.articles,
-                            _file_size(f), e.fulltext, e.id,
+                            _file_size(f), e.fulltext, e.id, e.language,
                         ))  # fmt: skip
                     elif served:
                         log.info("reference: kiwix-serve isn't serving %s yet", f.name)
@@ -408,62 +505,97 @@ class Library:
     # --- search --------------------------------------------------------------------
 
     def search(self, query: str, book: str = "", limit: int = 5) -> list[Result]:
-        """The best articles for `query`, best first, taking turns between archives."""
-        books = [self.book(book)] if book else self.books()
+        """The best articles for `query` across the archives, best first: candidates from
+        every archive's full-text and title indexes (one request per language, not one per
+        archive), ranked on one scale (rank), and only the winners' pages read."""
+        books = [self.book(book)] if book else distinct(self.books())
         if not books:
             raise self._none()
         words = query_words(query) or _words(query)[:8]
         if not words:
             return []
         try:
-            found = [self._search(b, words, limit) for b in books]
+            ranked = rank(self._candidates(books, words), words)
+            return self._results(ranked, limit)
         except kiwix.Unavailable as exc:
             self.changed()
             raise ToolError(f"{NOT_RUNNING} ({exc})") from None
-        out = [r for group in itertools.zip_longest(*found) for r in group if r is not None]
-        return out[:limit]
 
-    def _fulltext(self, b: Book, words: list[str], limit: int) -> list[tuple[str, str]]:
-        """Articles (path, title) with all the words; failing that, with all the words some
-        article has (all of up to two, at least half of more), then with one of those left out."""
+    def _candidates(self, books: list[Book], words: list[str]) -> list[Candidate]:
+        """What the archives' indexes offer for `words`: the full-text matches of all the
+        books of one language together (Xapian merges them, shared statistics), then each
+        book's title-index matches, all asked at once."""
+        phrase = " ".join(words)
+        languages: dict[str, list[Book]] = {}
+        for b in books:
+            if b.fulltext:
+                languages.setdefault(b.language, []).append(b)
+        by_id = {b.id: b for b in books}
+        with ThreadPoolExecutor(WORKERS) as pool:
+            texts = [
+                pool.submit(self._fulltext, [b.id for b in group], words) for group in languages.values()
+            ]
+            titles = [(b, pool.submit(self.client.suggest, b.id, phrase, SUGGESTED)) for b in books]
+            found: dict[tuple[str, str], Candidate] = {}
+            for fut in texts:
+                for n, h in enumerate(fut.result()):
+                    found[h.book, h.path] = Candidate(by_id[h.book], h.path, h.title, rank=n)
+            for b, suggested in titles:
+                for n, (path, title) in enumerate(suggested.result()):
+                    if (b.id, path) in found:
+                        found[b.id, path].titled = n
+                    else:
+                        found[b.id, path] = Candidate(b, path, title, titled=n)
+        return list(found.values())
 
-        def hits(ws: Sequence[str]) -> list[tuple[str, str]]:
-            return self.client.search(b.id, ws, limit)[1]
+    def _fulltext(self, ids: list[str], words: list[str]) -> list[kiwix.Hit]:
+        """Articles of the books `ids` (one language) with all the words; failing that, with
+        all the words some article has (all of up to two, at least half of more), then with
+        one of those left out."""
+
+        def hits(ws: Sequence[str]) -> list[kiwix.Hit]:
+            return self.client.search(ids, ws, POOL)[1]
 
         if found := hits(words):
             return found
         need = len(words) if len(words) <= 2 else math.ceil(len(words) / 2)
-        counts = {w: self.client.search(b.id, [w], 1)[0] for w in words}
-        known = [w for w in words if counts[w]]
-        if len(known) < need:
-            return []
-        if len(known) < len(words) and (found := hits(known)):
-            return found
-        out: dict[str, str] = {}
-        if len(known) - 1 >= need:
-            for drop in sorted(known, key=lambda w: -counts[w]):  # the commonest word first
-                out.update(hits([w for w in known if w != drop]))
-                if len(out) >= limit:
-                    break
-        return list(out.items())[:limit]
+        with ThreadPoolExecutor(WORKERS) as pool:  # the requests of each step go out together
+            counts = dict(
+                zip(words, pool.map(lambda w: self.client.search(ids, [w], 1)[0], words), strict=True)
+            )
+            known = [w for w in words if counts[w]]
+            if len(known) < need:
+                return []
+            if len(known) < len(words) and (found := hits(known)):
+                return found
+            out: dict[tuple[str, str], kiwix.Hit] = {}
+            if len(known) - 1 >= need:
+                drops = sorted(known, key=lambda w: -counts[w])  # the commonest word first
+                for got in pool.map(lambda d: hits([w for w in known if w != d]), drops):
+                    out.update({(h.book, h.path): h for h in got})
+        return list(out.values())[:POOL]
 
-    def _search(self, b: Book, words: list[str], limit: int) -> list[Result]:
-        phrase = " ".join(words)
-        titled = self.client.suggest(b.id, phrase, 3)
-        texts = self._fulltext(b, words, limit) if b.fulltext else []
-        exact = [(p, t) for p, t in titled if " ".join(_words(t)) == phrase]
-        named = dict([*titled, *texts])  # the index's own titles
-        out: dict[str, Result] = {}
-        for p, _ in [*exact, *texts, *titled]:
-            try:
-                path, html = self._page(b, p)
-            except (KeyError, ToolError) as exc:
-                log.info("reference: %s/%s not read: %s", b.name, p, exc)
-                continue
-            if path not in out:
-                title, snippet = _summary(html, path)
-                out[path] = Result(b.name, b.title, path, named.get(path) or title, snippet)
-        return list(out.values())[:limit]
+    def _results(self, ranked: list[Candidate], limit: int) -> list[Result]:
+        """The first `limit` of `ranked` that are articles, with the first lines of each
+        read from its page (several at once; an entry that isn't an article is passed over)."""
+        out: dict[tuple[str, str], Result] = {}
+        todo = list(ranked)
+        with ThreadPoolExecutor(WORKERS) as pool:
+            while todo and len(out) < limit:
+                batch, todo = todo[: limit - len(out) + 1], todo[limit - len(out) + 1 :]
+                for c, fut in [(c, pool.submit(self._page, c.book, c.path)) for c in batch]:
+                    try:
+                        path, html = fut.result()
+                    except (KeyError, ToolError) as exc:
+                        log.info("reference: %s/%s not read: %s", c.book.name, c.path, exc)
+                        continue
+                    if (c.book.name, path) not in out and len(out) < limit:
+                        title, snippet = _summary(html, path)
+                        named = c.title if path == c.path else title  # a redirect is named for its article
+                        out[c.book.name, path] = Result(
+                            c.book.name, c.book.title, path, named or title, snippet
+                        )
+        return list(out.values())
 
     def _page(self, b: Book, path: str) -> tuple[str, str]:
         """(path, HTML) of the article at `path`, redirects followed. KeyError when there's
