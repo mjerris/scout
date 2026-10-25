@@ -47,11 +47,14 @@ EventHandler = Callable[[str, dict[str, Any]], None]
 
 @dataclass(eq=False)
 class PlayHandle:
-    """One queued piece of audio. `done` resolves True (played) or False (stopped)."""
+    """One queued piece of audio. `done` resolves True (played) or False (stopped).
+    `sent`, where a backend has it, resolves when the last sample has gone to the device,
+    before `done` when the speaker adds delay: the next piece can be queued then."""
 
     id: int
     seconds: float
     done: asyncio.Future[bool] = field(repr=False)
+    sent: asyncio.Future[bool] | None = field(default=None, repr=False)
 
 
 class AudioIO(Protocol):

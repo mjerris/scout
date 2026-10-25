@@ -88,6 +88,7 @@ class Speaker:
         self._speech = 0  # speech items queued or in flight (chimes and ticks don't count)
         self._progress = 0  # bumped by real speech: progress lines queued before it are dropped
         self._playing = False
+        self._in_flight = 0  # pieces handed to the voice layer and not yet heard to the end
         self._last_end = 0.0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -258,9 +259,18 @@ class Speaker:
         return samples, sr
 
     async def _play_loop(self) -> None:
+        # The next piece is queued behind the one playing, once that one is queued itself.
+        # Waiting for each to be heard first left the TV silent for its whole output delay
+        # (~0.7 s) between sentences, and at the comma of a split first sentence.
+        ahead: asyncio.Future[bool] | None = None  # when the piece before this one has gone out
         while True:
             gen, samples, text, tag = await self._audio.get()
-            entry = None
+            if tag is not None and ahead is not None:
+                # A progress line isn't queued ahead: real speech may still overtake it.
+                await asyncio.wait([ahead])
+                ahead = None
+            entry: list[Any] | None = None
+            handle = None
             try:
                 if gen == self._gen and not self._stale(tag):
                     self._playing = True
@@ -269,15 +279,35 @@ class Speaker:
                         self._played.append(entry)
                     with self._play_lock:  # stop() can't slip in between the check and play()
                         handle = self.io.play(samples, self.sr) if gen == self._gen else None
-                    if handle is not None:
-                        await handle.done
                     self.consecutive_failures = 0
             except Exception:
                 self.consecutive_failures += 1
                 log.exception("playback failed")
-            finally:
-                self._playing = False
-                self._last_end = time.monotonic()
-                if entry is not None:
-                    entry[1] = self._last_end
-                self._done_one()
+            if handle is None:
+                self._finished(entry, counted=False)
+                continue
+            self._in_flight += 1
+            if entry is not None and ahead is not None and not ahead.done():
+                # Queued behind the piece still going out: it starts when that one ends.
+                ahead.add_done_callback(functools.partial(self._started, entry))
+            handle.done.add_done_callback(functools.partial(self._heard, entry))
+            if ahead is not None:
+                await asyncio.wait([ahead])
+            ahead = handle.sent if handle.sent is not None else handle.done
+
+    @staticmethod
+    def _started(entry: list[Any], _sent: asyncio.Future[bool]) -> None:
+        entry[0] = time.monotonic()
+
+    def _heard(self, entry: list[Any] | None, _done: asyncio.Future[bool]) -> None:
+        self._finished(entry)
+
+    def _finished(self, entry: list[Any] | None, counted: bool = True) -> None:
+        """One piece heard to the end (or stopped, or never played)."""
+        if counted:
+            self._in_flight -= 1
+        self._playing = self._in_flight > 0
+        self._last_end = time.monotonic()
+        if entry is not None:
+            entry[1] = self._last_end
+        self._done_one()

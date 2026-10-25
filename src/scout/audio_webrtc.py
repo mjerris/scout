@@ -357,9 +357,13 @@ class WebRTCAudioIO:
             for hid in finished:
                 handle = self._handles.pop(hid, None)
                 if handle is not None:
+                    if handle.sent is not None and not handle.sent.done():
+                        handle.sent.set_result(True)
                     loop.call_later(delay, self._finish, handle, True)
 
     def _finish(self, handle: PlayHandle, played: bool) -> None:
+        if handle.sent is not None and not handle.sent.done():
+            handle.sent.set_result(played)
         if not handle.done.done():
             handle.done.set_result(played)
             if played:
@@ -374,9 +378,11 @@ class WebRTCAudioIO:
         out = resample_offline(data, sample_rate, RATE)
         pcm = np.clip(np.rint(out * 32767.0), -32768, 32767).astype(np.int16)
         self._next_id += 1
-        handle = PlayHandle(self._next_id, data.size / sample_rate, self._loop.create_future())
+        handle = PlayHandle(
+            self._next_id, data.size / sample_rate, self._loop.create_future(), self._loop.create_future()
+        )
         if pcm.size == 0:
-            handle.done.set_result(True)
+            self._finish(handle, True)
             return handle
         self._handles[handle.id] = handle
         self._ring.push(handle.id, pcm)
