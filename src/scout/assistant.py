@@ -186,6 +186,7 @@ class Assistant:
         self._message_barged: float | None = None
         self._confirm_barged: float | None = None  # onset of an answer said over the question
         self._barge_pending: float | None = None  # onset of speech over a reply, until its words are heard
+        self._barge_strict = False  # that onset came before the canceller adapted: only a stop counts
         self._turn_text, self._turn_started, self._turn_spoke = "", 0.0, False
         # Per-turn timing: the utterance that started it, when its answer was first said,
         # which tier answered.
@@ -639,6 +640,12 @@ class Assistant:
         # (utt.echo only says playback was on when the speech began.)
         over_us = utt.echo and self.speaker.overlap(utt.started, utt.ended or time.monotonic()) >= 0.3
         echo = not self.echo_cancelled and over_us
+        if over_us and not echo and self._is_stop(text):
+            # "Stop" said over our own speech needs no wake word, as in the echo case below
+            # (heard live: a bare stop over a reply was dropped as "busy with another request").
+            self.emit("heard", text=text)
+            await self.stop()
+            return
         if confirming and over_us and not echo and not self._is_stop(text):
             # Said over the read-back of a question (or a barge-in over it). The canceller
             # may not have taken all of our voice out, and the message may hold a "yes":
@@ -1096,19 +1103,27 @@ class Assistant:
         # cancelled the request that had just started (heard live).
         if not getattr(self.speaker, "speaking", self.speaker.busy) or self.mic_muted:
             return
-        if not self.echo_settled():
-            log.info("barge-in held: the echo canceller is still adapting (%s)", self._echo_note())
-            return
         # Not a stop yet: on the TV our own voice leaks past the canceller loudly enough to
         # start "speech" (heard live, twice). Duck, and decide when the words are heard.
         if self._barge_pending is not None:
             return
         onset = time.monotonic()
         self._barge_pending = onset
+        # Before the canceller has adapted, only a stop interrupts. It still ducks: on the
+        # TV the canceller often never got past 12 dB (most onsets over two weeks were held),
+        # and a "stop" said over full-volume playback was heard as "Let's go." (heard live).
+        self._barge_strict = not self.echo_settled()
         duck = getattr(self.speaker, "duck", None)
         if duck is not None:
             duck(True)
-        log.info("barge-in?: playback lowered until the words are heard")
+        if self._barge_strict:
+            log.info(
+                "barge-in?: playback lowered; the echo canceller is still adapting (%s), "
+                "so only a stop counts",
+                self._echo_note(),
+            )
+        else:
+            log.info("barge-in?: playback lowered until the words are heard")
         asyncio.get_running_loop().call_later(BARGE_WAIT_S, self._barge_expire, onset)
 
     def _barge_expire(self, onset: float) -> None:
@@ -1133,6 +1148,9 @@ class Assistant:
             self._barge_resume(f"heard our own voice: {text!r}" if text else "no words heard")
             return None
         words = speech.strip_own_speech(text, spoken, alt) or text
+        if self._barge_strict and not self._is_stop(words):
+            self._barge_resume(f"not a stop while the echo canceller adapts: {words!r}")
+            return text  # heard as it would have been without the barge-in
         self._barge_pending = None
         self.barge_ins.append(time.time())  # a correction, maybe (corrections.py)
         if self.state == "agent" and self._listen is not None:

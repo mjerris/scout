@@ -567,6 +567,7 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
         spk._speech = 0
         spk._progress = 0
         spk._playing = False
+        spk._in_flight = 0
         spk._last_end = 0.0
         spk._idle = asyncio.Event()
         spk._idle.set()
@@ -585,6 +586,86 @@ def test_speaker_plays_through_the_voice_layer_and_stop_silences_it() -> None:
 
     played, stopped, idle = run(go())
     assert played == [0.1] and stopped == 1 and idle
+
+
+class DelayedIO(FakeIO):
+    """The TV: a piece goes out in `out_s`, and is heard to the end `delay_s` after that."""
+
+    def __init__(self, out_s: float, delay_s: float) -> None:
+        super().__init__()
+        self.out_s, self.delay_s = out_s, delay_s
+        self.calls: list[float] = []
+        self.heard: list[float] = []
+        self._out_until = 0.0
+
+    def play(self, samples: Any, sample_rate: int) -> Any:
+        from scout.audio_io import PlayHandle
+
+        loop = asyncio.get_running_loop()
+        now = time.monotonic()
+        self.calls.append(now)
+        h = PlayHandle(
+            len(self.calls), len(samples) / sample_rate, loop.create_future(), loop.create_future()
+        )
+        self._out_until = max(self._out_until, now) + self.out_s  # queued behind what's going out
+        sent_at = self._out_until
+
+        def sent() -> None:
+            if not h.sent.done():  # type: ignore[union-attr]
+                h.sent.set_result(True)  # type: ignore[union-attr]
+            loop.call_later(self.delay_s, heard)
+
+        def heard() -> None:
+            if not h.done.done():
+                self.heard.append(time.monotonic())
+                h.done.set_result(True)
+
+        loop.call_later(sent_at - now, sent)
+        return h
+
+
+def test_the_next_sentence_is_queued_while_the_tv_is_still_playing_this_one() -> None:
+    """Heard live as stuttering: each sentence waited for the last to be heard through the
+    TV's ~0.7 s output delay, so the TV went silent between sentences."""
+    import numpy as np
+
+    async def go() -> tuple[DelayedIO, Speaker]:
+        io = DelayedIO(out_s=0.05, delay_s=0.3)
+        spk = Speaker.__new__(Speaker)
+        spk.io = cast("AudioIO", io)
+        spk.sr = 24000
+        spk._audio = asyncio.Queue()
+        spk._gen = 0
+        spk._pending = 0
+        spk._kinds = deque()
+        spk._speech = 0
+        spk._progress = 0
+        spk._playing = False
+        spk._in_flight = 0
+        spk._last_end = 0.0
+        spk._idle = asyncio.Event()
+        spk._played = deque(maxlen=10)
+        spk._play_lock = __import__("threading").Lock()
+        spk.consecutive_failures = 0
+        task = asyncio.create_task(spk._play_loop())
+        for text in ["First sentence.", "Second sentence.", "Third."]:
+            spk._pending += 1
+            spk._kinds.append(True)
+            spk._speech += 1
+            spk._audio.put_nowait((0, np.zeros(1200, np.float32), text, None))
+        await asyncio.sleep(0.02)
+        assert spk._playing and spk.busy
+        await asyncio.wait_for(spk._idle.wait(), 2)
+        task.cancel()
+        return io, spk
+
+    io, spk = run(go())
+    first, second, third = io.calls
+    assert second - first < 0.03 and third - second < 0.08  # queued ahead, not 0.3 s apart
+    assert len(io.heard) == 3 and not spk._playing and spk._speech == 0
+    starts = [e[0] for e in spk._played]
+    assert 0.04 < starts[1] - starts[0] < 0.1  # a queued sentence starts when the one before went out
+    assert all(e[1] != float("inf") for e in spk._played)
 
 
 def test_barge_in_over_speech_that_answered_nothing_opens_no_follow_up() -> None:
@@ -641,27 +722,52 @@ def test_a_ducked_reply_resumes_when_no_words_come(monkeypatch: pytest.MonkeyPat
     assert run(go()) == (0, False)
 
 
-@pytest.mark.parametrize(
-    ("stats", "barges"),
-    [
-        ({"erle_db": None, "echo_learned_s": 0.0}, False),  # nothing played yet
-        ({"erle_db": 4.0, "echo_learned_s": 1.2}, False),  # first seconds on a new speaker (the TV)
-        ({"erle_db": 20.0, "echo_learned_s": 1.0}, False),  # good, but not enough experience yet
-        ({"erle_db": 25.0, "echo_learned_s": 8.0}, True),  # adapted
-        ({}, True),  # a backend that doesn't measure it
-    ],
-)
-def test_barge_in_waits_for_the_echo_canceller_to_adapt(stats: dict[str, Any], barges: bool) -> None:
+UNSETTLED = [
+    {"erle_db": None, "echo_learned_s": 0.0},  # nothing played yet
+    {"erle_db": 4.0, "echo_learned_s": 1.2},  # first seconds on a new speaker (the TV)
+    {"erle_db": 20.0, "echo_learned_s": 1.0},  # good, but not enough experience yet
+    {"erle_db": 9.9, "echo_learned_s": 66.8},  # the TV, heard live: never got past 12 dB
+]
+SETTLED = [{"erle_db": 25.0, "echo_learned_s": 8.0}, {}]  # adapted; a backend that doesn't measure it
+
+
+async def _talk_over(stats: dict[str, Any], text: str) -> tuple[int, int, bool]:
+    r = make()
+    r.a.echo_cancelled = True
+    r.a.echo_stats = lambda: stats
+    r.spk.busy = True
+    onset = time.monotonic()
+    r.a.on_speech_onset(while_speaking=True)
+    await asyncio.sleep(0.01)
+    await hear(r, text, started=onset)
+    return r.spk.ducks, r.spk.stopped, r.spk.ducked
+
+
+@pytest.mark.parametrize(("stats", "stops"), [(s, False) for s in UNSETTLED] + [(s, True) for s in SETTLED])
+def test_before_the_echo_canceller_adapts_only_a_stop_barges_in(stats: dict[str, Any], stops: bool) -> None:
+    ducks, stopped, ducked = run(_talk_over(stats, "wait, actually make it Saturday"))
+    assert ducks == 1 and (stopped >= 1) is stops and not ducked
+
+
+@pytest.mark.parametrize("stats", UNSETTLED + SETTLED)
+def test_stop_said_over_a_reply_stops_it_however_adapted_the_canceller_is(stats: dict[str, Any]) -> None:
+    ducks, stopped, _ = run(_talk_over(stats, "Stop."))
+    assert ducks == 1 and stopped >= 1
+
+
+def test_a_bare_stop_over_a_reply_needs_no_wake_word() -> None:
+    """Heard live: no barge-in onset fired, and "stop" over the reply was dropped as busy."""
+
     async def go() -> int:
         r = make()
         r.a.echo_cancelled = True
-        r.a.echo_stats = lambda: stats
         r.spk.busy = True
-        r.a.on_speech_onset(while_speaking=True)
-        await asyncio.sleep(0.05)
-        return r.spk.ducks
+        now = time.monotonic()
+        r.spk.played = [(now - 2.0, now + 3.0, "Communism is a political and economic ideology.")]
+        await hear(r, "Stop.", echo=True, started=now - 0.5)
+        return r.spk.stopped
 
-    assert (run(go()) >= 1) is barges
+    assert run(go()) >= 1
 
 
 def test_no_barge_in_without_an_echo_canceller() -> None:
