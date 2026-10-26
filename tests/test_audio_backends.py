@@ -489,7 +489,7 @@ def test_webrtc_device_change_reopens_and_keeps_playing() -> None:
         handle = io.play(np.full(BLOCK * 4, 0.2, np.float32), SR)
         sound.streams[0].tick()
         io._devices_changed({"input": "new mic", "output": "new speaker"})
-        await settle(0.01)
+        await wait_for(lambda: bool(events))
         assert sound.reinits == 1 and len(sound.streams) == 2
         assert sound.streams[0].closed and sound.streams[1].started
         assert events == [
@@ -524,6 +524,43 @@ def test_webrtc_restarts_when_callbacks_stop() -> None:
         await io.close()
 
     asyncio.run(go())
+
+
+def test_webrtc_reports_failed_when_stopping_the_stream_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sampled live: CoreAudio deadlocked inside the stream's stop, on the event loop, and
+    Scout froze for 10 hours. Now the stop runs on its own thread: the loop keeps going,
+    and the voice layer reports failed (the app exits and launchd restarts it)."""
+    from scout import audio_webrtc
+
+    monkeypatch.setattr(audio_webrtc, "REOPEN_TIMEOUT_S", 0.05)
+    release = threading.Event()
+
+    async def go() -> tuple[Events, int]:
+        io, sound, events = await start_webrtc()
+
+        def hung_stop() -> None:
+            release.wait(5)
+
+        sound.streams[0].stop = hung_stop  # type: ignore[method-assign]
+        ticks = 0
+
+        async def loop_alive() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.005)
+                ticks += 1
+
+        alive = asyncio.create_task(loop_alive())
+        io._devices_changed({})
+        await wait_for(lambda: bool(events))
+        await io.close()  # the stream is still hung: close gives up on it too
+        alive.cancel()
+        release.set()
+        return events, ticks
+
+    events, ticks = asyncio.run(go())
+    assert [kind for kind, _ in events] == ["failed"] and "hung" in events[0][1]["error"]
+    assert ticks >= 5  # the event loop ran while the stop hung
 
 
 def test_webrtc_reports_failed_when_it_cannot_reopen() -> None:

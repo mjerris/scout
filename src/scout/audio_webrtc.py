@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -43,6 +44,12 @@ BLOCK = RATE // 100  # 10 ms
 # up to ~1.5 s later), or this long in all.
 CAPTURE_TAIL_BLOCKS = 150
 CAPTURE_MAX_BLOCKS = 800
+
+
+# Stopping or opening a stream can hang inside CoreAudio: under memory pressure its IO
+# thread and AudioOutputUnitStop each waited on a lock the other held, and with the stop
+# on the event loop Scout froze for 10 hours (sampled live). Off the loop, with a limit.
+REOPEN_TIMEOUT_S = 10.0
 
 
 class PlaybackRing:
@@ -247,9 +254,49 @@ class WebRTCAudioIO:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor
         self.stop_playback()
+        try:
+            await self._off_loop(self._close_locked)
+        except TimeoutError:
+            log.error("voice layer: the audio stream didn't close (CoreAudio hung); leaving it")
+            return  # the hung thread may still be using the canceller
+        self._aec.close()
+
+    def _close_locked(self) -> str:
         with self._stream_lock:
             self._close_stream()
-        self._aec.close()
+        return ""
+
+    def _reopen(self) -> str:
+        """Close the stream and open one on the current devices: "" or the error."""
+        with self._stream_lock:
+            self._close_stream()
+            try:
+                self._sd.reinit()
+                self._open()
+            except Exception as e:
+                self._close_stream()
+                return str(e)
+        return ""
+
+    async def _off_loop(self, work: Callable[[], str]) -> str:
+        """Run PortAudio work on its own daemon thread, at most REOPEN_TIMEOUT_S: a hung
+        CoreAudio call then stalls only that thread, and can't keep the process from exiting."""
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str] = loop.create_future()
+
+        def done(result: str) -> None:
+            if not fut.done():
+                fut.set_result(result)
+
+        def run() -> None:
+            try:
+                result = work()
+            except Exception as e:
+                result = str(e)
+            loop.call_soon_threadsafe(done, result)
+
+        threading.Thread(target=run, name="audio-reopen", daemon=True).start()
+        return await asyncio.wait_for(fut, REOPEN_TIMEOUT_S)
 
     # -- the audio callback (PortAudio's thread)
 
@@ -466,16 +513,13 @@ class WebRTCAudioIO:
             for attempt in range(RESTART_ATTEMPTS):
                 if self._closed:
                     return
-                with self._stream_lock:
-                    self._close_stream()
-                    try:
-                        self._sd.reinit()
-                        self._open()
-                    except Exception as e:
-                        error = str(e)
-                        self._close_stream()
-                    else:
-                        error = ""
+                try:
+                    error = await self._off_loop(self._reopen)
+                except TimeoutError:
+                    # Retrying would queue behind the hung call: only a new process recovers.
+                    self._last_error = f"reopening the audio stream hung for {REOPEN_TIMEOUT_S:.0f} s"
+                    self._on_event("failed", {"error": f"{self._last_error} ({reason})"})
+                    return
                 if not error:
                     break
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
