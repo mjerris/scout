@@ -850,7 +850,7 @@ class Assistant:
                 if self._reject("follow-up", text, check("followup")):
                     return "gate"
                 whole = f"{self._turn_text.rstrip(' .…')} {text}".strip()
-                if why := self._unaddressed(text, self._turn_text):
+                if why := self._unaddressed(text, self._turn_text, rest_of=True):
                     return ignore(f"not the rest of the request: {why}")
                 if self._turn_followup and (why := self._unaddressed(whole, self._window_answer)):
                     return ignore(why)
@@ -877,13 +877,13 @@ class Assistant:
             self._next_followup = False
         return None
 
-    def _unaddressed(self, text: str, answer: str) -> str | None:
+    def _unaddressed(self, text: str, answer: str, rest_of: bool = False) -> str | None:
         """Why speech without the wake word isn't taken as a follow-up ([wake] follow_up
         "strict": it must look addressed to Scout), or None."""
         if self.cfg.wake.follow_up != "strict":
             return None
         w = self.cfg.wake
-        return addressed.reason(text, answer, w.names, w.greeted_names)
+        return addressed.reason(text, answer, w.names, w.greeted_names, rest_of=rest_of)
 
     def _open_follow_up(self, start: float, answer: str) -> float:
         """After the room answered a request: listen for a follow-up without the wake

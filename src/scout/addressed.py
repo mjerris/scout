@@ -88,6 +88,11 @@ _GROUP = {"everyone", "everybody", "guys", "folks", "y'all", "yall", "team", "yo
 _PERSONAL = re.compile(
     r"\byou(?:'re)?\s+(?:\w+\s+)?(?:hear|see|think|feel|get|got|want|mean|agree|guys|there|ready|okay|still)\b"
 )
+# The rest of a request a pause split off often starts here: "... from Dayton" / "to
+# 3390 Maple Creek Drive" (heard live: judged a statement on its own, and dropped).
+_CARRY_ON = {"to", "from", "for", "at", "in", "on", "near", "with", "by", "between", "until", "via", "into"}
+# Scout's question that a plain statement answers: "Where do you want to drive to?"
+_WH = {"what", "what's", "when", "where", "which", "who", "whom", "whose", "how"}
 MAX_WORDS = 25  # longer than this without the wake word is talk, not a follow-up
 FRAGMENT_WORDS = 4  # a fragment this short continues the answer ("for tomorrow")
 TOPIC_FRAGMENT_WORDS = 7  # ...and up to this long if it shares a word with the answer
@@ -104,9 +109,9 @@ def _strip_fillers(ws: list[str]) -> list[str]:
     return ws[i:]
 
 
-def _vocative(text: str, wake: set[str]) -> str | None:
+def _vocative(text: str, wake: set[str], start_only: bool = False) -> str | None:
     """A name the speech is said to that isn't Scout's ("Good call, Brian")."""
-    for pat in (_VOCATIVE_START, _VOCATIVE_MID, _VOCATIVE_END):
+    for pat in (_VOCATIVE_START,) if start_only else (_VOCATIVE_START, _VOCATIVE_MID, _VOCATIVE_END):
         m = pat.search(text)
         if m is None:
             continue
@@ -122,6 +127,15 @@ def _vocative(text: str, wake: set[str]) -> str | None:
 def _asked(answer: str) -> bool:
     """Did the answer end by asking something ("Want me to send it?")."""
     return answer.rstrip().endswith("?")
+
+
+def _asked_what(answer: str) -> bool:
+    """Did the answer end with a question a statement answers ("Where to?"), not a yes/no."""
+    if not _asked(answer):
+        return False
+    last = _SENTENCE.split(answer.strip())[-1]
+    ws = _words(last)
+    return bool(ws) and (ws[0] in _WH or any(w in _WH for w in ws[:3]))
 
 
 def _topic(ws: list[str], answer: str) -> bool:
@@ -169,9 +183,11 @@ def reason(
     answer: str = "",
     wake_names: tuple[str, ...] | list[str] = ("scout",),
     greeted_names: tuple[str, ...] | list[str] = (),
+    rest_of: bool = False,
 ) -> str | None:
     """Why `text` (heard without the wake word after `answer`) isn't a follow-up, or None.
-    Naming Scout anywhere makes it one; a greeted near-miss ("Scott") is not someone else."""
+    Naming Scout anywhere makes it one; a greeted near-miss ("Scott") is not someone else.
+    `rest_of`: `text` may be the rest of the request `answer`, split off by a pause."""
     wake = {n.lower() for n in wake_names}
     ws = _words(text)
     if not ws:
@@ -182,7 +198,10 @@ def reason(
     if stripped.endswith(("...", "…")):
         return "unfinished (said to someone else?)"
     names = frozenset(wake | {n.lower() for n in greeted_names})
-    if (name := _vocative(text, set(names))) is not None:
+    # After "Where to?" an answer may end in a place: "Maple Creek Drive, Boise" is
+    # not said to Boise (heard live). Only a name up front ("Brian, ...") counts then.
+    answering = _asked_what(answer)
+    if (name := _vocative(text, set(names), start_only=answering)) is not None:
         return f"said to {name}"
     if _GROUP & set(ws) or "you all" in " ".join(ws):
         return "said to the group"
@@ -198,5 +217,9 @@ def reason(
     if not meant:
         return "an acknowledgement, not a request"
     if meant[0] is None:
+        if answering:
+            return None  # the answer to Scout's question
+        if rest_of and _words(stripped)[0] in _CARRY_ON:
+            return None  # "... to 3390 Maple Creek Drive"
         return "a statement, not a question or request"
     return None

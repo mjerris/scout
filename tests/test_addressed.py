@@ -269,3 +269,22 @@ def test_the_reason_says_why(text: str, why: str) -> None:
 
 def test_naming_scout_anywhere_counts() -> None:
     assert addressed.reason("We shipped that last week, right Scout?", NONE) is None
+
+
+DRIVE_FROM = "what is the driving distance from 4820 Birch Hollow Lane, Dayton, Ohio?"
+WHERE_TO = "Sure, I can get that. Where do you want to drive to from Birch Hollow Lane?"
+
+
+def test_the_rest_of_a_split_request_can_start_with_to() -> None:
+    """Heard live: the destination after a pause was judged a statement and dropped."""
+    rest = "to three, three, nine, zero, Maple Creek Drive."
+    assert addressed.reason(rest, DRIVE_FROM, rest_of=True) is None
+    assert addressed.reason(rest, WEATHER) is not None  # not as a follow-up to anything
+
+
+def test_an_address_answering_where_to_is_not_said_to_the_city() -> None:
+    """Heard live: "..., Boise." was taken as said to someone named Boise."""
+    assert addressed.reason("Three three nine zero Maple Creek Drive, Boise.", WHERE_TO) is None
+    assert addressed.reason("Brian, can you grab the door?", WHERE_TO) == "said to Brian"
+    assert addressed.reason("Good call, Brian.", WEATHER) == "said to Brian"
+    assert addressed.reason("The kids are at school today.", OFFER) is not None  # a yes/no question
