@@ -517,6 +517,11 @@ async def open_link(ref: str = "", about: str = "") -> str:
     return await _tool("open_link", {"ref": ref or None, "about": about or None})
 
 
+@mcp.tool(description=_doc("slack_catch_up"))
+async def slack_catch_up(ref: str = "", about: str = "") -> str:
+    return await _tool("slack_catch_up", {"ref": ref or None, "about": about or None})
+
+
 @mcp.tool(description=_doc("send_link"))
 async def send_link(ref: str = "", about: str = "") -> str:
     return await _tool("send_link", {"ref": ref or None, "about": about or None})

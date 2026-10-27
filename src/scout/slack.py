@@ -735,6 +735,41 @@ def _first_name(person: dict[str, str]) -> str:
     return name.split()[0]
 
 
+def _group_with(live: Live, conv: dict[str, Any], uid: str, names: Names) -> list[str]:
+    """A group DM's other people by first name (from its mpdm-a--b--c name), without you
+    and without the sender."""
+    handles = re.sub(r"^mpdm-|-\d+$", "", str(conv.get("name") or "")).split("--")
+    skip = {str(names.person(u).get("name") or "").lower() for u in (live.me, uid) if u}
+    by_handle = {str(p.get("name") or "").lower(): p for p in names.people.values()}
+    out = []
+    for h in handles:
+        if not h or h.lower() in skip:
+            continue
+        p = by_handle.get(h.lower())
+        out.append(_first_name(p) if p else h.split(".")[0].capitalize())
+    return out
+
+
+def _pulls_you_in(live: Live, m: dict[str, Any], names: Names) -> str:
+    """In a group DM: "asked" (a question that names or @-mentions you), "named" (names or
+    @-mentions you), or "". Only this flag leaves the message: never its words."""
+    text = str(m.get("text") or "")
+    if not live.me:
+        return ""
+    me = names.person(live.me)
+    mine = {
+        w.lower()
+        for n in (me.get("real"), me.get("display"))
+        if n
+        for w in [str(n).split()[0]]
+        if len(w) >= 3
+    }
+    named = f"<@{live.me}>" in text or any(re.search(rf"\b{re.escape(w)}\b", text, re.I) for w in mine)
+    if not named:
+        return ""
+    return "asked" if "?" in text else "named"
+
+
 def _alert(
     live: Live, conv: dict[str, Any], m: dict[str, Any], doc_id: str, names: Names, now: float | None
 ) -> dict[str, Any] | None:
@@ -766,4 +801,8 @@ def _alert(
              "group": bool(conv.get("is_mpim"))}  # fmt: skip
     if mention:
         alert["mention"] = mention
+    if conv.get("is_mpim"):
+        alert["with"] = _group_with(live, conv, uid, names)
+        if you := _pulls_you_in(live, m, names):
+            alert["you"] = you
     return alert

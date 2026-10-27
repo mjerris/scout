@@ -192,10 +192,20 @@ themselves.
 Pradovera") or a user id. A new DM or group DM from one of them makes the Scout app
 say once:
 
-- "Luca messaged you on Slack."
-- "Luca sent you 3 messages on Slack." (a burst, said once)
+- "Luca messaged you on Slack." (one message or a burst, said once)
 - "Luca and Sam messaged you on Slack."
 - "Slack messages from Luca, Sam, and 2 others." (three people or more)
+
+A group DM is said as a conversation, not as messages to you:
+
+- "Nina and Omar are talking in your group chat on Slack."
+- "Nina wrote in your group chat with Omar on Slack."
+- "Omar asked you something in the group chat with Nina on Slack." (a message that
+  names or @-mentions you, with a question; "mentioned you" without one)
+
+Only who, never what was written, and never how many messages. To hear what was said, ask
+"Hey Scout, what are they saying?" (or "catch me up"): the `slack_catch_up` tool reads that
+conversation since your last message there and Scout sums it up.
 
 How often it speaks:
 
@@ -206,6 +216,9 @@ How often it speaks:
 - **One announcement at a time.** At most one Slack announcement every
   `announce_min_gap_min` (5) minutes; what settles in between waits and is merged
   into the next one. 0 turns the gap off.
+- **A group DM once.** A group chat is said once while it goes on, however long; it's
+  said again only after 30 minutes with nothing in it. A message there that names or
+  @-mentions you is said within about 10 seconds, whatever the gap.
 - **Not where you're talking.** A conversation you wrote in within
   `announce_skip_if_replied_min` (5) minutes isn't announced, and what was waiting
   from it is dropped when you write there: you've seen it. scout-memory hears your own

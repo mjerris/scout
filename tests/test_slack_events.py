@@ -685,14 +685,15 @@ def a(who: str, n: int, channel: str = "D1") -> dict[str, Any]:
     return {"id": f"slack:{channel}:{n}.0", "who": who, "channel": channel, "ts": f"{n}.0"}
 
 
-def test_the_sentence_says_who_and_how_many() -> None:
+def test_the_sentence_says_who_not_how_many() -> None:
     assert slack_alerts.sentence([a("Luca", 1)]) == "Luca messaged you on Slack."
     three = slack_alerts.sentence([a("Luca", 1), a("Luca", 2), a("Luca", 3)])
-    assert three == "Luca sent you 3 messages on Slack."
+    assert three == "Luca messaged you on Slack."
     assert three.refs == ("slack:D1:1.0", "slack:D1:2.0", "slack:D1:3.0")
     assert slack_alerts.sentence([a("Luca", 1), a("Sam", 2, "D2")]) == "Luca and Sam messaged you on Slack."
-    assert slack_alerts.sentence([a("Luca", 1), a("Sam", 2), a("Luca", 3)]) == (
-        "Luca sent you 2 messages and Sam messaged you on Slack."
+    assert (
+        slack_alerts.sentence([a("Luca", 1), a("Sam", 2), a("Luca", 3)])
+        == "Luca and Sam messaged you on Slack."
     )
 
 
@@ -734,8 +735,8 @@ class AppQueue:
 def test_a_burst_is_said_once_after_it_settles() -> None:
     s = AppQueue({0.0: [a("Joao", 1)], 10.0: [a("Joao", 2)], 20.0: [a("Joao", 3), a("Joao", 2)]})
     out = s.steps(0.0, 10.0, 20.0, 30.0, 64.0, 65.0, 120.0)
-    assert out == [None, None, None, None, None, "Joao sent you 3 messages on Slack.", None]
-    assert s.said == ["Joao sent you 3 messages on Slack."]  # message 2 came twice: said once
+    assert out == [None, None, None, None, None, "Joao messaged you on Slack.", None]
+    assert s.said == ["Joao messaged you on Slack."]  # message 2 came twice: said once
     assert refs.refs_of(s.said[0]) == ("slack:D1:1.0", "slack:D1:2.0", "slack:D1:3.0")
 
 
@@ -743,7 +744,7 @@ def test_a_long_chat_is_said_by_the_max_wait() -> None:
     s = AppQueue({float(t): [a("Joao", t // 30 + 1)] for t in range(0, 300, 30)})
     times = [float(t) for t in range(0, 300, 30)]
     out = s.steps(*times[:6], 179.0, 180.0)
-    assert out[:-1] == [None] * 7 and out[-1] == "Joao sent you 7 messages on Slack."  # never quiet for 45 s
+    assert out[:-1] == [None] * 7 and out[-1] == "Joao messaged you on Slack."  # never quiet for 45 s
 
 
 def test_one_announcement_per_gap_the_rest_merged() -> None:
@@ -757,7 +758,7 @@ def test_one_announcement_per_gap_the_rest_merged() -> None:
     out = s.steps(0.0, 45.0, 50.0, 60.0, 70.0, 80.0, 130.0, 344.0, 345.0, 400.0)
     assert out[1] == "Joao messaged you on Slack."
     assert out[2:8] == [None] * 6  # settled by 125 s, but the gap is five minutes from 45 s
-    assert out[8] == "Slack messages from Len, Sam, and 2 others."
+    assert out[8] == "Luca mentioned you in #launch and Len, Sam, and Pat messaged you on Slack."
     assert out[9] is None and len(s.said) == 2
     assert len(refs.refs_of(s.said[1])) == 5  # each message's id, for "a link to that"
 
@@ -767,7 +768,54 @@ def test_merged_sentences_name_three_then_count() -> None:
     assert slack_alerts.sentence(three) == "Slack messages from Len, Sam, and Pat."
     assert slack_alerts.sentence([*three, a("Kim", 4, "D4")]) == "Slack messages from Len, Sam, and 2 others."
     two = [a("Len", 1), a("Sam", 2, "D2"), a("Sam", 3, "D2")]
-    assert slack_alerts.sentence(two) == "Len messaged you and Sam sent you 2 messages on Slack."
+    assert slack_alerts.sentence(two) == "Len and Sam messaged you on Slack."
+
+
+def g(who: str, n: int, members: list[str], you: str = "", channel: str = "G1") -> dict[str, Any]:
+    """A group DM message: `members` the others in it (not you, not the sender)."""
+    out = {**a(who, n, channel), "group": True, "with": members}
+    return {**out, "you": you} if you else out
+
+
+def test_a_group_chat_is_said_as_a_conversation() -> None:
+    chat = [g("Nina", 1, ["Omar"]), g("Omar", 2, ["Nina"]), g("Nina", 3, ["Omar"])]
+    assert slack_alerts.sentence(chat) == "Nina and Omar are talking in your group chat on Slack."
+    trio = [g("Nina", 1, ["Omar", "Sam"]), g("Omar", 2, ["Nina", "Sam"])]
+    assert slack_alerts.sentence(trio) == "Nina and Omar are talking in your group chat with Sam on Slack."
+    one = [g("Nina", 1, ["Omar"])]
+    assert slack_alerts.sentence(one) == "Nina wrote in your group chat with Omar on Slack."
+    asked = [g("Nina", 1, ["Omar"]), g("Omar", 2, ["Nina"], you="asked")]
+    assert slack_alerts.sentence(asked) == "Omar asked you something in the group chat with Nina on Slack."
+    named = [g("Nina", 1, ["Omar"], you="named"), a("Luca", 2, "D2")]
+    assert slack_alerts.sentence(named) == (
+        "Nina mentioned you in the group chat with Omar and Luca messaged you on Slack."
+    )
+
+
+def test_a_group_chat_is_said_once_until_it_goes_quiet() -> None:
+    s = AppQueue({
+        0.0: [g("Nina", 1, ["Omar"])],
+        20.0: [g("Omar", 2, ["Nina"])],
+        400.0: [g("Nina", 3, ["Omar"])],  # still going, past the gap: not said again
+        800.0: [g("Omar", 4, ["Nina"])],
+        800.0 + 1800.0: [g("Nina", 5, ["Omar"])],  # quiet half an hour, then again
+    })  # fmt: skip
+    out = s.steps(0.0, 20.0, 65.0, 400.0, 500.0, 800.0, 900.0, 2600.0, 2650.0)
+    assert out[2] == "Nina and Omar are talking in your group chat on Slack."
+    assert out[3:7] == [None] * 4
+    assert out[8] == "Nina wrote in your group chat with Omar on Slack." and len(s.said) == 2
+
+
+def test_a_group_chat_that_pulls_you_in_is_said_right_away() -> None:
+    s = AppQueue({
+        0.0: [a("Joao", 1)],
+        50.0: [g("Nina", 2, ["Omar"])],
+        100.0: [g("Omar", 3, ["Nina"], you="asked")],  # said soon, gap or not
+    })  # fmt: skip
+    out = s.steps(0.0, 45.0, 50.0, 100.0, 105.0, 110.0)
+    assert out[1] == "Joao messaged you on Slack."
+    assert out[2:5] == [None] * 3
+    assert out[5] == "Omar asked you something in the group chat with Nina on Slack."
 
 
 def test_a_conversation_you_just_replied_in_is_not_said() -> None:
@@ -1060,6 +1108,20 @@ def test_announce_every_dm_and_mentions(fake: Fake, tmp_path: Path) -> None:
     assert slack.handle_event(s, lv, ev("C1", note), now=NOW) == [
         {"channel": "C1", "ts": note["ts"], "replied": True}
     ]
+
+
+def test_a_group_dm_alert_says_who_else_is_in_it_and_whether_it_pulls_you_in(
+    fake: Fake, tmp_path: Path
+) -> None:
+    s = store()
+    lv = live(fake, tmp_path / "s.json", announce_dms="all")
+    chat = slack.handle_event(s, lv, ev("G1", msg(ts(6), "U1", "lunch at noon?")), now=NOW)
+    assert [(x["who"], x["with"], x.get("you")) for x in chat] == [("Pat", ["Sam"], None)]  # not to you
+    named = slack.handle_event(s, lv, ev("G1", msg(ts(5), "U2", "mike will know")), now=NOW)
+    assert [(x["who"], x["with"], x.get("you")) for x in named] == [("Sam", ["Pat"], "named")]
+    asked = slack.handle_event(s, lv, ev("G1", msg(ts(4), "U1", "<@UME> are you in?")), now=NOW)
+    assert [x.get("you") for x in asked] == ["asked"]
+    assert all("text" not in x for x in [*chat, *named, *asked])  # who, never what
 
 
 def test_dms_off_still_says_mentions(fake: Fake, tmp_path: Path) -> None:

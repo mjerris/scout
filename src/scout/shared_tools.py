@@ -39,6 +39,7 @@ from . import (
     refs,
     reminders_mac,
     sessions,
+    slack_catchup,
     slack_send,
     starlink,
     tasks,
@@ -481,6 +482,17 @@ SHARED = (
         "user's phone, open_url opens it on the Mac.",
         _obj({"ref": _STR, "about": _STR}),
         refs.open_link,
+    ),
+    SharedTool(
+        "slack_catch_up",
+        "Catch the user up on a Slack conversation: its messages since their last one there "
+        "(what they missed), oldest first, as 'Name: text' lines, newest 60 at most. For 'what "
+        "are they saying?', 'catch me up', 'what did I miss in that chat' after Scout said who "
+        "messaged or was talking on Slack. ref: a Slack ref (slack:...); or about: 'that' (what "
+        "was just said, the default) or a few words about it. Read-only. Say it briefly: who "
+        "said what, the gist, and anything asked of the user.",
+        _obj({"ref": _STR, "about": _STR}),
+        slack_catchup.catch_up,
     ),
     SharedTool(
         "send_link",

@@ -3,15 +3,19 @@
 scout-memory hears Slack's live events (slack_events.py) and queues a DM or group DM
 ([slack] announce_dms: from the people in `announce`, or all) and @-mentions of you
 (announce_mentions), and a mark for each message of your own; this takes that queue
-every POLL_S (memory_client.slack_alerts) and says who messaged:
+every POLL_S (memory_client.slack_alerts) and says who messaged, never how often:
 
-    one message     "Luca messaged you on Slack."
-    a burst         "Luca sent you 3 messages on Slack."
-    two people      "Luca sent you 2 messages and Sam messaged you on Slack."
+    a DM            "Luca messaged you on Slack." (one message or a burst)
+    two people      "Luca and Sam messaged you on Slack."
     a mention       "Luca mentioned you in #launch on Slack."
     three or more   "Slack messages from Luca, Sam, and 2 others."
+    a group DM      "Nina and Omar are talking in your group chat on Slack."
+                    "Nina wrote in your group chat with Omar on Slack."
+    ...that names   "Omar asked you something in the group chat with Nina on Slack."
+       you          ("mentioned you" without a question), said first
 
-Only who, never what they wrote. How often ([slack] announce_*):
+Only who, never what they wrote ("what are they saying?" reads it on request:
+slack_catchup.py). How often ([slack] announce_*):
 
     per conversation  a DM, a group DM, or a channel's mentions are gathered until
                       quiet_s pass with nothing new there (at most max_wait_s after the
@@ -20,6 +24,9 @@ Only who, never what they wrote. How often ([slack] announce_*):
                       between waits and is merged into the next
     you're in it      a conversation you wrote in within skip_if_replied isn't said, and
                       what was waiting from it is dropped (you've seen it)
+    a group DM        said once while it goes on; again only after GROUP_QUIET_S with
+                      nothing in it. A message there that names or @-mentions you is said
+                      after PULLED_IN_S, whatever the gap or that
     held              while a phone call with Scout is on or the room is mid-turn,
                       nothing is said; it's kept and said (merged) once that's over
 
@@ -52,41 +59,64 @@ QUIET_S = 45.0
 MAX_WAIT_S = 180.0
 MIN_GAP_S = 300.0
 SKIP_IF_REPLIED_S = 300.0
+GROUP_QUIET_S = 1800.0  # a group DM said once stays unsaid until it's been quiet this long
+PULLED_IN_S = 10.0  # a group DM message that names you is said after this much quiet
 REMEMBER = 500  # messages taken, kept to never say one twice
 
 Take = Callable[[], list[dict[str, Any]]]
 
 
+def _people(alerts: Sequence[dict[str, Any]]) -> list[str]:
+    return list(dict.fromkeys(str(a.get("who") or "Someone") for a in alerts))
+
+
+def _group(alerts: Sequence[dict[str, Any]]) -> str:
+    """One group DM, said as a conversation, never what was written: "Nina and Omar
+    are talking in your group chat"; or, when it pulls you in, "Omar asked you something
+    in the group chat with Nina"."""
+    posters = _people(alerts)
+    members = list(dict.fromkeys(w for a in alerts for w in a.get("with") or []))
+    pulled = [a for a in alerts if a.get("you")]
+    if pulled:
+        who = _people(pulled)
+        rest = [p for p in dict.fromkeys([*posters, *members]) if p not in who]
+        did = "asked you something" if any(a.get("you") == "asked" for a in pulled) else "mentioned you"
+        where = f"the group chat with {join(rest)}" if rest else "a group chat"
+        return f"{join(who)} {did} in {where}"
+    others = [m for m in members if m not in posters]
+    if len(posters) > 1:
+        return f"{join(posters)} are talking in your group chat" + (f" with {join(others)}" if others else "")
+    return f"{posters[0]} wrote in " + (f"your group chat with {join(others)}" if others else "a group chat")
+
+
 def sentence(alerts: Sequence[dict[str, Any]]) -> refs.Spoken:
-    """Who messaged or mentioned you, each person once with their count, in the order
-    they wrote: "Luca mentioned you in #launch and Sam messaged you on Slack."; three
-    people or more, only names: "Slack messages from Luca, Sam, and 2 others." """
-    counts: OrderedDict[str, int] = OrderedDict()
-    mentions: OrderedDict[tuple[str, str], int] = OrderedDict()
-    people: OrderedDict[str, None] = OrderedDict()
-    for a in alerts:
-        who = str(a.get("who") or "Someone")
-        people[who] = None
-        if a.get("mention"):
-            k = (who, str(a["mention"]))
-            mentions[k] = mentions.get(k, 0) + 1
-        else:
-            counts[who] = counts.get(who, 0) + 1
+    """Who messaged or mentioned you, never how often or what they wrote, the parts that
+    pull you in first: "Omar asked you something in the group chat with Nina and Luca
+    messaged you on Slack."; three people or more in DMs, only names: "Slack messages from
+    Luca, Sam, and 2 others." A group DM is a conversation, not messages to you."""
     ids = [str(a["id"]) for a in alerts if a.get("id")]
-    if len(people) >= 3:
-        names = list(people)
-        named = names if len(names) == 3 else [*names[:2], f"{len(names) - 2} others"]
+    groups: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    mentions: OrderedDict[tuple[str, str], None] = OrderedDict()
+    dms: list[dict[str, Any]] = []
+    for a in alerts:
+        if a.get("group") and not a.get("mention"):
+            groups.setdefault(str(a.get("channel") or ""), []).append(a)
+        elif a.get("mention"):
+            mentions[(str(a.get("who") or "Someone"), str(a["mention"]))] = None
+        else:
+            dms.append(a)
+    dm_people = _people(dms)
+    if len(dm_people) >= 3 and not groups and not mentions:
+        named = dm_people if len(dm_people) == 3 else [*dm_people[:2], f"{len(dm_people) - 2} others"]
         return refs.Spoken(f"Slack messages from {join(named)}.", ids)
-    if not mentions and all(n == 1 for n in counts.values()) and len(counts) > 1:
-        text = f"{join(list(counts))} messaged you on Slack."
-    else:
-        parts = [f"{who} mentioned you in {where}" if n == 1 else f"{who} mentioned you {n} times in {where}"
-                 for (who, where), n in mentions.items()]  # fmt: skip
-        parts += [
-            f"{who} messaged you" if n == 1 else f"{who} sent you {n} messages" for who, n in counts.items()
-        ]
-        text = f"{join(parts)} on Slack."
-    return refs.Spoken(text, ids)
+    gs = sorted(groups.values(), key=lambda g: not any(a.get("you") for a in g))
+    parts = [_group(g) for g in gs if any(a.get("you") for a in g)]
+    parts += [f"{who} mentioned you in {where}" for who, where in mentions]
+    if dm_people:
+        named = dm_people if len(dm_people) <= 3 else [*dm_people[:2], f"{len(dm_people) - 2} others"]
+        parts.append(f"{join(named)} messaged you")
+    parts += [_group(g) for g in gs if not any(a.get("you") for a in g)]
+    return refs.Spoken(f"{join(parts)} on Slack.", ids)
 
 
 def on_a_call() -> bool:
@@ -118,10 +148,14 @@ class Announcer:
         max_wait_s: float = MAX_WAIT_S,
         min_gap_s: float = MIN_GAP_S,
         skip_if_replied_s: float = SKIP_IF_REPLIED_S,
+        group_quiet_s: float = GROUP_QUIET_S,
     ) -> None:
         self.say, self.quiet_hours, self.take, self.now, self.held = say, quiet_hours, take, now, held
         self.quiet_s, self.max_wait_s = quiet_s, max_wait_s
         self.min_gap_s, self.skip_if_replied_s = min_gap_s, skip_if_replied_s
+        self.group_quiet_s = group_quiet_s
+        self.group_said: set[str] = set()  # group DMs said, until they go quiet
+        self.group_last: dict[str, float] = {}  # group DM -> its newest message
         self.bursts: OrderedDict[str, _Burst] = OrderedDict()  # by conversation, still coming
         self.ready: list[dict[str, Any]] = []  # settled, waiting for the gap (or a call to end)
         self.replied: dict[str, float] = {}  # conversation -> when you last wrote there
@@ -175,6 +209,14 @@ class Announcer:
             if at is not None and mono - at < self.skip_if_replied_s:
                 log.debug("slack alerts: you're talking there; not said")
                 continue
+            if a.get("group") and not a.get("mention"):
+                last = self.group_last.get(channel)
+                self.group_last[channel] = mono
+                if last is not None and mono - last >= self.group_quiet_s:
+                    self.group_said.discard(channel)  # quiet a while: a new conversation
+                if channel in self.group_said and not a.get("you"):
+                    log.debug("slack alerts: that group chat is still going; not said again")
+                    continue
             burst = self.bursts.get(channel)
             if burst is None:
                 burst = self.bursts[channel] = _Burst(mono, mono)
@@ -192,12 +234,19 @@ class Announcer:
             new = []
         self._taken(new, mono)
         for channel, b in list(self.bursts.items()):
-            if mono - b.last >= self.quiet_s or mono - b.first >= self.max_wait_s:
+            settle = min(self.quiet_s, PULLED_IN_S) if any(a.get("you") for a in b.alerts) else self.quiet_s
+            if mono - b.last >= settle or mono - b.first >= self.max_wait_s:
                 self.ready += self.bursts.pop(channel).alerts
-        if not self.ready or (self.said_at is not None and mono - self.said_at < self.min_gap_s):
+        pulled_in = any(a.get("you") for a in self.ready)  # said now, whatever the gap
+        if not self.ready or (
+            not pulled_in and self.said_at is not None and mono - self.said_at < self.min_gap_s
+        ):
             return None
         if self.held():  # a call, or the room mid-turn: kept for after
             return None
+        self.group_said |= {
+            str(a.get("channel")) for a in self.ready if a.get("group") and not a.get("mention")
+        }
         text, self.ready = sentence(self.ready), []
         self.said_at = mono
         if in_quiet_hours(self.quiet_hours, self.now()):
