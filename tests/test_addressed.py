@@ -1,5 +1,5 @@
 """addressed.reason: is speech without the wake word a follow-up to Scout's answer, or
-room conversation? Measured on synthetic sets (README, "Follow-ups without the wake
+room conversation? Measured on synthetic sets (docs/voice.md, "Follow-ups without the wake
 word"). The dev set chose the rules. The second set was written as held out, measured
 once (precision 0.69, recall 0.96), then tuned on, so it is a dev set now too. The
 fresh set was written after that; measured once (precision 0.71, recall 1.00), one bug

@@ -258,7 +258,7 @@ Request authentication, in layers:
 
 On the phone path, what Scout says passes through SignalWire's ASR, LLM and TTS. The
 privacy mode applies as it does at home: in strict mode, mail and messages give
-summaries only. The phone path is opt-in, and README states this plainly.
+summaries only. The phone path is opt-in, and docs/phone.md states this plainly.
 
 ## Apps
 
