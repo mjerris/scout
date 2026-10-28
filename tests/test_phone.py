@@ -103,6 +103,7 @@ def test_pair_list_forget(tmp_path: Path) -> None:
         "name": "Mike's phone",
         "paired_at": row["paired_at"],
         "revoked": False,
+        "locked_key": False,
         "push": [],
     }
     assert "secret" not in row

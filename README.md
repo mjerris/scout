@@ -48,6 +48,7 @@ transcript passes a local gate first, so noise and talk in the room cost no toke
 | [Slack](docs/slack.md) | Searchable copy of your Slack, who just messaged you said out loud, catch-up on a chat, send after a yes |
 | [Mac controls, weather, maps, Starlink, offline reference](docs/lookups.md) | Media, volume, apps and timers; Open-Meteo, OpenStreetMap, the dish's local API; Wikipedia with no internet ([details](docs/reference.md)) |
 | [Phone calls](docs/phone.md) | The phone app calls a SignalWire agent that answers through Scout; pairing, push, a test call ([design](docs/phone-design.md)) |
+| [Siri](docs/siri-design.md) | "Hey Siri, ask Scout" from the paired phone, even locked (CarPlay, AirPods), with a separate key whose abilities you set |
 | [Other Claude Code sessions](docs/sessions.md) | `discuss` (speak and listen), the floor, and Scout's mail, calendar and Slack tools in any session |
 | [Your own MCP servers](docs/external-mcp.md) | Servers from Claude Code or `tools.toml`, in the room and on the phone, with your rules |
 

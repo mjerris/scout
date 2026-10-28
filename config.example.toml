@@ -171,6 +171,10 @@ enabled = true
 # ring_after_quiet_min = 15                # "the room is quiet": nobody spoke for this long
 # ring_quiet_hours = ""                    # "22:00-07:00": never ring then
 # ring_min_gap_min = 20                    # at most one ring this often
+# What each of the phone's keys may do (docs/siri-design.md): "call", "ask" (Siri), "push",
+# "pair", "ring". The locked key works with the phone locked (Siri on CarPlay or AirPods).
+# unlocked_key = ["call", "ask", "push", "pair", "ring"]
+# locked_key = ["ask"]
 
 [tasks]
 # Scout's task list (docs/tasks-design.md): found in meetings and email, ordered by plain code,

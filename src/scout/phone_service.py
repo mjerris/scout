@@ -53,7 +53,7 @@ from . import behavior, extmcp, index, ledger, phone_ring, progress, sessions, s
 from .briefing import local_now
 from .config import DATA, PhoneConfig, load
 from .phone_devices import PATH as DEVICES
-from .phone_devices import CallCheck, write_private
+from .phone_devices import CallCheck, abilities, write_private
 
 log = logging.getLogger("scout.phone")
 
@@ -1062,7 +1062,13 @@ def build(cfg: PhoneConfig, scout: Caller = call_scout, devices: Path | None = N
     """The agent for this config. Webhook URLs and signature checks use public_url."""
     os.environ["SWML_PROXY_URL_BASE"] = cfg.public_url.rstrip("/")  # read by the SDK, here and per request
     state = (devices or DEVICES).parent
-    check = CallCheck(cfg.address, cfg.call_skew_s, devices, nonces=state / "phone_nonces.json")
+    check = CallCheck(
+        cfg.address,
+        cfg.call_skew_s,
+        devices,
+        nonces=state / "phone_nonces.json",
+        abilities=abilities(cfg.unlocked_key, cfg.locked_key),
+    )
     return PhoneAgent(
         cfg,
         check,

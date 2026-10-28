@@ -617,3 +617,35 @@ def test_start_tier1_gives_the_model_the_configured_floor(monkeypatch: pytest.Mo
 
     asyncio.run(go())
     assert made[0].recall_floor == 0.7
+
+
+def test_siri_gets_no_private_answer_in_strict_mode() -> None:
+    """What Siri says passes through Apple: an answer read from mail is held back in strict
+    mode, and given in balanced (docs/siri-design.md)."""
+    from scout.assistant import SIRI_AGENT, SIRI_WITHHELD
+
+    _store()
+    out = {
+        "found": True,
+        "source": 1,
+        "quote": "approved at 48,000 dollars",
+        "answer": "Pat said 48,000 dollars.",
+    }
+
+    async def go(mode: str) -> dict[str, Any]:
+        r: Any = make()
+        r.a.privacy = privacy.configure(mode, FakeModel(out))
+        r.a.tier1 = Decider(
+            {
+                "tool": "recall",
+                "args": {"query": "Q4 budget", "question": "what did Pat say about the Q4 budget"},
+            }
+        )
+        try:
+            got: dict[str, Any] = await r.a.ask(SIRI_AGENT, "what did Pat say about the Q4 budget")
+            return got
+        finally:
+            privacy.configure("balanced")
+
+    assert asyncio.run(go("strict"))["text"] == SIRI_WITHHELD
+    assert asyncio.run(go("balanced"))["text"] == "Pat said 48,000 dollars."

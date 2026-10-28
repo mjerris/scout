@@ -44,13 +44,15 @@ module.exports = () => ({
   plugins: [
     ['expo-secure-store', { faceIDPermission: false }],
     // CallKit (and the Recents call-back forwarder), and with push the PushKit hook that
-    // reports a VoIP push to CallKit before any JavaScript runs. No Siri: Scout is called
-    // from Recents or the app.
+    // reports a VoIP push to CallKit before any JavaScript runs. No SiriKit calling: Scout
+    // is called from Recents or the app (Siri reaches Scout through withSiriIntents).
     ['@signalwire/react-native', { enableCallKit: true, enableVoipPush: PUSH, enableSiri: false }],
     // Alert pushes (pairing requests): the entitlement is set above, so the plugin only
     // registers the app; no sounds or icons of its own.
     ...(PUSH ? [['expo-notifications', { enableBackgroundRemoteNotifications: false }]] : []),
     './plugins/withPodBuildSettings',
     './plugins/withSceneLifecycle',
+    // "Hey Siri, ask Scout" and a few fixed questions (App Intents; docs/siri-design.md).
+    './plugins/withSiriIntents',
   ],
 });

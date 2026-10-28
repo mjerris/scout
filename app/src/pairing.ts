@@ -6,6 +6,7 @@
 import * as SecureStore from 'expo-secure-store';
 
 import { normalizeServer } from './server';
+import { clearSiriKey } from './siri';
 
 export interface Pairing {
   server: string;
@@ -49,6 +50,7 @@ export async function savePairing(p: Pairing): Promise<void> {
 /** Forget the pairing on this phone (Scout keeps the device until `scoutctl phone forget`). */
 export async function clearPairing(): Promise<void> {
   await SecureStore.deleteItemAsync(KEY, OPTIONS);
+  await clearSiriKey(); // Siri's key goes with the pairing
 }
 
 export interface PairLink {

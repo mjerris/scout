@@ -110,3 +110,14 @@ export function pushRegisterPurpose(voip: string, alert: string, env: string): s
 export function ringDeclinePurpose(ring: string): string {
   return `scout:ring-decline|${ring}`;
 }
+
+/**
+ * What a paired phone signs with its pairing key to get its second key, the one Siri uses
+ * with the phone locked (web.LOCKED_KEY_PURPOSE; docs/siri-design.md).
+ */
+export const LOCKED_KEY_PURPOSE = 'scout:locked-key';
+
+/** What Siri signs to ask Scout something (web.ask_purpose): exactly this question. */
+export function askPurpose(text: string): string {
+  return `scout:ask|${text}`;
+}

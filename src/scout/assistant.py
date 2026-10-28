@@ -100,6 +100,10 @@ PHONE_TOOLS = {
 # puts the number on the phone). Email by phone has its own rules (mail_phone.py).
 NOT_BY_PHONE = ("call_start",)
 PHONE_AGENT = "phone"  # phone_service.AGENT: its calls are journaled whole when they end
+# Siri on a paired phone (web.py, /api/phone/ask; docs/siri-design.md). What Siri hears and
+# says passes through Apple, so in strict privacy mode an answer from private data is held back.
+SIRI_AGENT = "siri"
+SIRI_WITHHELD = "That answer comes from your private records, so I won't say it through Siri. Ask me at home."
 # An answer built from these is private: mail and messages, and what's indexed from them.
 _PRIVATE_TOOL = re.compile(
     r"^(?:mail|messages?|contacts?|call)_|^(?:local_search|task_why|tasks_list|github_items|session_ask|session_replies)$"
@@ -2345,6 +2349,8 @@ class Assistant:
         said, tier, private = await self._local_text(text, agent)
         if said is not None:
             said = speech.speak_dates(said or "Done.")
+            if agent == SIRI_AGENT and private and self.privacy.mode == "strict":
+                said = SIRI_WITHHELD
             log.info("phone: answered locally (tier %s): %s -> %s", tier, text, said)
             ledger.record(tier, time.monotonic() - t0, client=agent)
             self.emit("local", text=said, client=agent)
@@ -2389,6 +2395,8 @@ class Assistant:
         self.emit("claude", text=reply, client=agent)
         about = list(refs.clean(self._phone_refs))
         private = any(self._private_tool(n) for n in used)
+        if agent == SIRI_AGENT and private and self.privacy.mode == "strict":
+            reply = SIRI_WITHHELD
         self._spoke("Scout", reply, about, private, text, channel=agent)
         if agent != PHONE_AGENT:  # the phone service keeps the whole call
             self._spawn(self._record_turn(text, reply, agent, False, about=about))

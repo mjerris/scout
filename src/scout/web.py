@@ -557,6 +557,19 @@ def ring_decline_purpose(ring: str) -> str:
     return f"scout:ring-decline|{ring}"
 
 
+# Siri on a paired phone (docs/siri-design.md): the second key is asked for with the
+# pairing key; a question is signed for exactly its text, by a key that may "ask".
+LOCKED_KEY_PURPOSE = "scout:locked-key"
+SIRI_AGENT = "siri"  # assistant.SIRI_AGENT
+SIRI_DEADLINE_S = 20.0  # how long Siri is kept waiting; then the answer comes as a notification
+SIRI_KEEP_S = 600.0  # a late answer is pushed if it's ready within this (assistant.ASK_KEEP_S)
+
+
+def ask_purpose(text: str) -> str:
+    """What a paired phone signs to ask Scout something: exactly this question."""
+    return f"scout:ask|{text}"
+
+
 def _netloc(scheme: str, host: str) -> str:
     host = host.strip().lower()
     for default in (":80",) if scheme == "http" else (":443",) if scheme == "https" else ():
@@ -920,8 +933,14 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise web.HTTPMisdirectedRequest(text="That host name isn't this Scout.")
         return await handler(request)
 
-    # A phone's signed token request: its secret over device|ts|nonce|TOKEN_PURPOSE.
-    token_check = phone_devices.CallCheck(phone_pairing.TOKEN_PURPOSE, 60.0)
+    # A phone's signed token request: its secret over device|ts|nonce|TOKEN_PURPOSE. What
+    # each of its keys may do is [phone] unlocked_key / locked_key.
+    try:
+        abilities = phone_devices.abilities(phone.unlocked_key, phone.locked_key)
+    except ValueError as exc:
+        log.error("web: %s; the locked key may do nothing until it's fixed", exc)
+        abilities = {"unlocked": phone_devices.DEFAULT_ABILITIES["unlocked"], "locked": frozenset()}
+    token_check = phone_devices.CallCheck(phone_pairing.TOKEN_PURPOSE, 60.0, abilities=abilities)
 
     def authed(req: web.Request, allow_query: bool = False) -> bool:
         bearer = req.headers.get("Authorization", "")
@@ -1186,7 +1205,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         with its device secret ("phone <device>"). None for anyone else."""
         if authed(req):
             return "cli" if req.headers.get("Authorization", "").startswith("Bearer ") else "web"
-        verdict = token_check.check(b, address=purpose)
+        verdict = token_check.check(b, address=purpose, need="pair")
         if verdict.ok:
             return f"phone {verdict.device}"
         log.warning("web: a pairing review refused: %s", verdict.reason)
@@ -1268,7 +1287,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 b = await json_body(req)
             except TypeError:
                 raise web.HTTPUnauthorized() from None
-            verdict = token_check.check(b)
+            verdict = token_check.check(b, need="call")
             if not verdict.ok:
                 log.warning("web: a phone's token request refused: %s", verdict.reason)
                 raise web.HTTPUnauthorized()
@@ -1294,7 +1313,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("voip, alert and env must be strings")
         except (ValueError, TypeError):
             raise web.HTTPUnauthorized() from None
-        verdict = token_check.check(b, address=push_register_purpose(voip, alert, env))
+        verdict = token_check.check(b, address=push_register_purpose(voip, alert, env), need="push")
         if not verdict.ok:
             log.warning("web: a push registration refused: %s", verdict.reason)
             raise web.HTTPUnauthorized()
@@ -1319,7 +1338,7 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
                 raise TypeError("ring must be a string")
         except (ValueError, TypeError):
             raise web.HTTPUnauthorized() from None
-        verdict = token_check.check(b, address=ring_decline_purpose(ring))
+        verdict = token_check.check(b, address=ring_decline_purpose(ring), need="ring")
         if not verdict.ok:
             log.warning("web: a ring decline refused: %s", verdict.reason)
             raise web.HTTPUnauthorized()
@@ -1327,6 +1346,88 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
         log.info("web: Scout's call %s on %s", "declined" if got == "declined" else f"not declined ({got})",
                  verdict.device)  # fmt: skip
         return web.json_response({"status": got}, status={"declined": 200, "unknown": 404}.get(got, 409))
+
+    async def api_phone_key(req: web.Request) -> web.StreamResponse:
+        """A paired phone's second key, for Siri with the phone locked: asked for with the
+        pairing key (never the second one), signed LOCKED_KEY_PURPOSE. A new one replaces
+        the old; `abilities` is what it may do."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+        except (ValueError, TypeError):
+            raise web.HTTPUnauthorized() from None
+        verdict = token_check.check(b, address=LOCKED_KEY_PURPOSE, need="")
+        if not verdict.ok or verdict.key != "unlocked":
+            log.warning(
+                "web: a locked-key request refused: %s", verdict.reason or "signed with the locked key"
+            )
+            raise web.HTTPUnauthorized()
+        try:
+            secret = await asyncio.to_thread(phone_devices.new_locked_key, verdict.device)
+        except ValueError:
+            raise web.HTTPUnauthorized() from None
+        log.info("web: device %s has a new locked key", verdict.device)
+        resp = web.json_response(
+            {"status": "ok", "key": "locked", "secret": secret, "abilities": sorted(abilities["locked"])}
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    async def push_late_answer(device: str, text: str) -> None:
+        """Wait for an answer Siri stopped waiting for, and send it to that phone."""
+        result = await assistant.ask(SIRI_AGENT, text, deadline=SIRI_KEEP_S)
+        answer = str(result.get("text") or result.get("error") or "")
+        send = phone_push.sender(phone)
+        if result.get("status") == "pending" or not answer or send is None:
+            log.info("web: a late Siri answer for %s wasn't sent (%s)", device,
+                     "push is off" if send is None else result.get("status"))  # fmt: skip
+            return
+        pushes = phone_push.answer_pushes(
+            await asyncio.to_thread(phone_devices.push_targets), device, text, answer
+        )
+        if not pushes:
+            log.info("web: %s has no notification token for a late Siri answer", device)
+            return
+        await send(pushes)
+
+    async def api_phone_ask(req: web.Request) -> web.StreamResponse:
+        """A question from a paired phone through Siri: {text}, signed for exactly that text
+        by a key that may "ask". Answered as text by Scout's tiers (as on a call), never in
+        the room. Past SIRI_DEADLINE_S it says so, and the answer follows as a notification."""
+        if not origin_ok(req):
+            raise web.HTTPForbidden(text="Cross-origin requests are not allowed.")
+        try:
+            b = await json_body(req)
+            text = b.get("text")
+            if not isinstance(text, str):
+                raise TypeError("text must be a string")
+        except (ValueError, TypeError):
+            raise web.HTTPUnauthorized() from None
+        verdict = token_check.check(b, address=ask_purpose(text), need="ask")
+        if not verdict.ok:
+            log.warning("web: a Siri question refused: %s", verdict.reason)
+            raise web.HTTPUnauthorized()
+        if not text.strip() or len(text) > 2000:
+            return refused(400, "text must be 1 to 2000 characters")
+        log.info("web: Siri on %s asked (%s key)", verdict.device, verdict.key)
+        result = await assistant.ask(SIRI_AGENT, text, deadline=SIRI_DEADLINE_S)
+        if result.get("status") == "pending":
+            push_ok = phone_push.problem(phone) is None and any(
+                t.device == verdict.device and t.alert
+                for t in await asyncio.to_thread(phone_devices.push_targets)
+            )
+            if push_ok:
+                hub.spawn(push_late_answer(verdict.device, text))
+                result = {
+                    "status": "pending",
+                    "text": "Still working on it. I'll send the answer to your phone.",
+                }
+            else:
+                result = {"status": "pending", "text": "Still working on it. Ask me again in a minute."}
+        resp = web.json_response({k: result[k] for k in ("status", "text", "error") if k in result})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     async def api_phone_ring(req: web.Request) -> web.StreamResponse:
         """Ring the phone now with {text} (the web token: `scoutctl phone ring`), whatever
@@ -1575,6 +1676,8 @@ async def start(cfg: WebConfig, assistant: VoiceApp, phone: PhoneConfig | None =
             web.post("/api/phone/ring", api_phone_ring),
             web.post("/api/phone/ring/decline", api_phone_ring_decline),
             web.post("/api/phone/token", api_phone_token),
+            web.post("/api/phone/key", api_phone_key),
+            web.post("/api/phone/ask", api_phone_ask),
         ]
     )
 

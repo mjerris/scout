@@ -5,7 +5,15 @@
 // is open) shows other devices asking to pair, for an Approve or Deny signed the same way. It reaches the
 // Mac at its Tailscale name ([web] public_url, else the Tailscale Serve name,
 // https://<mac>.<tailnet>.ts.net).
-import { PAIR_REVIEW, pairDecidePurpose, pushRegisterPurpose, ringDeclinePurpose, signedFor, tokenRequest } from './sign';
+import {
+  LOCKED_KEY_PURPOSE,
+  PAIR_REVIEW,
+  pairDecidePurpose,
+  pushRegisterPurpose,
+  ringDeclinePurpose,
+  signedFor,
+  tokenRequest,
+} from './sign';
 
 export class ServerError extends Error {
   constructor(
@@ -248,6 +256,21 @@ export class ScoutServer {
     })) as { push?: unknown } | null;
     // Whether Scout can send pushes at all (an APNs key is set up there).
     return { push: d?.push === true };
+  }
+
+  /**
+   * This phone's second key, for Siri with the phone locked (docs/siri-design.md): asked
+   * for with the pairing key; a new one replaces the old. `abilities`: what Scout lets it do.
+   */
+  async lockedKey(): Promise<{ secret: string; abilities: string[] }> {
+    if (!this.me) throw new ServerError('This phone is not paired', 401);
+    const d = (await this.post('/api/phone/key', signedFor(this.me, LOCKED_KEY_PURPOSE))) as {
+      secret?: unknown;
+      abilities?: unknown;
+    } | null;
+    if (typeof d?.secret !== 'string' || !d.secret) throw new ServerError('Scout answered the key request with something unexpected', 502);
+    const abilities = Array.isArray(d.abilities) ? d.abilities.filter((a): a is string => typeof a === 'string') : [];
+    return { secret: d.secret, abilities };
   }
 
   /** Tell Scout the user declined its call (signed for exactly this ring). */

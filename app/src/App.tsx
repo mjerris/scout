@@ -11,6 +11,7 @@ import type { PairLink, Pairing } from './pairing';
 import { PairScreen } from './PairScreen';
 import { registerPush } from './push';
 import { ScoutServer } from './server';
+import { setUpSiri } from './siri';
 import { testFlags } from './testFlags';
 import { useTheme } from './theme';
 import { Button, Muted, Row, Section } from './ui';
@@ -86,8 +87,20 @@ function Main() {
 function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void }) {
   const t = useTheme();
   const [pushError, setPushError] = useState('');
+  const [siri, setSiri] = useState('');
   // Tell Scout where to reach this phone (its calls, pairing requests), on every launch.
   useEffect(() => registerPush(new ScoutServer(pairing.server, pairing), setPushError), [pairing]);
+  // Siri's key, refreshed every launch (src/siri.ts).
+  useEffect(() => {
+    let live = true;
+    setUpSiri(pairing, new ScoutServer(pairing.server, pairing)).then(
+      (can) => live && setSiri(can.includes('ask') ? 'Siri: say "Ask Scout", even with the phone locked.' : "Siri: Scout doesn't take questions from Siri on this phone."),
+      (e: unknown) => live && setSiri(`Siri isn't set up: ${String((e as Error)?.message ?? e)}`),
+    );
+    return () => {
+      live = false;
+    };
+  }, [pairing]);
   return (
     <>
     <PairApprovals pairing={pairing} />
@@ -98,6 +111,7 @@ function Paired({ pairing, onForget }: { pairing: Pairing; onForget: () => void 
       </Text>
       <Muted>Scout at {pairing.server}</Muted>
       {pushError ? <Muted>{pushError}</Muted> : null}
+      {siri ? <Muted>{siri}</Muted> : null}
       <Row>
         <Button testID="forget" title="Forget pairing" onPress={onForget} />
       </Row>

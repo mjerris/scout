@@ -8,8 +8,14 @@ A paired phone holds a device id and a 32-byte secret it got once, when it paire
 where key is the secret (base64url-decoded to its 32 bytes), ts is Unix seconds, nonce is
 fresh per call, and address is the agent address the app dialed ([phone] address).
 
+A phone has two keys (docs/siri-design.md): the pairing secret, which the app reads only
+while the phone is unlocked, and a second one, `locked_secret`, which stays readable after
+the first unlock so Siri can reach Scout with the phone locked. A request signed with the
+second says so ({key: "locked"}). What each key may do is config ([phone] unlocked_key
+and locked_key: ABILITIES).
+
 The registry is state/phone_devices.json (mode 0600, this user only):
-    {device_id: {name, secret, paired_at, revoked, push?}}
+    {device_id: {name, secret, locked_secret?, paired_at, revoked, push?}}
 where push is what the app registered for push (phone_push.py): {voip, alert, env, at},
 its PushKit and APNs device tokens and the APNs environment its build is signed for.
 Forgetting a device deletes its secret and marks it revoked, so a lost phone stops
@@ -40,6 +46,12 @@ from .config import DATA
 PATH = DATA / "state" / "phone_devices.json"
 _DEVICE = re.compile(r"[A-Za-z0-9_-]{4,64}")
 _NONCE = re.compile(r"[A-Za-z0-9_-]{8,128}")
+KEYS = ("unlocked", "locked")
+ABILITIES = ("call", "ask", "push", "pair", "ring")
+DEFAULT_ABILITIES: dict[str, frozenset[str]] = {
+    "unlocked": frozenset(ABILITIES),
+    "locked": frozenset({"ask"}),
+}
 _lock = threading.Lock()
 
 
@@ -91,10 +103,35 @@ def forget(device: str, path: Path | None = None) -> bool:
         d = devices.get(device)
         if d is None:
             return False
-        d.update(secret="", revoked=True, revoked_at=int(time.time()))
+        d.update(secret="", locked_secret="", revoked=True, revoked_at=int(time.time()))
         d.pop("push", None)  # a forgotten phone is never rung or asked again
         _save(devices, path)
     return True
+
+
+def new_locked_key(device: str, path: Path | None = None) -> str:
+    """Give a paired phone a new second key (the old one stops working): its secret."""
+    secret = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    with _lock:
+        devices = load_devices(path)
+        d = devices.get(device)
+        if d is None or d.get("revoked") or not d.get("secret"):
+            raise ValueError("unknown device")
+        d["locked_secret"] = secret
+        _save(devices, path)
+    return secret
+
+
+def abilities(unlocked: list[str], locked: list[str]) -> dict[str, frozenset[str]]:
+    """[phone] unlocked_key and locked_key as CallCheck takes them. ValueError names an
+    ability that isn't one."""
+    out = {}
+    for key, names in (("unlocked", unlocked), ("locked", locked)):
+        wrong = [n for n in names if n not in ABILITIES]
+        if wrong:
+            raise ValueError(f"[phone] {key}_key: {', '.join(wrong)} isn't one of {', '.join(ABILITIES)}")
+        out[key] = frozenset(names)
+    return out
 
 
 _TOKEN = re.compile(r"[0-9a-fA-F]{32,200}")
@@ -174,6 +211,7 @@ def listing(path: Path | None = None) -> list[dict[str, Any]]:
             "name": v.get("name", ""),
             "paired_at": v.get("paired_at"),
             "revoked": bool(v.get("revoked")),
+            "locked_key": bool(v.get("locked_secret")),
             "push": sorted(k for k in ("voip", "alert") if (v.get("push") or {}).get(k)),
         }
         for k, v in load_devices(path).items()
@@ -195,6 +233,7 @@ class Verdict:
     ok: bool
     device: str = ""
     reason: str = ""  # why not, for the log (never the secret)
+    key: str = "unlocked"  # which of the phone's keys signed it
 
 
 class CallCheck:
@@ -202,9 +241,15 @@ class CallCheck:
     twice the allowed clock skew (a nonce older than that fails on its timestamp anyway)."""
 
     def __init__(
-        self, address: str, skew_s: float, path: Path | None = None, nonces: Path | None = None
+        self,
+        address: str,
+        skew_s: float,
+        path: Path | None = None,
+        nonces: Path | None = None,
+        abilities: dict[str, frozenset[str]] | None = None,
     ) -> None:
         self.address = address
+        self.abilities = abilities or DEFAULT_ABILITIES
         self.skew_s = skew_s
         self.path = path
         self.nonces = nonces  # kept on disk, so a restart can't reopen a replay window
@@ -225,10 +270,17 @@ class CallCheck:
             return False
         return bool(d and not d.get("revoked") and d.get("secret"))
 
-    def check(self, uv: dict[str, Any], now: float | None = None, address: str | None = None) -> Verdict:
+    def check(
+        self, uv: dict[str, Any], now: float | None = None, address: str | None = None, need: str = "call"
+    ) -> Verdict:
         """`address`: what this request must be signed over, in place of `self.address`
-        (a purpose naming exactly what it does, e.g. one pairing request and its answer)."""
+        (a purpose naming exactly what it does, e.g. one pairing request and its answer).
+        `need`: the ability (ABILITIES) the key that signed it must have; "" for none, only
+        for what the unlocked key alone may do (Verdict.key says which signed)."""
         now = time.time() if now is None else now
+        key = uv.get("key") or "unlocked"
+        if key not in KEYS:
+            return Verdict(False, reason="no such key")
         device, ts, nonce, sig = (uv.get(k) for k in ("device", "ts", "nonce", "sig"))
         if not isinstance(device, str) or not _DEVICE.fullmatch(device):
             return Verdict(False, reason="no device id")
@@ -247,9 +299,13 @@ class CallCheck:
             return Verdict(False, device, str(exc))
         if d is None:
             return Verdict(False, device, "unknown device")
-        secret = d.get("secret")
-        if d.get("revoked") or not isinstance(secret, str) or not secret:
+        if d.get("revoked") or not d.get("secret"):
             return Verdict(False, device, "device revoked")
+        secret = d.get("secret" if key == "unlocked" else "locked_secret")
+        if not isinstance(secret, str) or not secret:
+            return Verdict(False, device, f"no {key} key")
+        if need and need not in self.abilities.get(key, frozenset()):
+            return Verdict(False, device, f"the {key} key may not {need}", key)
         try:
             want = sign(secret, device, t, nonce, self.address if address is None else address)
         except (binascii.Error, ValueError):
@@ -265,7 +321,7 @@ class CallCheck:
             self._seen[nonce] = wall + 2 * self.skew_s
             if self.nonces is not None:
                 write_private(self.nonces, json.dumps(self._seen))
-        return Verdict(True, device)
+        return Verdict(True, device, key=key)
 
 
 # --- scoutctl phone ...  ----------------------------------------------------------------

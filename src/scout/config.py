@@ -453,6 +453,14 @@ class PhoneConfig:
     ring_after_quiet_min: int = 15
     ring_quiet_hours: str = ""  # "HH:MM-HH:MM": never ring then
     ring_min_gap_min: int = 20  # at most one ring this often
+    # What each of a paired phone's two keys may do (docs/siri-design.md). The pairing key
+    # is readable only while the phone is unlocked; the second key ("locked") stays readable
+    # after the first unlock, so Siri can reach Scout with the phone locked (CarPlay, AirPods).
+    # Abilities: "call" (call Scout), "ask" (a question through Siri: Scout's tiers, as on a
+    # call), "push" (register for push), "pair" (see and answer pairing requests), "ring"
+    # (turn down a ring). Only the unlocked key can get a new locked key.
+    unlocked_key: list[str] = field(default_factory=lambda: ["call", "ask", "push", "pair", "ring"])
+    locked_key: list[str] = field(default_factory=lambda: ["ask"])
 
 
 @dataclass

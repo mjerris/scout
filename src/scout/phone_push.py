@@ -310,3 +310,25 @@ def pair_pushes(targets: Iterable[phone_devices.PushTarget], view: dict[str, Any
         for t in targets
         if t.alert
     ]
+
+
+ANSWER_BODY_MAX = 1500  # characters: an alert's payload must stay under 4 KB
+
+
+def answer_pushes(
+    targets: Iterable[phone_devices.PushTarget], device: str, question: str, answer: str
+) -> list[Push]:
+    """The answer to a question asked through Siri that took too long to wait for, as a
+    notification to the phone that asked (docs/siri-design.md)."""
+    body = answer if len(answer) <= ANSWER_BODY_MAX else answer[: ANSWER_BODY_MAX - 1].rstrip() + "…"
+    payload = {
+        "aps": {
+            "alert": {"title": "Scout", "subtitle": question[:120], "body": body},
+            "sound": "default",
+        }
+    }
+    return [
+        Push(t.alert, t.env, "alert", payload, device=t.device)
+        for t in targets
+        if t.device == device and t.alert
+    ]
