@@ -35,6 +35,7 @@ from . import (
     messages_send,
     notes,
     privacy,
+    pronounce,
     reference,
     refs,
     reminders_mac,
@@ -45,6 +46,7 @@ from . import (
     tasks,
     weather,
 )
+from .config import DATA
 from .mac import ToolError
 
 
@@ -67,6 +69,14 @@ def _obj(props: dict[str, Any], required: list[str] | None = None) -> dict[str, 
 _STR, _INT, _BOOL = {"type": "string"}, {"type": "integer"}, {"type": "boolean"}
 _ADDRESSES = {"type": "array", "items": {"type": "string"}}
 _COMPOSE = _obj({"to": _ADDRESSES, "cc": _ADDRESSES, "subject": _STR, "body": _STR}, ["to"])
+
+
+async def _pronounce_set(a: dict[str, Any]) -> str:
+    try:
+        return pronounce.say_as(DATA / "pronounce.txt", str(a.get("word") or ""), str(a.get("say_as") or ""))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
 
 SHARED: tuple[SharedTool, ...] = (
     SharedTool(
@@ -493,6 +503,18 @@ SHARED = (
         "said what, the gist, and anything asked of the user.",
         _obj({"ref": _STR, "about": _STR}),
         slack_catchup.catch_up,
+    ),
+    SharedTool(
+        "pronounce_set",
+        "Fix how Scout's voice says a word or name, from now on: 'you're saying Andrey wrong', "
+        "'it's pronounced AHN-dray'. word: as it's written in what Scout said (the spelling the "
+        "voice got wrong, e.g. 'Andrey' from a Slack name); say_as: a spelling the voice reads "
+        "right ('Andre', 'Ahn-dray', 'Tar-lee'); empty say_as undoes an earlier fix. The user "
+        "hears no spelling, only the sound: if both sound the same to the transcript, ask which "
+        "syllable is stressed or what it rhymes with. Takes effect at once: say the word in your "
+        "reply so the user can check it.",
+        _obj({"word": _STR, "say_as": _STR}, ["word"]),
+        _pronounce_set,
     ),
     SharedTool(
         "send_link",

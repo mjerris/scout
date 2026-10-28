@@ -147,7 +147,9 @@ spk ←┘   (WebRTC AEC3, or Apple voice processing)         └← Kokoro TTS 
 - **Pronunciation:** regex rules fix how words are spoken ("config.toml" →
   "config dot toml") and common mishearings ("Claud" → "Claude"). Built-in
   defaults are in `src/scout/pronounce_default.txt`; add your own in
-  `pronounce.txt` in the project root (`TTS|STT  pattern  replacement`).
+  `pronounce.txt` in Scout's data folder (`TTS|STT  pattern  replacement`), read
+  again whenever it changes. Or just tell Scout: "you're saying Andre wrong, it's
+  AHN-dray" adds the rule for you (the `pronounce_set` tool).
   Ticket, issue, PR, case, order and similar numbers, and bare integers of five or
   more digits, are said digit by digit ("ticket 61723" → "ticket 6 1 7 2 3", "#117" →
   "number 1 1 7"); money, quantities ("61,000", "12000 steps"), years, times and short

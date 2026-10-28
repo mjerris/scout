@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 import pytest
 
 from scout.floor import Floor
-from scout.pronounce import Pronouncer, parse
+from scout.pronounce import Pronouncer, parse, say_as
 from scout.speech import split_wait
 
 T = TypeVar("T")
@@ -133,3 +133,21 @@ def test_web_hosts_never_all_interfaces(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(web, "_tailscale_ip", no_tailscale)
     hosts = asyncio.run(web.resolve_hosts(["localhost", "lan", "tailscale", "10.0.0.5"]))
     assert hosts == ["127.0.0.1", "10.0.0.5"]
+
+
+def test_a_name_said_wrong_is_fixed_at_once(tmp_path: Path) -> None:
+    """pronounce_set: the rule is written and the running Pronouncer picks it up."""
+    f = tmp_path / "pronounce.txt"
+    p = Pronouncer(f)
+    assert p.tts("Nina wrote") == "Nina wrote"
+    assert say_as(f, "Nina", "Nee-na") == "From now on Scout says Nina as Nee-na."
+    assert p.tts("Nina wrote to Nina's team") == "Nee-na wrote to Nee-na's team"
+    say_as(f, "nina", "Neena")  # replaces the rule for the word, whatever its case
+    assert p.tts("Nina wrote") == "Neena wrote"
+    assert f.read_text().count("TTS") == 1
+    say_as(f, "Nina", "")  # undone
+    assert p.tts("Nina wrote") == "Nina wrote"
+    with pytest.raises(ValueError):
+        say_as(f, "Nina'; rm -rf", "x")
+    with pytest.raises(ValueError):
+        say_as(f, "Nina", r"\1")

@@ -93,6 +93,9 @@ _PERSONAL = re.compile(
 _CARRY_ON = {"to", "from", "for", "at", "in", "on", "near", "with", "by", "between", "until", "via", "into"}
 # Scout's question that a plain statement answers: "Where do you want to drive to?"
 _WH = {"what", "what's", "when", "where", "which", "who", "whom", "whose", "how"}
+# "Can you spell out how it sounds?" asks for words, not a yes: a statement answers it.
+_ASK_YOU = {"can you", "could you", "would you", "will you"}
+_TELL = {"spell", "say", "tell", "describe", "explain", "give", "repeat", "show", "name", "list"}
 MAX_WORDS = 25  # longer than this without the wake word is talk, not a follow-up
 FRAGMENT_WORDS = 4  # a fragment this short continues the answer ("for tomorrow")
 TOPIC_FRAGMENT_WORDS = 7  # ...and up to this long if it shares a word with the answer
@@ -124,18 +127,30 @@ def _vocative(text: str, wake: set[str], start_only: bool = False) -> str | None
     return None
 
 
+def _question(answer: str) -> str | None:
+    """The question the answer ended by asking ("Want me to send it?"), or None. It may
+    have one sentence after it: "Can you spell it? Then I'll fix it." (heard live)."""
+    for sentence in reversed(_SENTENCE.split(answer.strip())[-2:]):
+        if sentence.rstrip().rstrip("\"'\u201d\u2019)").endswith("?"):
+            return sentence
+    return None
+
+
 def _asked(answer: str) -> bool:
-    """Did the answer end by asking something ("Want me to send it?")."""
-    return answer.rstrip().endswith("?")
+    """Did the answer end by asking something."""
+    return _question(answer) is not None
 
 
 def _asked_what(answer: str) -> bool:
-    """Did the answer end with a question a statement answers ("Where to?"), not a yes/no."""
-    if not _asked(answer):
+    """Did the answer end with a question a statement answers ("Where to?", "Can you spell
+    out how it should sound?"), not a yes/no."""
+    asked = _question(answer)
+    ws = _words(asked or "")
+    if not ws:
         return False
-    last = _SENTENCE.split(answer.strip())[-1]
-    ws = _words(last)
-    return bool(ws) and (ws[0] in _WH or any(w in _WH for w in ws[:3]))
+    if ws[0] in _WH or any(w in _WH for w in ws[:3]):
+        return True
+    return " ".join(ws[:2]) in _ASK_YOU and len(ws) > 2 and ws[2] in _TELL
 
 
 def _topic(ws: list[str], answer: str) -> bool:

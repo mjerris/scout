@@ -288,3 +288,23 @@ def test_an_address_answering_where_to_is_not_said_to_the_city() -> None:
     assert addressed.reason("Brian, can you grab the door?", WHERE_TO) == "said to Brian"
     assert addressed.reason("Good call, Brian.", WEATHER) == "said to Brian"
     assert addressed.reason("The kids are at school today.", OFFER) is not None  # a yes/no question
+
+
+SPELL_IT = (
+    'Both versions came through to me as "Nina," so I can\'t hear the difference. Can you spell '
+    'out how it should sound, like "NEE-na" or "NYE-na"? Then I\'ll get the pronunciation fixed.'
+)
+
+
+def test_answers_to_a_question_before_a_closing_sentence_count() -> None:
+    """Heard live: Scout asked how a name sounds, then added a sentence, and every answer
+    was dropped as a statement."""
+    assert addressed.reason("That time you said it right.", SPELL_IT) is None
+    said_wrong = (
+        "When you were talking about the person in the Slack conversation just previously, you said it wrong."
+    )
+    assert addressed.reason(said_wrong, SPELL_IT) is None
+    assert addressed.reason("Nee-na, like the ship.", SPELL_IT) is None
+    assert addressed.reason("Brian, hang on a sec.", SPELL_IT) == "said to Brian"
+    assert addressed.reason("Sure.", "Want me to send it? I can wait.") is None  # a yes, one sentence on
+    assert addressed.reason("The kids are at school today.", "Want me to send it? I can wait.") is not None
